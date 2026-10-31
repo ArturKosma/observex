@@ -137,7 +137,7 @@ void LogPanel::drawToolbar() {
 
 void LogPanel::drawTable() {
     if (entries_.empty()) {
-        ImGui::TextDisabled("No entries yet. Turn on Sources > Demo source to see a fake live feed.");
+        ImGui::TextDisabled("No entries yet.");
         return;
     }
 

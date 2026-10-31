@@ -1,16 +1,20 @@
 #pragma once
 
+#include "app/CapturePanel.h"
 #include "app/LogPanel.h"
-#include "core/DemoSource.h"
+#include "app/MainWindow.h"
 #include "core/LogStore.h"
+#include "engine/Gpu.h"
+#include "engine/Pipeline.h"
+#include "engine/PreviewChannel.h"
 
+#include <memory>
 #include <string_view>
-
-struct GLFWwindow;
 
 namespace observex {
 
-// Owns the window, the ImGui context, the log store and the panels.
+// Owns everything: the log, the UI (window, GPU device, ImGui, panels) and the pipeline.
+// The UI thread runs here; the pipeline runs on its own thread.
 class App {
 public:
     App();
@@ -19,29 +23,36 @@ public:
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
-    // Opens the window and runs until it is closed. Returns the process exit code.
+    // Runs until the window is closed. Returns the process exit code.
     int run();
 
 private:
-    bool init();
+    void init();
     void shutdown();
+
+    void startPipeline();
+    void stopPipeline();
 
     void drawFrame();
     void drawMenuBar();
+    void dockPanelsOnFirstRun(unsigned dockspace);
 
-    // Adds an entry from observex itself (source "observex") to the store.
+    // Adds an entry from observex itself (source "app") to the log.
     void log(LogLevel level, std::string_view message);
 
-    GLFWwindow* window_ = nullptr;
-    bool glfwReady_ = false;
-    bool imguiReady_ = false;
-
-    // Declared in this order so the demo thread stops before the store it writes to is destroyed.
-    LogStore store_;
-    DemoSource demo_;
+    LogStore log_;
+    CaptureTarget target_;
+    GpuDevice gpu_; // The UI's device, on the same GPU as the captured monitor so the preview can be shared.
+    std::unique_ptr<MainWindow> window_;
+    Pipeline pipeline_;
+    std::unique_ptr<PreviewReader> preview_;
     LogPanel logPanel_;
+    CapturePanel capturePanel_;
 
-    bool showLogPanel_ = true;
+    bool imguiReady_ = false;
+    bool restartRequested_ = false;
+    bool showCapture_ = true;
+    bool showLog_ = true;
     bool showImGuiDemo_ = false;
 };
 

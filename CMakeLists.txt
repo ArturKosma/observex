@@ -1,9 +1,13 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(observex
-    VERSION 0.1.0
-    DESCRIPTION "Desktop observability and log viewer"
-    LANGUAGES C CXX)
+    VERSION 0.2.0
+    DESCRIPTION "Reads the screen in real time and reacts like a human player"
+    LANGUAGES CXX)
+
+if(NOT WIN32)
+    message(FATAL_ERROR "observex is Windows-only: it uses DXGI Desktop Duplication and Direct3D 11.")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,24 +28,33 @@ else()
     target_compile_options(observex_warnings INTERFACE -Wall -Wextra -Wpedantic)
 endif()
 
-# Core: data model and log sources. No UI or windowing code, so it is easy to test.
-find_package(Threads REQUIRED)
+# Core: platform-free building blocks (log store, lock-free hand-over, statistics). Unit tested.
 add_library(observex_core STATIC
-    src/core/DemoSource.cpp
     src/core/LogEntry.cpp
     src/core/LogFilter.cpp
     src/core/LogStore.cpp)
 target_include_directories(observex_core PUBLIC src)
-target_link_libraries(observex_core
-    PUBLIC Threads::Threads
+target_link_libraries(observex_core PRIVATE observex_warnings)
+
+# Engine: the real-time loop (screen capture on its own thread and GPU device). No UI code.
+add_library(observex_engine STATIC
+    src/engine/Gpu.cpp
+    src/engine/Pipeline.cpp
+    src/engine/PreviewChannel.cpp
+    src/engine/ScreenCapture.cpp)
+target_compile_definitions(observex_engine PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_link_libraries(observex_engine
+    PUBLIC observex_core d3d11 dxgi
     PRIVATE observex_warnings)
 
-# App: the desktop window and its ImGui panels.
+# App: the window and its ImGui panels.
 add_executable(observex
     src/app/App.cpp
+    src/app/CapturePanel.cpp
     src/app/LogPanel.cpp
+    src/app/MainWindow.cpp
     src/app/main.cpp)
-target_link_libraries(observex PRIVATE observex_core imgui observex_warnings)
+target_link_libraries(observex PRIVATE observex_engine imgui observex_warnings)
 target_compile_definitions(observex PRIVATE OBSERVEX_VERSION="${PROJECT_VERSION}")
 
 # Debug builds keep a console window for stderr; other configs are a plain windowed app.
@@ -57,11 +70,12 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT observex)
 if(OBSERVEX_BUILD_TESTS)
     enable_testing()
     add_executable(observex_tests
-        tests/DemoSourceTests.cpp
         tests/LogEntryTests.cpp
         tests/LogFilterTests.cpp
         tests/LogStoreTests.cpp
+        tests/StatWindowTests.cpp
         tests/TextTests.cpp
+        tests/TripleBufferTests.cpp
         tests/test_main.cpp)
     target_link_libraries(observex_tests PRIVATE observex_core doctest::doctest observex_warnings)
     add_test(NAME observex_tests COMMAND observex_tests)
