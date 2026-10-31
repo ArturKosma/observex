@@ -47,6 +47,11 @@ about 0.1 ms of CPU work per image.
 Not built yet: recognise (find things in the image), react (mouse and keyboard), and the knowledge file (what to look
 for and how to react, saved and loaded).
 
+**Next: the training loop.** The first target game is Lineage 2, and the first thing to recognise is monsters. The
+agreed plan (record, propose, review, train, detect live; full colour; single frames plus tracking; build order and
+open questions) is in [docs/training-loop.md](docs/training-loop.md). Read it before any work on recording,
+labelling, training or recognition, and keep its status and decisions current.
+
 ## Architecture
 
 Two threads, each with its own Direct3D 11 device on the GPU that drives the primary monitor (observex lists and
@@ -71,8 +76,9 @@ it on the same screen. Capture interruptions (fullscreen switch, UAC prompt, loc
 pipeline thread. The picker captures the screens itself only while it is shown (on the UI device, never waiting), and
 not the observed one, whose miniature reuses the observed image.
 
-Planned next, inside `engine/`, called from the pipeline loop where `Pipeline::run` marks the spot: a recogniser (GPU
-compute on the image, reading back only small results), a reactor (`SendInput`), and a knowledge file.
+Planned next, inside `engine/`, called from the pipeline loop where `Pipeline::run` marks the spot: a recogniser (a
+TensorRT detector reading the captured texture through CUDA, plus a tracker, reading back only the boxes; see
+[docs/training-loop.md](docs/training-loop.md)), a reactor (`SendInput`), and a knowledge file.
 
 ## What speed means in practice
 
@@ -118,6 +124,7 @@ Configuring, building and running the tests and the bench here is fine. Do not l
 - `assets/`: the logo (`logo.svg`, `logo.png`) and the app icon (`observex.ico`), all made by `tools/make_logo.py`.
   Change the logo there and rerun it.
 - `tests/`: doctest tests for `src/core`. Add tests with any change to core.
+- `docs/`: plans that span many sessions. `training-loop.md` is how observex learns to recognise things.
 - `cmake/Dependencies.cmake`: Dear ImGui and doctest via FetchContent, and the Inter font files. Pin every dependency
   to a release and its SHA256.
 

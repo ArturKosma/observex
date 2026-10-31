@@ -85,11 +85,14 @@ rests for the picture. The snapshot shows your real screens.
 | `bench/` | The headless capture benchmark. |
 | `assets/` | Logo and app icon, made by `tools/make_logo.py`. |
 | `tests/` | doctest unit tests for `src/core`. |
+| `docs/` | Longer plans, such as [the training loop](docs/training-loop.md). |
 | `cmake/Dependencies.cmake` | Third-party libraries and their pinned versions. |
 
 ## Next steps
 
-- Recognise: find shapes, UI elements and buttons in each image on the GPU, reading back only the results.
+- Learn to recognise: record play, review what observex found, train, repeat. First target: monsters in
+  Lineage 2. The plan is in [docs/training-loop.md](docs/training-loop.md).
+- Recognise live: run the trained detector on every captured image on the GPU, reading back only the results.
 - React: press keys and click the mouse in response.
 - Knowledge: save what observex learned (what to look for, how to react) and load it on start.
 
