@@ -39,10 +39,11 @@ ctest --preset release
 ```
 
 ```bash
-build/vs2022/bin/Release/observex.exe
+./observex.exe
 ```
 
-Use `--preset debug` for a debug build; it keeps a console window and uses the Direct3D debug layer when installed.
+The Release build writes `observex.exe` straight into the project folder. Use `--preset debug` for a debug build
+(in `build/vs2022/bin/Debug/`); it keeps a console window and uses the Direct3D debug layer when installed.
 You can also open the folder in Visual Studio (it reads `CMakePresets.json`), or open `build/vs2022/observex.sln`
 after configuring.
 

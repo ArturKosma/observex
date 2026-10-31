@@ -71,7 +71,8 @@ Configuring, building, running the tests and launching the app here is fine.
 - Configure: `cmake --preset vs2022` (Visual Studio 2022 generator, output in `build/vs2022`)
 - Build: `cmake --build --preset debug` (or `release`)
 - Test: `ctest --preset debug`
-- Run: `build/vs2022/bin/Release/observex.exe` (use Release to judge speed)
+- Run: `observex.exe` in the project folder. The Release build writes it there (gitignored); use Release to judge
+  speed. The Debug build stays in `build/vs2022/bin/Debug/`.
 
 ## Layout
 

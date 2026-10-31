@@ -58,7 +58,9 @@ target_link_libraries(observex PRIVATE observex_engine imgui observex_warnings)
 target_compile_definitions(observex PRIVATE OBSERVEX_VERSION="${PROJECT_VERSION}")
 
 # Debug builds keep a console window for stderr; other configs are a plain windowed app.
+# The Release build goes straight into the project folder, so C:\_ai\observex\observex.exe is always the newest.
 set_target_properties(observex PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}
     WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>
     VS_DEBUGGER_WORKING_DIRECTORY $<TARGET_FILE_DIR:observex>)
 if(MSVC)
