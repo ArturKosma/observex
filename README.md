@@ -15,8 +15,9 @@ C++20, Direct3D 11, DXGI Desktop Duplication, [Dear ImGui](https://github.com/oc
 
 Screen capture works; recognising and reacting are next.
 
-- **Observer**: one button that shows live miniatures of every screen, arranged as on your desktop. Click one and
-  observex watches it; the window shows that screen live. F3 shows the capture numbers.
+- **Screen button**: shows which screen observex is watching ("Observing Odyssey G61SH") and opens live miniatures
+  of every screen, arranged as on your desktop and labelled with each monitor's name. Click one and observex watches
+  it; the window shows that screen live. F3 shows the capture numbers.
 - **Capture**: every new image of the observed screen, kept on the GPU. On a 240 Hz monitor it captures every refresh
   (about 240 images per second) and has the image 0.05 ms after the screen updates, with about 0.1 ms of CPU work
   per image.
@@ -62,13 +63,25 @@ updates, latency and work per image once a second. To give capture something to 
 pixel window in the screen's corner every refresh, like a game would (`--no-pulse` turns that off). `--no-preview`
 leaves out the copy the UI makes to show the screen.
 
+## UI snapshots
+
+To check how the UI looks without the window appearing or taking focus, snapshot mode draws it in a hidden window,
+plays some clicks, and saves a PNG:
+
+```bash
+./observex.exe --snapshot ui.png --click 1020 540 --click 120 33 --mouse 300 200
+```
+
+Each `--click X Y` (window pixels) happens about 0.6 s after the one before, and `--mouse X Y` is where the mouse
+rests for the picture. The snapshot shows your real screens.
+
 ## Layout
 
 | Path | What it holds |
 | --- | --- |
 | `src/core/` | Platform-free building blocks: lock-free hand-over, statistics. Unit tested. |
 | `src/engine/` | The real-time pipeline: GPU setup, screen capture, preview hand-over to the UI. No UI code. |
-| `src/app/` | The window and UI: main window, theme, screen picker, screen view. |
+| `src/app/` | The window and UI: main window, theme, screen picker, screen view, UI snapshots. |
 | `bench/` | The headless capture benchmark. |
 | `assets/` | Logo and app icon, made by `tools/make_logo.py`. |
 | `tests/` | doctest unit tests for `src/core`. |

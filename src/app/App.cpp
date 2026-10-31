@@ -1,10 +1,13 @@
 #include "app/App.h"
 
+#include "app/Snapshot.h"
+
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <exception>
@@ -18,6 +21,7 @@ constexpr ImGuiWindowFlags kFixedWindow = ImGuiWindowFlags_NoDecoration | ImGuiW
                                           ImGuiWindowFlags_NoScrollWithMouse;
 constexpr char kPickerPopup[] = "screens";
 constexpr char kChooseText[] = "Choose a screen to observe";
+constexpr int kSnapshotStepFrames = 36; // Snapshot frames are 16 ms apart, so each step gets about 0.6 s.
 
 void centredText(const char* text, ImU32 color, float y) {
     const float width = ImGui::CalcTextSize(text).x;
@@ -25,6 +29,74 @@ void centredText(const char* text, ImU32 color, float y) {
     ImGui::PushStyleColor(ImGuiCol_Text, color);
     ImGui::TextUnformatted(text);
     ImGui::PopStyleColor();
+}
+
+// A button that plainly opens a list: a monitor icon, an optional muted caption, the current choice in
+// bold, and an arrow that points up while the list is open. Returns true when clicked.
+bool screenButton(const char* caption, const char* text, bool open, const theme::Fonts& fonts, float dpi) {
+    const float height = std::round(34.0f * dpi);
+    const float padding = std::round(12.0f * dpi);
+    const float iconWidth = std::round(16.0f * dpi);
+    const float gap = std::round(9.0f * dpi);
+    const float arrowWidth = std::round(9.0f * dpi);
+    const float stroke = std::round(1.5f * dpi * 2.0f) * 0.5f;
+
+    const float fontSize = ImGui::GetFontSize();
+    const float captionWidth = caption != nullptr ? ImGui::CalcTextSize(caption).x + std::round(5.0f * dpi) : 0.0f;
+    const float textWidth = fonts.medium->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text).x;
+    const float width = padding + iconWidth + gap + captionWidth + textWidth + gap + arrowWidth + padding;
+
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton("##screenButton", ImVec2(std::round(width), height));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    const ImVec2 max = ImGui::GetItemRectMax();
+    const bool lit = hovered || open;
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const float rounding = 8.0f * dpi;
+    drawList->AddRectFilled(min, max,
+                            held || open ? theme::kSurfaceActive
+                            : hovered    ? theme::kSurfaceHover
+                                         : theme::kSurface,
+                            rounding);
+    drawList->AddRect(min, max,
+                      open      ? theme::kAccent
+                      : hovered ? theme::kBorderHover
+                                : theme::kBorder,
+                      rounding, 0, 1.0f);
+
+    // Monitor icon: a screen on a short stand.
+    const float middle = std::round((min.y + max.y) * 0.5f);
+    const ImU32 iconColor = lit ? theme::kText : theme::kTextMuted;
+    float x = min.x + padding;
+    const float iconMid = x + iconWidth * 0.5f;
+    drawList->AddRect(ImVec2(x, middle - std::round(7.0f * dpi)),
+                      ImVec2(x + iconWidth, middle + std::round(4.0f * dpi)), iconColor, 2.0f * dpi, 0, stroke);
+    drawList->AddLine(ImVec2(iconMid, middle + std::round(4.0f * dpi)),
+                      ImVec2(iconMid, middle + std::round(7.0f * dpi)), iconColor, stroke);
+    drawList->AddLine(ImVec2(iconMid - std::round(4.0f * dpi), middle + std::round(7.0f * dpi)),
+                      ImVec2(iconMid + std::round(4.0f * dpi), middle + std::round(7.0f * dpi)), iconColor, stroke);
+    x += iconWidth + gap;
+
+    const float textY = std::round(middle - fontSize * 0.5f);
+    if (caption != nullptr) {
+        drawList->AddText(ImGui::GetFont(), fontSize, ImVec2(x, textY), theme::kTextMuted, caption);
+        x += captionWidth;
+    }
+    drawList->AddText(fonts.medium, fontSize, ImVec2(x, textY), theme::kText, text);
+    x += textWidth + gap;
+
+    // Arrow: down while closed, up while the list is open.
+    const float tip = std::round(arrowWidth * 0.5f) * (open ? -1.0f : 1.0f);
+    drawList->PathLineTo(ImVec2(x, middle - tip * 0.5f));
+    drawList->PathLineTo(ImVec2(x + arrowWidth * 0.5f, middle + tip * 0.5f));
+    drawList->PathLineTo(ImVec2(x + arrowWidth, middle - tip * 0.5f));
+    drawList->PathStroke(iconColor, 0, stroke);
+    return clicked;
 }
 
 } // namespace
@@ -37,7 +109,11 @@ int App::run() {
     try {
         init();
     } catch (const std::exception& e) {
-        MessageBoxA(nullptr, e.what(), "observex could not start", MB_ICONERROR | MB_OK);
+        if (snapshot_) {
+            std::fprintf(stderr, "observex could not start: %s\n", e.what());
+        } else {
+            MessageBoxA(nullptr, e.what(), "observex could not start", MB_ICONERROR | MB_OK);
+        }
         shutdown();
         return 1;
     }
@@ -62,6 +138,7 @@ int App::run() {
             observedImage_->imageCopied();
         }
 
+        const bool saveSnapshot = snapshot_ && playSnapshot();
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -70,7 +147,21 @@ int App::run() {
 
         window_->bindBackBuffer();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        window_->present();
+        if (saveSnapshot) {
+            try {
+                savePng(gpu_.device.Get(), gpu_.context.Get(), window_->backBuffer().Get(), snapshot_->path.c_str());
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "Could not save the snapshot: %s\n", e.what());
+                shutdown();
+                return 1;
+            }
+            break;
+        }
+        if (snapshot_) {
+            Sleep(16); // Hidden: nothing to present.
+        } else {
+            window_->present();
+        }
         picker_->endFrame(); // Only after presenting: the frame drew its miniatures.
     }
 
@@ -85,7 +176,7 @@ void App::init() {
 
     gpuAdapter_ = findPrimaryGpu();
     gpu_ = createGpuDevice(gpuAdapter_.Get());
-    window_ = std::make_unique<MainWindow>(L"observex", gpu_.device.Get(), dpiScale_);
+    window_ = std::make_unique<MainWindow>(L"observex", gpu_.device.Get(), dpiScale_, !snapshot_);
     picker_ = std::make_unique<ScreenPicker>(gpu_.device.Get(), gpuAdapter_.Get());
 
     IMGUI_CHECKVERSION();
@@ -93,6 +184,9 @@ void App::init() {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr; // The layout is fixed; nothing to remember between runs.
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    if (snapshot_) {
+        io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange; // Never touch the real cursor.
+    }
     fonts_ = theme::apply(dpiScale_);
 
     ImGui_ImplWin32_Init(window_->handle());
@@ -147,6 +241,32 @@ void App::observeAgain() {
     observed_.reset();
 }
 
+bool App::playSnapshot() {
+    // Step 0 lets the UI settle, then one step per click, then the mouse rests and the last frame is saved.
+    ImGuiIO& io = ImGui::GetIO();
+    const int step = snapshotFrame_ / kSnapshotStepFrames - 1;
+    const int frame = snapshotFrame_ % kSnapshotStepFrames;
+    ++snapshotFrame_;
+    const int clicks = static_cast<int>(snapshot_->clicks.size());
+    if (step < 0) {
+        return false;
+    }
+    if (step < clicks) {
+        const ImVec2 click = snapshot_->clicks[static_cast<std::size_t>(step)];
+        if (frame == 0) {
+            io.AddMousePosEvent(click.x, click.y);
+        } else if (frame == 1 || frame == 2) {
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, frame == 1);
+        }
+        return false;
+    }
+    if (frame == 0) {
+        const ImVec2 mouse = snapshot_->mouse.value_or(ImVec2(-FLT_MAX, -FLT_MAX));
+        io.AddMousePosEvent(mouse.x, mouse.y);
+    }
+    return frame == kSnapshotStepFrames - 1;
+}
+
 void App::drawFrame() {
     if (ImGui::IsKeyPressed(ImGuiKey_F3, false)) {
         showStats_ = !showStats_;
@@ -176,31 +296,22 @@ void App::drawTopBar(float height) {
     ImGui::Begin("##bar", nullptr, kFixedWindow);
     ImGui::PopStyleVar();
 
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
     const ImVec2 pos = ImGui::GetWindowPos();
-    const float margin = std::round(14.0f * dpiScale_);
-    const float logoSize = std::round(30.0f * dpiScale_);
-    theme::drawLogo(drawList, ImVec2(pos.x + margin + logoSize * 0.5f, pos.y + height * 0.5f), logoSize);
-    drawList->AddRectFilled(ImVec2(pos.x, pos.y + height - 1.0f), ImVec2(pos.x + viewport->Size.x, pos.y + height),
-                            theme::kBorder);
+    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(pos.x, pos.y + height - 1.0f),
+                                              ImVec2(pos.x + viewport->Size.x, pos.y + height), theme::kBorder);
 
-    // The Observer button opens the miniatures; it stays highlighted while they are open.
-    ImGui::PushFont(fonts_.medium, 0.0f);
-    ImGui::SetCursorScreenPos(ImVec2(pos.x + margin + logoSize + 4.0f * dpiScale_,
-                                     pos.y + std::round((height - ImGui::GetFrameHeight()) * 0.5f)));
+    // The screen button names the observed screen and opens the miniatures to pick another.
+    const float margin = std::round(12.0f * dpiScale_);
+    ImGui::SetCursorScreenPos(ImVec2(pos.x + margin, pos.y + std::round((height - 34.0f * dpiScale_) * 0.5f)));
     const bool pickerOpen = ImGui::IsPopupOpen(kPickerPopup);
-    if (pickerOpen) {
-        ImGui::PushStyleColor(ImGuiCol_Button, theme::kSurfaceActive);
-    }
-    if (ImGui::Button("Observer")) {
+    const bool clicked = observed_
+                             ? screenButton("Observing", observed_->monitor.c_str(), pickerOpen, fonts_, dpiScale_)
+                             : screenButton(nullptr, "Choose a screen", pickerOpen, fonts_, dpiScale_);
+    if (clicked) {
         ImGui::OpenPopup(kPickerPopup);
     }
-    if (pickerOpen) {
-        ImGui::PopStyleColor();
-    }
-    ImGui::PopFont();
 
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 8.0f * dpiScale_));
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 6.0f * dpiScale_));
     if (ImGui::BeginPopup(kPickerPopup)) {
         ImGui::TextDisabled(kChooseText);
         ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));

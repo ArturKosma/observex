@@ -31,7 +31,7 @@ void styleTitleBar(HWND hwnd) {
 
 } // namespace
 
-MainWindow::MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScale) : device_(device) {
+MainWindow::MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScale, bool visible) : device_(device) {
     device_->GetImmediateContext(&context_);
 
     const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -74,8 +74,10 @@ MainWindow::MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScal
     factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
     createBackBufferView();
 
-    ShowWindow(hwnd_, SW_SHOWDEFAULT);
-    UpdateWindow(hwnd_);
+    if (visible) {
+        ShowWindow(hwnd_, SW_SHOWDEFAULT);
+        UpdateWindow(hwnd_);
+    }
 }
 
 MainWindow::~MainWindow() {
@@ -125,10 +127,14 @@ void MainWindow::present() {
     swapChain_->Present(1, 0);
 }
 
+ComPtr<ID3D11Texture2D> MainWindow::backBuffer() const {
+    ComPtr<ID3D11Texture2D> texture;
+    check(swapChain_->GetBuffer(0, IID_PPV_ARGS(&texture)), "IDXGISwapChain::GetBuffer");
+    return texture;
+}
+
 void MainWindow::createBackBufferView() {
-    ComPtr<ID3D11Texture2D> backBuffer;
-    check(swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer)), "IDXGISwapChain::GetBuffer");
-    check(device_->CreateRenderTargetView(backBuffer.Get(), nullptr, &backBufferView_), "CreateRenderTargetView");
+    check(device_->CreateRenderTargetView(backBuffer().Get(), nullptr, &backBufferView_), "CreateRenderTargetView");
 }
 
 LRESULT CALLBACK MainWindow::windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {

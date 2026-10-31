@@ -7,8 +7,9 @@ namespace observex {
 // The app's top-level Win32 window and its swap chain.
 class MainWindow {
 public:
-    // Creates and shows the window. `dpiScale` sizes it for the monitor. Throws on failure.
-    MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScale);
+    // Creates the window, and shows it unless `visible` is false (snapshot mode). `dpiScale` sizes it for
+    // the monitor. Throws on failure.
+    MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScale, bool visible);
     ~MainWindow();
 
     MainWindow(const MainWindow&) = delete;
@@ -27,6 +28,9 @@ public:
 
     // Shows the frame, synced to the monitor refresh.
     void present();
+
+    // The image being drawn this frame (for snapshots).
+    ComPtr<ID3D11Texture2D> backBuffer() const;
 
 private:
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);

@@ -162,7 +162,7 @@ int main(int argc, char** argv) {
         int chosen = options.screen;
         for (std::size_t i = 0; i < screens.size(); ++i) {
             const Screen& screen = screens[i];
-            std::printf("  %zu  %-14s %5ld x %-5ld %4u Hz%s\n", i, screen.name.c_str(),
+            std::printf("  %zu  %-14s %-24s %5ld x %-5ld %4u Hz%s\n", i, screen.name.c_str(), screen.monitor.c_str(),
                         screen.bounds.right - screen.bounds.left, screen.bounds.bottom - screen.bounds.top,
                         screen.refreshHz, screen.primary ? "  (primary)" : "");
             if (options.screen < 0 && screen.primary) {
@@ -191,8 +191,9 @@ int main(int argc, char** argv) {
                 pulse = std::jthread([&](std::stop_token stop) { runPulse(gpu.Get(), screen.bounds, stop); });
             }
 
-            std::printf("\nObserving %s for %d s (pulse %s, preview %s)\n", screen.name.c_str(), options.seconds,
-                        options.pulse ? "on" : "off", options.preview ? "on" : "off");
+            std::printf("\nObserving %s (%s) for %d s (pulse %s, preview %s)\n", screen.monitor.c_str(),
+                        screen.name.c_str(), options.seconds, options.pulse ? "on" : "off",
+                        options.preview ? "on" : "off");
             std::printf("  images/s  merged/s  latency avg / max ms  work avg / max ms\n");
 
             using Clock = std::chrono::steady_clock;

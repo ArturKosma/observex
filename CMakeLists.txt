@@ -51,10 +51,11 @@ add_executable(observex
     src/app/MainWindow.cpp
     src/app/ScreenImage.cpp
     src/app/ScreenPicker.cpp
+    src/app/Snapshot.cpp
     src/app/Theme.cpp
     src/app/main.cpp
     ${CMAKE_BINARY_DIR}/observex.rc)
-target_link_libraries(observex PRIVATE observex_engine imgui dwmapi observex_warnings)
+target_link_libraries(observex PRIVATE observex_engine imgui dwmapi windowscodecs observex_warnings)
 
 # Debug builds keep a console window for stderr; other configs are a plain windowed app.
 # The Release build goes straight into the project folder, so C:\_ai\observex\observex.exe is always the newest.

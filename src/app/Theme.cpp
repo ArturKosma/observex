@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -103,14 +104,23 @@ Fonts apply(float dpiScale) {
     return fonts;
 }
 
-void drawLabel(ImDrawList* drawList, ImVec2 anchor, ImVec2 pivot, const char* text) {
+void drawLabel(ImDrawList* drawList, ImVec2 anchor, ImVec2 pivot, const char* text, const char* detail) {
     const float dpi = ImGui::GetStyle().FontScaleDpi;
     const ImVec2 padding(8.0f * dpi, 4.0f * dpi);
-    const ImVec2 textSize = ImGui::CalcTextSize(text);
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const float lineGap = std::round(2.0f * dpi);
+    ImVec2 textSize = ImGui::CalcTextSize(text);
+    if (detail != nullptr) {
+        textSize.x = std::max(textSize.x, ImGui::CalcTextSize(detail).x);
+        textSize.y += lineGap + lineHeight;
+    }
     const ImVec2 size(textSize.x + padding.x * 2, textSize.y + padding.y * 2);
     const ImVec2 min(std::round(anchor.x - size.x * pivot.x), std::round(anchor.y - size.y * pivot.y));
     drawList->AddRectFilled(min, ImVec2(min.x + size.x, min.y + size.y), kOverlay, 5.0f * dpi);
     drawList->AddText(ImVec2(min.x + padding.x, min.y + padding.y), kText, text);
+    if (detail != nullptr) {
+        drawList->AddText(ImVec2(min.x + padding.x, min.y + padding.y + lineHeight + lineGap), kTextMuted, detail);
+    }
 }
 
 void drawLogo(ImDrawList* drawList, ImVec2 centre, float size) {

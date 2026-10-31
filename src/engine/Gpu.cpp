@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cwchar>
 #include <iterator>
 #include <stdexcept>
 #include <utility>
@@ -68,6 +69,46 @@ ComPtr<IDXGIAdapter1> findPrimaryGpu() {
     throw std::runtime_error("No GPU drives the primary monitor");
 }
 
+namespace {
+
+// The model name the monitor reports about itself (from its EDID), e.g. "Odyssey G7". Falls back to
+// "Display N" when the monitor reports none.
+std::string monitorName(const wchar_t* deviceName) {
+    UINT32 pathCount = 0;
+    UINT32 modeCount = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) == ERROR_SUCCESS) {
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+        if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) ==
+            ERROR_SUCCESS) {
+            for (UINT32 i = 0; i < pathCount; ++i) {
+                DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+                source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                source.header.size = sizeof(source);
+                source.header.adapterId = paths[i].sourceInfo.adapterId;
+                source.header.id = paths[i].sourceInfo.id;
+                if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
+                    std::wcscmp(source.viewGdiDeviceName, deviceName) != 0) {
+                    continue;
+                }
+                DISPLAYCONFIG_TARGET_DEVICE_NAME target{};
+                target.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+                target.header.size = sizeof(target);
+                target.header.adapterId = paths[i].targetInfo.adapterId;
+                target.header.id = paths[i].targetInfo.id;
+                if (DisplayConfigGetDeviceInfo(&target.header) == ERROR_SUCCESS &&
+                    target.monitorFriendlyDeviceName[0] != L'\0') {
+                    return toUtf8(target.monitorFriendlyDeviceName);
+                }
+            }
+        }
+    }
+    const wchar_t* number = std::wcspbrk(deviceName, L"0123456789");
+    return "Display " + toUtf8(number != nullptr ? number : deviceName);
+}
+
+} // namespace
+
 std::vector<Screen> listScreens(IDXGIAdapter1* gpu) {
     const HMONITOR primary = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
     std::vector<Screen> screens;
@@ -85,6 +126,7 @@ std::vector<Screen> listScreens(IDXGIAdapter1* gpu) {
         }
         screen.adapter = gpu;
         screen.name = toUtf8(desc.DeviceName);
+        screen.monitor = monitorName(desc.DeviceName);
         screen.bounds = desc.DesktopCoordinates;
         screen.primary = desc.Monitor == primary;
         screens.push_back(std::move(screen));

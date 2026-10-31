@@ -25,8 +25,9 @@ ComPtr<IDXGIAdapter1> findPrimaryGpu();
 struct Screen {
     ComPtr<IDXGIAdapter1> adapter; // The GPU it is connected to.
     ComPtr<IDXGIOutput1> output;
-    std::string name; // Windows' name for it, e.g. "\\.\DISPLAY1". Stays the same while it is connected.
-    RECT bounds{};    // Where it sits on the desktop, in pixels.
+    std::string name;    // Windows' name for it, e.g. "\\.\DISPLAY1". Stays the same while it is connected.
+    std::string monitor; // The monitor's own model name, e.g. "Odyssey G7", or "Display 1" if it reports none.
+    RECT bounds{};       // Where it sits on the desktop, in pixels.
     unsigned refreshHz = 0;
     bool primary = false;
 };

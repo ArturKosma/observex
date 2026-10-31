@@ -161,15 +161,17 @@ const Screen* ScreenPicker::draw(ImVec2 maxSize, ImU32 background) {
         drawList->PathRect(ImVec2(min.x - half, min.y - half), ImVec2(max.x + half, max.y + half), rounding + half);
         drawList->PathStroke(hovered || isObserved ? theme::kAccent : theme::kBorder, ImDrawFlags_Closed, outline);
 
+        // The monitor's name, and under it its size and refresh rate while the mouse is over it.
+        char detail[64];
         if (hovered) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            char label[64];
-            std::snprintf(label, sizeof(label), "%ld \xC3\x97 %ld  \xC2\xB7  %u Hz", bounds.right - bounds.left,
+            std::snprintf(detail, sizeof(detail), "%ld \xC3\x97 %ld  \xC2\xB7  %u Hz", bounds.right - bounds.left,
                           bounds.bottom - bounds.top, miniature.screen.refreshHz);
-            drawList->PushClipRect(min, max, true);
-            theme::drawLabel(drawList, ImVec2(min.x + 6.0f * dpi, max.y - 6.0f * dpi), ImVec2(0.0f, 1.0f), label);
-            drawList->PopClipRect();
         }
+        drawList->PushClipRect(min, max, true);
+        theme::drawLabel(drawList, ImVec2(min.x + 6.0f * dpi, max.y - 6.0f * dpi), ImVec2(0.0f, 1.0f),
+                         miniature.screen.monitor.c_str(), hovered ? detail : nullptr);
+        drawList->PopClipRect();
     }
 
     // Leave the cursor below the miniatures, as if they were one item.

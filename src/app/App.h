@@ -11,17 +11,28 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace observex {
 
 // Owns everything: the window, the UI's GPU device, ImGui and the pipeline. The UI runs on this thread;
 // the pipeline runs on its own.
 //
-// The UI is a top bar with the Observer button, which shows live miniatures of all screens, and below
-// it the screen being observed. Picking a screen starts the pipeline on it.
+// The UI is a top bar with the screen button, which shows live miniatures of all screens, and below it
+// the screen being observed. Picking a screen starts the pipeline on it.
 class App {
 public:
-    App() = default;
+    // Snapshot mode, for checking the UI without showing it: the window stays hidden, the mouse clicks
+    // each of `clicks` in order (window pixels, about 0.6 s apart), then rests at `mouse`, and the frame is
+    // saved as a PNG at `path`. Then the app quits.
+    struct Snapshot {
+        std::wstring path;
+        std::vector<ImVec2> clicks;
+        std::optional<ImVec2> mouse;
+    };
+
+    explicit App(std::optional<Snapshot> snapshot = std::nullopt) : snapshot_(std::move(snapshot)) {}
     ~App();
 
     App(const App&) = delete;
@@ -39,6 +50,9 @@ private:
     void stopObserving();
     // After a display mode change: observes the same screen again if it is still connected.
     void observeAgain();
+
+    // Snapshot mode: feeds this frame's mouse input. Returns true when this frame is the one to save.
+    bool playSnapshot();
 
     void drawFrame();
     void drawTopBar(float height);
@@ -59,6 +73,8 @@ private:
     std::string error_;              // Why the observed screen cannot be shown.
     bool showStats_ = false;         // Toggled with F3.
     bool imguiReady_ = false;
+    std::optional<Snapshot> snapshot_;
+    int snapshotFrame_ = 0;
 };
 
 } // namespace observex

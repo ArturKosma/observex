@@ -23,14 +23,18 @@ later loads that knowledge so it knows what to look for and how to react.
    together mean a clean, clear structure that stays shallow.
 5. **Never pop the app up on the user's screen for testing.** Do not launch `observex.exe`, and do not drive its
    window with the mouse or keyboard, to check things: it steals focus while the user works. Measure with
-   `observex_bench` (console only) and unit tests. When something needs the real window, ask the user to look.
+   `observex_bench` (console only) and unit tests, and check how the UI looks with snapshot mode
+   (`observex.exe --snapshot`, which never shows the window). When something needs the real window, ask the user
+   to look.
 
 ## Current state
 
-The UI is deliberately minimal: a top bar with the logo and one **Observer** button. Observer opens live miniatures of
-every screen, laid out the way the screens are arranged on the desktop; clicking one starts observing it. The window
-then shows only that screen, live. With nothing observed yet, the miniatures fill the window. F3 shows the pipeline's
-numbers over the view (hidden by default).
+The UI is deliberately minimal: a top bar with one screen button. It looks like a dropdown (monitor icon, text, arrow)
+and reads "Choose a screen", or "Observing" and the observed monitor's name. It opens live miniatures of every
+screen, laid out the way the screens are arranged on the desktop, each labelled with its monitor's model name (from
+the monitor itself, e.g. "Odyssey G61SH"; size and refresh rate show on hover). Clicking one starts observing it, and
+the window shows only that screen, live. With nothing observed yet, the miniatures fill the window under the logo.
+F3 shows the pipeline's numbers over the view (hidden by default).
 
 Look: Inter font (regular and medium, built into the exe), a dark neutral palette with one violet accent
 (`#8B7BFF`), rounded corners, a dark title bar in the same colours, and the observex logo (a ring with a pupil
@@ -96,6 +100,11 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   has something to capture.
 - The app: `observex.exe` in the project folder. The Release build writes it there (gitignored). The Debug build
   stays in `build/vs2022/bin/Debug/`.
+- UI snapshot: `observex.exe --snapshot <file.png> [--click X Y]... [--mouse X Y]`. Draws the UI in a hidden
+  window (it never appears or takes focus), clicks each point in order about 0.6 s apart, rests the mouse at
+  `--mouse` for hover effects, saves the frame as a PNG and quits. Points are window pixels, as in the PNG (take one
+  snapshot first to find them). It really observes what you click. Use the Release exe, which has no console window;
+  save snapshots outside the repo, since they show the user's screens.
 
 ## Layout
 
@@ -103,7 +112,7 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   Unit tested.
 - `src/engine/`: the real-time pipeline (`Gpu`, `ScreenCapture`, `PreviewChannel`, `Pipeline`). Windows and
   Direct3D 11, no ImGui.
-- `src/app/`: the window and UI (`App`, `MainWindow`, `Theme`, `ScreenPicker`, `ScreenImage`, `main`), plus
+- `src/app/`: the window and UI (`App`, `MainWindow`, `Theme`, `ScreenPicker`, `ScreenImage`, `Snapshot`, `main`), plus
   `observex.rc.in` and `Resources.h` (icon, fonts and version info built into the exe).
 - `bench/`: `observex_bench`, the headless pipeline benchmark.
 - `assets/`: the logo (`logo.svg`, `logo.png`) and the app icon (`observex.ico`), all made by `tools/make_logo.py`.
