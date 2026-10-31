@@ -12,3 +12,6 @@ CMakeUserPresets.json
 
 # Saved ImGui window layout
 imgui.ini
+
+# Python bytecode
+__pycache__/

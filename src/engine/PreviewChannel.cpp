@@ -12,7 +12,7 @@ PreviewChannel::PreviewChannel(ID3D11Device* device, unsigned width, unsigned he
     desc.Format = format;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; // Shared textures need both.
     desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
 
     for (Slot& slot : slots_) {
@@ -45,35 +45,23 @@ PreviewReader::PreviewReader(ID3D11Device* device, PreviewChannel& channel) : ch
         check(device->OpenSharedResource(channel.slots_[i].sharedHandle, IID_PPV_ARGS(&slot.texture)),
               "OpenSharedResource (preview)");
         check(slot.texture.As(&slot.mutex), "IDXGIKeyedMutex (preview)");
-        check(device->CreateShaderResourceView(slot.texture.Get(), nullptr, &slot.view),
-              "CreateShaderResourceView (preview)");
     }
 }
 
-PreviewReader::~PreviewReader() {
-    if (holding_) {
-        slots_[static_cast<std::size_t>(channel_.handover_.readIndex())].mutex->ReleaseSync(PreviewChannel::kWriterKey);
-    }
-}
-
-void PreviewReader::update() {
+bool PreviewReader::copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* target) {
     TripleBuffer<std::uint64_t>& handover = channel_.handover_;
-    if (!handover.hasNew()) {
-        return;
+    if (!handover.fetch()) {
+        return false;
     }
-    // Hand the current texture back first. The release is queued after this device's earlier draws
-    // that use it, so the pipeline cannot overwrite it while it is still on screen.
-    if (holding_) {
-        slots_[static_cast<std::size_t>(handover.readIndex())].mutex->ReleaseSync(PreviewChannel::kWriterKey);
-        holding_ = false;
-    }
-    handover.fetch();
+    // Hold the texture only while queuing the copy: the release is queued after it on the GPU, so the
+    // pipeline cannot overwrite the image before it is copied, and it never waits for the UI's frame.
     Slot& slot = slots_[static_cast<std::size_t>(handover.readIndex())];
-    holding_ = slot.mutex->AcquireSync(PreviewChannel::kReaderKey, 0) == S_OK;
-}
-
-ID3D11ShaderResourceView* PreviewReader::view() const {
-    return holding_ ? slots_[static_cast<std::size_t>(channel_.handover_.readIndex())].view.Get() : nullptr;
+    if (slot.mutex->AcquireSync(PreviewChannel::kReaderKey, 0) != S_OK) {
+        return false;
+    }
+    context->CopySubresourceRegion(target, 0, 0, 0, 0, slot.texture.Get(), 0, nullptr);
+    slot.mutex->ReleaseSync(PreviewChannel::kWriterKey);
+    return true;
 }
 
 } // namespace observex

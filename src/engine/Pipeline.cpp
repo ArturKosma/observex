@@ -1,12 +1,10 @@
 #include "engine/Pipeline.h"
 
-#include "core/LogStore.h"
 #include "core/StatWindow.h"
 #include "engine/PreviewChannel.h"
 #include "engine/ScreenCapture.h"
 
 #include <chrono>
-#include <cstdio>
 #include <utility>
 
 namespace observex {
@@ -24,39 +22,30 @@ std::int64_t qpcNow() {
 
 } // namespace
 
-Pipeline::Pipeline(LogStore& log) : log_(log) {}
-
 Pipeline::~Pipeline() {
     stop();
 }
 
-bool Pipeline::start(const CaptureTarget& target) {
+bool Pipeline::start(const Screen& screen) {
     stop();
     try {
-        gpu_ = createGpuDevice(target.adapter.Get());
-        capture_ = std::make_unique<ScreenCapture>(gpu_.device.Get(), target.output.Get());
+        const Screen own = findOnOwnAdapter(screen); // So the UI's device cannot hold up capture.
+        gpu_ = createGpuDevice(own.adapter.Get());
+        capture_ = std::make_unique<ScreenCapture>(gpu_.device.Get(), own.output.Get());
         preview_ = std::make_unique<PreviewChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                     ScreenCapture::kImageFormat);
     } catch (const std::exception& e) {
         stop();
-        error_ = std::string("Could not start screen capture: ") + e.what();
-        log(LogLevel::Error, error_);
-        state_.store(State::Failed, std::memory_order_release);
+        fail(std::string("Could not start screen capture: ") + e.what());
         return false;
     }
 
-    targetName_ = target.name;
     width_ = capture_->width();
     height_ = capture_->height();
     refreshHz_ = capture_->refreshHz();
     stats_ = std::make_unique<TripleBuffer<PipelineStats>>();
     error_.clear();
     state_.store(State::Running, std::memory_order_release);
-
-    char text[256];
-    std::snprintf(text, sizeof(text), "Capturing %s, %u x %u at %.0f Hz", targetName_.c_str(), width_, height_,
-                  refreshHz_);
-    log(LogLevel::Info, text);
 
     thread_ = std::jthread([this](std::stop_token stop) { run(stop); });
     return true;
@@ -143,18 +132,14 @@ void Pipeline::run(std::stop_token stop) {
 }
 
 bool Pipeline::reconnect(std::stop_token stop) {
+    // Interrupted by a display change, fullscreen switch, UAC prompt or the lock screen.
     state_.store(State::Reconnecting, std::memory_order_release);
-    log(LogLevel::Warning,
-        "Screen capture interrupted (display change, fullscreen switch, UAC prompt or lock screen). Reconnecting.");
-
     while (!stop.stop_requested()) {
         if (capture_->reopen()) {
             if (capture_->width() != width_ || capture_->height() != height_ || capture_->refreshHz() != refreshHz_) {
-                log(LogLevel::Info, "Display mode changed. Restarting capture.");
                 state_.store(State::NeedsRestart, std::memory_order_release);
                 return false;
             }
-            log(LogLevel::Info, "Screen capture reconnected.");
             state_.store(State::Running, std::memory_order_release);
             return true;
         }
@@ -165,18 +150,7 @@ bool Pipeline::reconnect(std::stop_token stop) {
 
 void Pipeline::fail(std::string message) {
     error_ = std::move(message);
-    log(LogLevel::Error, error_);
     state_.store(State::Failed, std::memory_order_release);
-}
-
-void Pipeline::log(LogLevel level, std::string message) {
-    // Takes the log's lock, so the loop calls this only for rare events, never per image.
-    LogEntry entry;
-    entry.time = Clock::now();
-    entry.level = level;
-    entry.source = "pipeline";
-    entry.message = std::move(message);
-    log_.push(std::move(entry));
 }
 
 } // namespace observex

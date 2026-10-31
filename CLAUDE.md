@@ -21,69 +21,96 @@ later loads that knowledge so it knows what to look for and how to react.
    hacks) instead of patching around it.
 4. **Keep it ultra simple.** No deep abstraction layers. A simpler program is easier to iterate on. Rules 3 and 4
    together mean a clean, clear structure that stays shallow.
+5. **Never pop the app up on the user's screen for testing.** Do not launch `observex.exe`, and do not drive its
+   window with the mouse or keyboard, to check things: it steals focus while the user works. Measure with
+   `observex_bench` (console only) and unit tests. When something needs the real window, ask the user to look.
 
 ## Current state
 
-Capture works. The pipeline grabs every new image of the primary monitor and the UI shows a live preview and speed
-numbers. Measured on the user's PC (RTX 4090, 2560 x 1440 at 240 Hz, Release build): 239 images/s (every refresh),
-0.05 ms from screen update to image, under 0.1 ms of CPU work per image including the preview copy.
+The UI is deliberately minimal: a top bar with the logo and one **Observer** button. Observer opens live miniatures of
+every screen, laid out the way the screens are arranged on the desktop; clicking one starts observing it. The window
+then shows only that screen, live. With nothing observed yet, the miniatures fill the window. F3 shows the pipeline's
+numbers over the view (hidden by default).
+
+Look: Inter font (regular and medium, built into the exe), a dark neutral palette with one violet accent
+(`#8B7BFF`), rounded corners, a dark title bar in the same colours, and the observex logo (a ring with a pupil
+glancing up and right, on a dark rounded tile) as the app icon.
+
+Measured with `observex_bench` (RTX 4090, 2560 x 1440 at 240 Hz, Release, a game-like source presenting every
+refresh, with the UI's preview copy included): 239.7 images/s (every refresh), 0.05 ms from screen update to image,
+about 0.1 ms of CPU work per image.
 
 Not built yet: recognise (find things in the image), react (mouse and keyboard), and the knowledge file (what to look
 for and how to react, saved and loaded).
 
 ## Architecture
 
-Two threads, each with its own Direct3D 11 device on the GPU that drives the primary monitor:
+Two threads, each with its own Direct3D 11 device on the GPU that drives the primary monitor (observex lists and
+captures only the screens on that GPU):
 
 - **Pipeline thread** (`engine/Pipeline`, time-critical priority): `ScreenCapture` waits for a new screen image (DXGI
   Desktop Duplication; the image stays on the GPU), then recognise and react will run on it, then it copies the image
-  into the `PreviewChannel` if the UI is showing it. Once a second it hands `PipelineStats` to the UI.
-- **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window and swap chain), ImGui, and the panels.
-  `CapturePanel` shows state, stats and the preview; `LogPanel` shows the log.
+  into the `PreviewChannel` while the UI shows it. Once a second it hands `PipelineStats` to the UI.
+- **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window and swap chain), ImGui, `Theme` (fonts,
+  colours, logo), `ScreenPicker` (the miniatures) and `ScreenImage` (a screen image the UI can draw at any size: it
+  keeps a mip chain so shrunken views look smooth, and draws opaque).
 
 The two threads share data only through lock-free hand-overs, so the UI can never slow the pipeline:
 
 - `TripleBuffer<T>` (core): newest-value hand-over for stats.
 - `PreviewChannel` / `PreviewReader` (engine): three shared GPU textures rotated by a TripleBuffer; keyed mutexes
-  order the two devices' GPU work.
+  order the two devices' GPU work. The UI copies each new image out right away and hands the texture straight back.
 - Atomics for state and the preview on/off flag.
-- `LogStore` takes a lock, so the pipeline logs only rare events (start, interruptions, errors), never per image.
 
-Lifecycle: the UI thread owns the pipeline. It starts it, stops it, and restarts it when the display mode changes.
-Capture interruptions (fullscreen switch, UAC prompt, lock screen) are recovered inside the pipeline thread.
+Lifecycle: the UI thread owns the pipeline. Picking a screen starts it on that screen; a display mode change restarts
+it on the same screen. Capture interruptions (fullscreen switch, UAC prompt, lock screen) are recovered inside the
+pipeline thread. The picker captures the screens itself only while it is shown (on the UI device, never waiting), and
+not the observed one, whose miniature reuses the observed image.
 
 Planned next, inside `engine/`, called from the pipeline loop where `Pipeline::run` marks the spot: a recogniser (GPU
 compute on the image, reading back only small results), a reactor (`SendInput`), and a knowledge file.
 
 ## What speed means in practice
 
-- Measure, don't guess. Every stage reports its timing in the Capture panel. Only trust Release builds for numbers.
+- Measure, don't guess. `observex_bench` runs the real pipeline headless and prints images/s, merged updates,
+  latency and work per second. Only trust Release builds for numbers. Run it after any engine or preview change.
 - The hot path (capture, recognise, react) does no per-frame heap allocation, no disk I/O, no string formatting, no
   exceptions, and never waits on a lock the UI can hold.
 - Keep images on the GPU and read back only small results, never whole frames.
 - The UI only shows what the pipeline produces. Anything only the UI needs (like the preview copy) must cost nothing
   when it is not shown.
+- Every GPU device that must not be held up by another gets an adapter object of its own (`findOnOwnAdapter`).
+  Devices made from one shared `IDXGIAdapter` hold each other up: capture fell from 240 to 24 images/s next to a
+  device presenting every refresh.
 
 ## Build and test
 
-Configuring, building, running the tests and launching the app here is fine.
+Configuring, building and running the tests and the bench here is fine. Do not launch the app (rule 5).
 
 - Configure: `cmake --preset vs2022` (Visual Studio 2022 generator, output in `build/vs2022`)
 - Build: `cmake --build --preset debug` (or `release`)
 - Test: `ctest --preset debug`
-- Run: `observex.exe` in the project folder. The Release build writes it there (gitignored); use Release to judge
-  speed. The Debug build stays in `build/vs2022/bin/Debug/`.
+- Bench: `build/vs2022/bin/Release/observex_bench.exe [--screen N] [--seconds S] [--no-pulse] [--no-preview]`.
+  Lists the screens and measures one (the primary by default). Its "pulse" is an invisible 2 x 2 pixel,
+  click-through, never-focused window in the screen's corner that presents every refresh like a game, so the screen
+  has something to capture.
+- The app: `observex.exe` in the project folder. The Release build writes it there (gitignored). The Debug build
+  stays in `build/vs2022/bin/Debug/`.
 
 ## Layout
 
-- `src/core/`: platform-free building blocks (`LogStore`, `LogFilter`, `TripleBuffer`, `StatWindow`, `Text`). No
-  Windows or GPU headers. Unit tested.
+- `src/core/`: platform-free building blocks (`TripleBuffer`, `StatWindow`), header-only. No Windows or GPU headers.
+  Unit tested.
 - `src/engine/`: the real-time pipeline (`Gpu`, `ScreenCapture`, `PreviewChannel`, `Pipeline`). Windows and
   Direct3D 11, no ImGui.
-- `src/app/`: the window and UI (`App`, `MainWindow`, `CapturePanel`, `LogPanel`, `main`).
+- `src/app/`: the window and UI (`App`, `MainWindow`, `Theme`, `ScreenPicker`, `ScreenImage`, `main`), plus
+  `observex.rc.in` and `Resources.h` (icon, fonts and version info built into the exe).
+- `bench/`: `observex_bench`, the headless pipeline benchmark.
+- `assets/`: the logo (`logo.svg`, `logo.png`) and the app icon (`observex.ico`), all made by `tools/make_logo.py`.
+  Change the logo there and rerun it.
 - `tests/`: doctest tests for `src/core`. Add tests with any change to core.
-- `cmake/Dependencies.cmake`: Dear ImGui and doctest via FetchContent. Pin every dependency to a release and its
-  SHA256.
+- `cmake/Dependencies.cmake`: Dear ImGui and doctest via FetchContent, and the Inter font files. Pin every dependency
+  to a release and its SHA256.
 
 ## Conventions
 
@@ -93,3 +120,4 @@ Configuring, building, running the tests and launching the app here is fine.
 - Our targets build with `/W4 /permissive-`; keep them warning-free.
 - Setup code reports errors by throwing (`check()` in `engine/Gpu.h`); the hot path returns status codes instead.
 - ImGui and the UI's GPU device are used on the UI thread only. The pipeline never touches UI objects.
+- UI colours and sizes come from `app/Theme`; scale pixel sizes by the DPI scale.

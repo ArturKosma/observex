@@ -1,5 +1,9 @@
 #include "app/MainWindow.h"
 
+#include "app/Resources.h"
+#include "app/Theme.h"
+
+#include <dwmapi.h>
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 
@@ -13,6 +17,18 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"observex";
 
+// Dark title bar in the app's own colours (Windows 11; older versions keep their default).
+void styleTitleBar(HWND hwnd) {
+    const BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    const COLORREF caption = theme::toColorRef(theme::kBackground);
+    const COLORREF border = theme::toColorRef(theme::kBorder);
+    const COLORREF text = theme::toColorRef(theme::kTextMuted);
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
+    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
+}
+
 } // namespace
 
 MainWindow::MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScale) : device_(device) {
@@ -25,6 +41,10 @@ MainWindow::MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScal
     windowClass.lpfnWndProc = windowProc;
     windowClass.hInstance = instance;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_OBSERVEX));
+    windowClass.hIconSm =
+        static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_OBSERVEX), IMAGE_ICON,
+                                      GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     windowClass.lpszClassName = kWindowClass;
     RegisterClassExW(&windowClass);
 
@@ -34,6 +54,7 @@ MainWindow::MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScal
     if (hwnd_ == nullptr) {
         throw std::runtime_error("Could not create the main window");
     }
+    styleTitleBar(hwnd_);
 
     ComPtr<IDXGIDevice> dxgiDevice;
     check(device_.As(&dxgiDevice), "IDXGIDevice");
@@ -93,18 +114,15 @@ bool MainWindow::prepareFrame() {
 }
 
 void MainWindow::bindBackBuffer() {
-    constexpr float kClearColor[4] = {0.08f, 0.08f, 0.09f, 1.0f};
+    const ImVec4 clear = ImGui::ColorConvertU32ToFloat4(theme::kBackground);
+    const float clearColor[4] = {clear.x, clear.y, clear.z, 1.0f};
     ID3D11RenderTargetView* view = backBufferView_.Get();
     context_->OMSetRenderTargets(1, &view, nullptr);
-    context_->ClearRenderTargetView(view, kClearColor);
+    context_->ClearRenderTargetView(view, clearColor);
 }
 
 void MainWindow::present() {
     swapChain_->Present(1, 0);
-}
-
-void MainWindow::close() {
-    PostMessageW(hwnd_, WM_CLOSE, 0, 0);
 }
 
 void MainWindow::createBackBufferView() {

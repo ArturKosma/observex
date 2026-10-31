@@ -1,23 +1,27 @@
 #pragma once
 
-#include "app/CapturePanel.h"
-#include "app/LogPanel.h"
 #include "app/MainWindow.h"
-#include "core/LogStore.h"
+#include "app/ScreenImage.h"
+#include "app/ScreenPicker.h"
+#include "app/Theme.h"
 #include "engine/Gpu.h"
 #include "engine/Pipeline.h"
 #include "engine/PreviewChannel.h"
 
 #include <memory>
-#include <string_view>
+#include <optional>
+#include <string>
 
 namespace observex {
 
-// Owns everything: the log, the UI (window, GPU device, ImGui, panels) and the pipeline.
-// The UI thread runs here; the pipeline runs on its own thread.
+// Owns everything: the window, the UI's GPU device, ImGui and the pipeline. The UI runs on this thread;
+// the pipeline runs on its own.
+//
+// The UI is a top bar with the Observer button, which shows live miniatures of all screens, and below
+// it the screen being observed. Picking a screen starts the pipeline on it.
 class App {
 public:
-    App();
+    App() = default;
     ~App();
 
     App(const App&) = delete;
@@ -30,30 +34,31 @@ private:
     void init();
     void shutdown();
 
-    void startPipeline();
-    void stopPipeline();
+    // Starts the pipeline on `screen` and shows what it captures.
+    void observe(const Screen& screen);
+    void stopObserving();
+    // After a display mode change: observes the same screen again if it is still connected.
+    void observeAgain();
 
     void drawFrame();
-    void drawMenuBar();
-    void dockPanelsOnFirstRun(unsigned dockspace);
+    void drawTopBar(float height);
+    void drawChooseScreen();
+    void drawObservedScreen();
 
-    // Adds an entry from observex itself (source "app") to the log.
-    void log(LogLevel level, std::string_view message);
-
-    LogStore log_;
-    CaptureTarget target_;
-    GpuDevice gpu_; // The UI's device, on the same GPU as the captured monitor so the preview can be shared.
+    float dpiScale_ = 1.0f;
+    ComPtr<IDXGIAdapter1> gpuAdapter_; // The GPU of the primary monitor; observex works on its screens.
+    GpuDevice gpu_;                    // The UI's device.
     std::unique_ptr<MainWindow> window_;
+    theme::Fonts fonts_;
+    std::unique_ptr<ScreenPicker> picker_;
     Pipeline pipeline_;
     std::unique_ptr<PreviewReader> preview_;
-    LogPanel logPanel_;
-    CapturePanel capturePanel_;
-
+    std::unique_ptr<ScreenImage> observedImage_;
+    std::optional<Screen> observed_; // The screen being observed, if any.
+    std::optional<Screen> chosen_;   // Picked this frame; observed from the start of the next one.
+    std::string error_;              // Why the observed screen cannot be shown.
+    bool showStats_ = false;         // Toggled with F3.
     bool imguiReady_ = false;
-    bool restartRequested_ = false;
-    bool showCapture_ = true;
-    bool showLog_ = true;
-    bool showImGuiDemo_ = false;
 };
 
 } // namespace observex

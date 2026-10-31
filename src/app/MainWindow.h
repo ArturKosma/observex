@@ -28,9 +28,6 @@ public:
     // Shows the frame, synced to the monitor refresh.
     void present();
 
-    // Asks the window to close, like clicking its X button.
-    void close();
-
 private:
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     void createBackBufferView();

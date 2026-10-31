@@ -34,3 +34,11 @@ if(OBSERVEX_BUILD_TESTS)
         set_target_properties(doctest_with_main PROPERTIES FOLDER "third_party")
     endif()
 endif()
+
+# Inter, the UI font (SIL Open Font License 1.1), Latin subset from Fontsource. Built into observex.exe.
+set(OBSERVEX_FONT_DIR ${CMAKE_BINARY_DIR}/fonts)
+set(INTER_URL https://cdn.jsdelivr.net/fontsource/fonts/inter@5.2.8)
+file(DOWNLOAD ${INTER_URL}/latin-400-normal.ttf ${OBSERVEX_FONT_DIR}/Inter-Regular.ttf TLS_VERIFY ON
+    EXPECTED_HASH SHA256=27396a89e10048c8e76096b1b4a5500bdc54d3b04d200f267ed6bf0d5466b2ba)
+file(DOWNLOAD ${INTER_URL}/latin-500-normal.ttf ${OBSERVEX_FONT_DIR}/Inter-Medium.ttf TLS_VERIFY ON
+    EXPECTED_HASH SHA256=3073f87cb6eac0ac47fee30af580ba12f4bedeb62d1e1254c07dca7b2ad607e7)

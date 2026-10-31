@@ -1,6 +1,5 @@
 #pragma once
 
-#include "core/LogEntry.h"
 #include "core/TripleBuffer.h"
 #include "engine/Gpu.h"
 
@@ -13,7 +12,6 @@
 
 namespace observex {
 
-class LogStore;
 class PreviewChannel;
 class ScreenCapture;
 
@@ -41,7 +39,7 @@ public:
         Failed,       // See error().
     };
 
-    explicit Pipeline(LogStore& log);
+    Pipeline() = default;
     ~Pipeline();
 
     Pipeline(const Pipeline&) = delete;
@@ -49,15 +47,15 @@ public:
 
     // Everything below is for the owner's (UI) thread.
 
-    // Sets up capture of `target` on a new GPU device and starts the loop. Returns false on failure;
+    // Sets up capture of `screen` on a new GPU device and starts the loop. Returns false on failure;
     // state() is then Failed and error() says why.
-    bool start(const CaptureTarget& target);
+    bool start(const Screen& screen);
 
     // Stops the loop and frees its GPU resources. Destroy any PreviewReader of preview() first.
     void stop();
 
     State state() const { return state_.load(std::memory_order_acquire); }
-    const std::string& error() const { return error_; }
+    const std::string& error() const { return error_; } // Valid once state() is Failed.
 
     // While on, each new image is also copied for the UI preview. Off costs nothing.
     void setPreviewEnabled(bool enabled) { previewEnabled_.store(enabled, std::memory_order_relaxed); }
@@ -66,7 +64,6 @@ public:
     // Newest statistics. The reference stays valid until the next call or start().
     const PipelineStats& stats();
 
-    const std::string& targetName() const { return targetName_; }
     unsigned width() const { return width_; }
     unsigned height() const { return height_; }
     double refreshHz() const { return refreshHz_; }
@@ -75,9 +72,7 @@ private:
     void run(std::stop_token stop);
     bool reconnect(std::stop_token stop);
     void fail(std::string message);
-    void log(LogLevel level, std::string message);
 
-    LogStore& log_;
     GpuDevice gpu_;
     std::unique_ptr<ScreenCapture> capture_;
     std::unique_ptr<PreviewChannel> preview_;
@@ -85,7 +80,6 @@ private:
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
     std::string error_;
-    std::string targetName_;
     unsigned width_ = 0;
     unsigned height_ = 0;
     double refreshHz_ = 0.0;

@@ -54,16 +54,13 @@ class PreviewReader {
 public:
     // Opens the channel's shared textures. Throws on failure.
     PreviewReader(ID3D11Device* device, PreviewChannel& channel);
-    ~PreviewReader();
 
     PreviewReader(const PreviewReader&) = delete;
     PreviewReader& operator=(const PreviewReader&) = delete;
 
-    // Takes the newest image if one arrived. Call once per UI frame, before drawing.
-    void update();
-
-    // The newest image, or nullptr before the first one arrives.
-    ID3D11ShaderResourceView* view() const;
+    // If a new image arrived, copies it into mip 0 of `target` (same size and format, on the UI's
+    // device) and returns true. Call once per UI frame.
+    bool copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* target);
 
     unsigned width() const { return channel_.width(); }
     unsigned height() const { return channel_.height(); }
@@ -72,12 +69,10 @@ private:
     struct Slot {
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<IDXGIKeyedMutex> mutex;
-        ComPtr<ID3D11ShaderResourceView> view;
     };
 
     PreviewChannel& channel_;
     std::array<Slot, 3> slots_;
-    bool holding_ = false; // Whether this side holds the keyed mutex of the current read texture.
 };
 
 } // namespace observex
