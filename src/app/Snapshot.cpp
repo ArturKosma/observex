@@ -1,8 +1,7 @@
 #include "app/Snapshot.h"
 
 #include "engine/Gpu.h"
-
-#include <wincodec.h>
+#include "engine/ImageFile.h"
 
 #include <cstdint>
 #include <cstring>
@@ -40,49 +39,15 @@ void savePng(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D
         std::uint8_t* row = pixels.data() + static_cast<std::size_t>(y) * stride;
         std::memcpy(row, static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch,
                     stride);
-        for (UINT x = 0; x < stride; x += 4) {
-            if (rgba) {
-                std::swap(row[x], row[x + 2]); // To BGRA, which every WIC PNG encoder takes.
+        if (rgba) {
+            for (UINT x = 0; x < stride; x += 4) {
+                std::swap(row[x], row[x + 2]); // To BGRA.
             }
-            row[x + 3] = 255; // The window is opaque, whatever the UI wrote into alpha.
         }
     }
     context->Unmap(staging.Get(), 0);
 
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool comStarted = SUCCEEDED(com);
-    try {
-        ComPtr<IWICImagingFactory> factory;
-        check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)),
-              "WIC factory");
-        ComPtr<IWICStream> stream;
-        check(factory->CreateStream(&stream), "IWICImagingFactory::CreateStream");
-        check(stream->InitializeFromFilename(path, GENERIC_WRITE), "Open the snapshot file");
-        ComPtr<IWICBitmapEncoder> encoder;
-        check(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder), "PNG encoder");
-        check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache), "IWICBitmapEncoder::Initialize");
-        ComPtr<IWICBitmapFrameEncode> frame;
-        check(encoder->CreateNewFrame(&frame, nullptr), "IWICBitmapEncoder::CreateNewFrame");
-        check(frame->Initialize(nullptr), "IWICBitmapFrameEncode::Initialize");
-        check(frame->SetSize(desc.Width, desc.Height), "IWICBitmapFrameEncode::SetSize");
-        WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
-        check(frame->SetPixelFormat(&format), "IWICBitmapFrameEncode::SetPixelFormat");
-        if (format != GUID_WICPixelFormat32bppBGRA) {
-            throw std::runtime_error("savePng: the PNG encoder does not take BGRA");
-        }
-        check(frame->WritePixels(desc.Height, stride, static_cast<UINT>(pixels.size()), pixels.data()),
-              "IWICBitmapFrameEncode::WritePixels");
-        check(frame->Commit(), "IWICBitmapFrameEncode::Commit");
-        check(encoder->Commit(), "IWICBitmapEncoder::Commit");
-    } catch (...) {
-        if (comStarted) {
-            CoUninitialize();
-        }
-        throw;
-    }
-    if (comStarted) {
-        CoUninitialize();
-    }
+    writeImageFile(path, ImageFormat::Png, pixels.data(), desc.Width, desc.Height, stride);
 }
 
 } // namespace observex

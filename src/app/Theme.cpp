@@ -57,7 +57,7 @@ Fonts apply(float dpiScale) {
     style.WindowBorderSize = 0;
     style.ChildBorderSize = 1;
     style.PopupBorderSize = 1;
-    style.FrameBorderSize = 0;
+    style.FrameBorderSize = 1;
     style.ScrollbarSize = 10;
     style.ScaleAllSizes(dpiScale);
     style.FontScaleDpi = dpiScale;
@@ -87,9 +87,9 @@ Fonts apply(float dpiScale) {
     colors[ImGuiCol_CheckMark] = color(kAccent);
     colors[ImGuiCol_SliderGrab] = color(kAccent);
     colors[ImGuiCol_SliderGrabActive] = color(kAccent);
-    colors[ImGuiCol_Button] = color(kSurface, 0.0f);
-    colors[ImGuiCol_ButtonHovered] = color(kSurfaceHover);
-    colors[ImGuiCol_ButtonActive] = color(kSurfaceActive);
+    colors[ImGuiCol_Button] = color(kSurfaceHover);
+    colors[ImGuiCol_ButtonHovered] = color(kSurfaceActive);
+    colors[ImGuiCol_ButtonActive] = color(kBorderHover);
     colors[ImGuiCol_Header] = color(kSurfaceActive);
     colors[ImGuiCol_HeaderHovered] = color(kSurfaceHover);
     colors[ImGuiCol_HeaderActive] = color(kSurfaceActive);

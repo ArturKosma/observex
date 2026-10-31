@@ -1,6 +1,6 @@
 // observex_bench: measures the capture pipeline from a console, without opening the app window.
 //
-//   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview]
+//   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--per-second N]]
 //
 // Lists the screens, runs the real Pipeline on one (the primary by default, or number N from the list)
 // and prints its numbers once a second.
@@ -12,10 +12,15 @@
 //
 // Preview: by default a second GPU device takes every new image the way the UI does (copy, then build
 // the smaller versions), so the cost of showing the screen is included. --no-preview measures capture alone.
+//
+// Record: --record saves images into FOLDER the way the app's Record button does, N per second (default 1),
+// so its cost on capture shows in the numbers. The pulse is near-black, so most saved images show the screen
+// as it is.
 
 #include "engine/Gpu.h"
+#include "engine/ImageChannel.h"
 #include "engine/Pipeline.h"
-#include "engine/PreviewChannel.h"
+#include "engine/Recorder.h"
 #include "engine/ScreenCapture.h"
 
 #include <dwmapi.h>
@@ -38,6 +43,8 @@ struct Options {
     int seconds = 5;
     bool pulse = true;
     bool preview = true;
+    const char* recordFolder = nullptr;
+    unsigned recordPerSecond = 1; // As the app records.
 };
 
 bool parse(int argc, char** argv, Options& options) {
@@ -50,12 +57,17 @@ bool parse(int argc, char** argv, Options& options) {
             options.pulse = false;
         } else if (std::strcmp(argv[i], "--no-preview") == 0) {
             options.preview = false;
+        } else if (std::strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
+            options.recordFolder = argv[++i];
+        } else if (std::strcmp(argv[i], "--per-second") == 0 && i + 1 < argc) {
+            options.recordPerSecond = static_cast<unsigned>(std::atoi(argv[++i]));
         } else {
-            std::printf("usage: observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview]\n");
+            std::printf("usage: observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] "
+                        "[--record FOLDER [--per-second N]]\n");
             return false;
         }
     }
-    return options.seconds > 0;
+    return options.seconds > 0 && options.recordPerSecond > 0;
 }
 
 // Presents a 2 x 2 pixel window in the corner of `bounds` once per screen refresh until stopped, the way a
@@ -117,7 +129,7 @@ void runPulse(IDXGIAdapter1* adapter, RECT bounds, std::stop_token stop) {
 // What the UI does with each new image: copy it out of the preview channel and build the smaller versions.
 class PreviewConsumer {
 public:
-    PreviewConsumer(IDXGIAdapter1* adapter, PreviewChannel& channel)
+    PreviewConsumer(IDXGIAdapter1* adapter, ImageChannel& channel)
         : gpu_(createGpuDevice(adapter)), reader_(gpu_.device.Get(), channel) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = channel.width();
@@ -141,7 +153,7 @@ public:
 
 private:
     GpuDevice gpu_;
-    PreviewReader reader_;
+    ImageReader reader_;
     ComPtr<ID3D11Texture2D> texture_;
     ComPtr<ID3D11ShaderResourceView> view_;
 };
@@ -186,14 +198,19 @@ int main(int argc, char** argv) {
             if (options.preview) {
                 consumer = std::make_unique<PreviewConsumer>(gpu.Get(), *pipeline.preview());
             }
+            std::unique_ptr<Recorder> recorder;
+            if (options.recordFolder != nullptr) {
+                recorder = std::make_unique<Recorder>(screen, *pipeline.recording(), options.recordFolder, 1);
+                pipeline.setRecordingRate(options.recordPerSecond);
+            }
             std::jthread pulse;
             if (options.pulse) {
                 pulse = std::jthread([&](std::stop_token stop) { runPulse(gpu.Get(), screen.bounds, stop); });
             }
 
-            std::printf("\nObserving %s (%s) for %d s (pulse %s, preview %s)\n", screen.monitor.c_str(),
+            std::printf("\nObserving %s (%s) for %d s (pulse %s, preview %s, recording %s)\n", screen.monitor.c_str(),
                         screen.name.c_str(), options.seconds, options.pulse ? "on" : "off",
-                        options.preview ? "on" : "off");
+                        options.preview ? "on" : "off", recorder ? "on" : "off");
             std::printf("  images/s  merged/s  latency avg / max ms  work avg / max ms\n");
 
             using Clock = std::chrono::steady_clock;
@@ -232,7 +249,16 @@ int main(int argc, char** argv) {
                 std::printf("Average: %.1f images/s (screen refresh %u Hz), %.2f ms latency\n", rateSum / samples,
                             screen.refreshHz, latencySum / samples);
             }
-        } // The consumer goes before the pipeline frees its preview channel.
+            if (recorder) {
+                pipeline.setRecordingRate(0);
+                std::this_thread::sleep_for(std::chrono::milliseconds(300)); // Let the last image finish saving.
+                if (recorder->failed()) {
+                    std::printf("Recording failed: %s\n", recorder->error().c_str());
+                }
+                std::printf("Recorded %u images into %s\n", recorder->saved(), options.recordFolder);
+                recorder.reset();
+            }
+        } // The consumer and recorder go before the pipeline frees its channels.
         pipeline.stop();
     } catch (const std::exception& e) {
         std::printf("%s\n", e.what());

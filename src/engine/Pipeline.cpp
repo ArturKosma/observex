@@ -1,7 +1,7 @@
 #include "engine/Pipeline.h"
 
 #include "core/StatWindow.h"
-#include "engine/PreviewChannel.h"
+#include "engine/ImageChannel.h"
 #include "engine/ScreenCapture.h"
 
 #include <chrono>
@@ -32,7 +32,9 @@ bool Pipeline::start(const Screen& screen) {
         const Screen own = findOnOwnAdapter(screen); // So the UI's device cannot hold up capture.
         gpu_ = createGpuDevice(own.adapter.Get());
         capture_ = std::make_unique<ScreenCapture>(gpu_.device.Get(), own.output.Get());
-        preview_ = std::make_unique<PreviewChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+        preview_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                                  ScreenCapture::kImageFormat);
+        recording_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                     ScreenCapture::kImageFormat);
     } catch (const std::exception& e) {
         stop();
@@ -57,6 +59,7 @@ void Pipeline::stop() {
         thread_.join();
     }
     preview_.reset();
+    recording_.reset();
     capture_.reset();
     gpu_ = {};
     state_.store(State::Stopped, std::memory_order_release);
@@ -85,6 +88,7 @@ void Pipeline::run(std::stop_token stop) {
     std::uint64_t images = 0;
     std::uint64_t merged = 0;
     std::int64_t windowStart = qpcNow();
+    std::int64_t nextRecording = 0; // When the next image is due for recording.
     ScreenCapture::Frame frame;
 
     while (!stop.stop_requested()) {
@@ -100,6 +104,15 @@ void Pipeline::run(std::stop_token stop) {
 
             if (previewEnabled_.load(std::memory_order_relaxed)) {
                 preview_->write(gpu_.context.Get(), frame.texture);
+            }
+            const unsigned recordingRate = recordingRate_.load(std::memory_order_relaxed);
+            if (recordingRate != 0 && now >= nextRecording) {
+                recording_->write(gpu_.context.Get(), frame.texture);
+                const std::int64_t period = frequency.QuadPart / recordingRate;
+                nextRecording += period;
+                if (nextRecording <= now) {
+                    nextRecording = now + period; // Starting, or the screen was still: count from now.
+                }
             }
             work.add(static_cast<float>(static_cast<double>(qpcNow() - now) * msPerTick));
         } else if (status == ScreenCapture::Status::Lost) {

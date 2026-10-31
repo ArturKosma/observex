@@ -16,6 +16,8 @@ inline constexpr ImU32 kBorderHover = IM_COL32(62, 62, 73, 255);
 inline constexpr ImU32 kText = IM_COL32(236, 236, 241, 255);
 inline constexpr ImU32 kTextMuted = IM_COL32(142, 142, 154, 255);
 inline constexpr ImU32 kAccent = IM_COL32(139, 123, 255, 255);
+inline constexpr ImU32 kRecord = IM_COL32(242, 85, 90, 255); // The record dot and stop square.
+inline constexpr ImU32 kYes = IM_COL32(74, 214, 130, 255);   // Review marks answered yes.
 inline constexpr ImU32 kOverlay = IM_COL32(14, 14, 17, 210); // Labels drawn over screen images.
 
 // Same colour as a Win32 COLORREF (0x00BBGGRR), for the window's title bar.

@@ -23,6 +23,9 @@ public:
     // Copies a captured image (same size, ScreenCapture::kImageFormat) and rebuilds the smaller versions.
     void update(ID3D11Texture2D* image);
 
+    // Copies an image from memory: same size, 8-bit BGRA, rows `stride` bytes apart.
+    void upload(const void* bgra, unsigned stride);
+
     // For copying an image in by other means: the full-size texture (mip 0), and the call to make after.
     ID3D11Texture2D* texture() const { return texture_.Get(); }
     void imageCopied();

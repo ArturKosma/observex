@@ -1,6 +1,7 @@
 #include "app/App.h"
 
 #include "app/Snapshot.h"
+#include "app/Widgets.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -20,7 +21,11 @@ constexpr ImGuiWindowFlags kFixedWindow = ImGuiWindowFlags_NoDecoration | ImGuiW
                                           ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
                                           ImGuiWindowFlags_NoScrollWithMouse;
 constexpr char kPickerPopup[] = "screens";
+constexpr char kSettingsPopup[] = "settings";
+constexpr char kCategoryPopup[] = "What are we looking for?";
 constexpr char kChooseText[] = "Choose a screen to observe";
+constexpr char kHotkeyText[] = "Ctrl+Alt+R";
+constexpr unsigned kRecordingRate = 1;  // Images saved per second while recording; more would be near copies.
 constexpr int kSnapshotStepFrames = 36; // Snapshot frames are 16 ms apart, so each step gets about 0.6 s.
 
 void centredText(const char* text, ImU32 color, float y) {
@@ -31,72 +36,14 @@ void centredText(const char* text, ImU32 color, float y) {
     ImGui::PopStyleColor();
 }
 
-// A button that plainly opens a list: a monitor icon, an optional muted caption, the current choice in
-// bold, and an arrow that points up while the list is open. Returns true when clicked.
-bool screenButton(const char* caption, const char* text, bool open, const theme::Fonts& fonts, float dpi) {
-    const float height = std::round(34.0f * dpi);
-    const float padding = std::round(12.0f * dpi);
-    const float iconWidth = std::round(16.0f * dpi);
-    const float gap = std::round(9.0f * dpi);
-    const float arrowWidth = std::round(9.0f * dpi);
-    const float stroke = std::round(1.5f * dpi * 2.0f) * 0.5f;
-
-    const float fontSize = ImGui::GetFontSize();
-    const float captionWidth = caption != nullptr ? ImGui::CalcTextSize(caption).x + std::round(5.0f * dpi) : 0.0f;
-    const float textWidth = fonts.medium->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text).x;
-    const float width = padding + iconWidth + gap + captionWidth + textWidth + gap + arrowWidth + padding;
-
-    const ImVec2 min = ImGui::GetCursorScreenPos();
-    const bool clicked = ImGui::InvisibleButton("##screenButton", ImVec2(std::round(width), height));
-    const bool hovered = ImGui::IsItemHovered();
-    const bool held = ImGui::IsItemActive();
-    if (hovered) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+// "12:34" or "1:02:34".
+void formatDuration(char* text, std::size_t size, std::chrono::steady_clock::duration duration) {
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+    if (seconds >= 3600) {
+        std::snprintf(text, size, "%lld:%02lld:%02lld", seconds / 3600, seconds / 60 % 60, seconds % 60);
+    } else {
+        std::snprintf(text, size, "%02lld:%02lld", seconds / 60, seconds % 60);
     }
-    const ImVec2 max = ImGui::GetItemRectMax();
-    const bool lit = hovered || open;
-
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const float rounding = 8.0f * dpi;
-    drawList->AddRectFilled(min, max,
-                            held || open ? theme::kSurfaceActive
-                            : hovered    ? theme::kSurfaceHover
-                                         : theme::kSurface,
-                            rounding);
-    drawList->AddRect(min, max,
-                      open      ? theme::kAccent
-                      : hovered ? theme::kBorderHover
-                                : theme::kBorder,
-                      rounding, 0, 1.0f);
-
-    // Monitor icon: a screen on a short stand.
-    const float middle = std::round((min.y + max.y) * 0.5f);
-    const ImU32 iconColor = lit ? theme::kText : theme::kTextMuted;
-    float x = min.x + padding;
-    const float iconMid = x + iconWidth * 0.5f;
-    drawList->AddRect(ImVec2(x, middle - std::round(7.0f * dpi)),
-                      ImVec2(x + iconWidth, middle + std::round(4.0f * dpi)), iconColor, 2.0f * dpi, 0, stroke);
-    drawList->AddLine(ImVec2(iconMid, middle + std::round(4.0f * dpi)),
-                      ImVec2(iconMid, middle + std::round(7.0f * dpi)), iconColor, stroke);
-    drawList->AddLine(ImVec2(iconMid - std::round(4.0f * dpi), middle + std::round(7.0f * dpi)),
-                      ImVec2(iconMid + std::round(4.0f * dpi), middle + std::round(7.0f * dpi)), iconColor, stroke);
-    x += iconWidth + gap;
-
-    const float textY = std::round(middle - fontSize * 0.5f);
-    if (caption != nullptr) {
-        drawList->AddText(ImGui::GetFont(), fontSize, ImVec2(x, textY), theme::kTextMuted, caption);
-        x += captionWidth;
-    }
-    drawList->AddText(fonts.medium, fontSize, ImVec2(x, textY), theme::kText, text);
-    x += textWidth + gap;
-
-    // Arrow: down while closed, up while the list is open.
-    const float tip = std::round(arrowWidth * 0.5f) * (open ? -1.0f : 1.0f);
-    drawList->PathLineTo(ImVec2(x, middle - tip * 0.5f));
-    drawList->PathLineTo(ImVec2(x + arrowWidth * 0.5f, middle + tip * 0.5f));
-    drawList->PathLineTo(ImVec2(x + arrowWidth, middle - tip * 0.5f));
-    drawList->PathStroke(iconColor, 0, stroke);
-    return clicked;
 }
 
 } // namespace
@@ -119,8 +66,23 @@ int App::run() {
     }
 
     while (window_->pumpMessages()) {
+        // Recording works while the window is minimized or behind a game, so this comes before drawing.
+        if (window_->takeHotkeyPress()) {
+            toggleRecording();
+        }
+        if (recorder_ && recorder_->failed()) {
+            recordingError_ = "Recording stopped. " + recorder_->error();
+            stopRecording();
+        }
+
         // Starting and stopping happen here, outside an ImGui frame, so no draw data points at freed images.
+        if (closeReview_) {
+            review_.reset();
+            closeReview_ = false;
+        }
         if (chosen_) {
+            review_.reset();  // Picking a screen is asking to see it.
+            stopRecording();  // A recording is of one screen.
             picker_->close(); // Its capture of the chosen screen goes first; the pipeline takes over.
             observe(*chosen_);
             chosen_.reset();
@@ -133,11 +95,18 @@ int App::run() {
             Sleep(10);
             continue;
         }
-        pipeline_.setPreviewEnabled(observedImage_ != nullptr);
+        pipeline_.setPreviewEnabled(observedImage_ != nullptr && !review_); // The review covers it.
         if (preview_ && preview_->copyNewImage(gpu_.context.Get(), observedImage_->texture())) {
             observedImage_->imageCopied();
         }
 
+        // While reviewing, the arrow keys, Tab and Space belong to the review, not to moving between buttons.
+        ImGuiIO& io = ImGui::GetIO();
+        if (review_) {
+            io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+        } else {
+            io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        }
         const bool saveSnapshot = snapshot_ && playSnapshot();
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -174,9 +143,19 @@ void App::init() {
     ImGui_ImplWin32_EnableDpiAwareness();
     dpiScale_ = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
 
+    if (snapshot_) {
+        settings_.recordingsFolder = std::filesystem::path(snapshot_->path).parent_path() / L"recordings";
+    } else {
+        settingsFile_ = appFolder() / L"observex.cfg";
+        settings_ = Settings::load(settingsFile_);
+    }
+
     gpuAdapter_ = findPrimaryGpu();
     gpu_ = createGpuDevice(gpuAdapter_.Get());
     window_ = std::make_unique<MainWindow>(L"observex", gpu_.device.Get(), dpiScale_, !snapshot_);
+    if (!snapshot_) {
+        hotkeyRegistered_ = window_->registerHotkey(MOD_CONTROL | MOD_ALT, 'R');
+    }
     picker_ = std::make_unique<ScreenPicker>(gpu_.device.Get(), gpuAdapter_.Get());
 
     IMGUI_CHECKVERSION();
@@ -195,6 +174,8 @@ void App::init() {
 }
 
 void App::shutdown() {
+    review_.reset();
+    stopRecording();
     stopObserving();
     picker_.reset();
     if (imguiReady_) {
@@ -216,7 +197,7 @@ void App::observe(const Screen& screen) {
         return; // The view shows pipeline_.error().
     }
     try {
-        preview_ = std::make_unique<PreviewReader>(gpu_.device.Get(), *pipeline_.preview());
+        preview_ = std::make_unique<ImageReader>(gpu_.device.Get(), *pipeline_.preview());
         observedImage_ = std::make_unique<ScreenImage>(gpu_.device.Get(), pipeline_.width(), pipeline_.height());
     } catch (const std::exception& e) {
         stopObserving();
@@ -225,6 +206,7 @@ void App::observe(const Screen& screen) {
 }
 
 void App::stopObserving() {
+    pauseRecording(); // The recorder reads from the pipeline's channel; it goes first.
     preview_.reset(); // Before the pipeline frees the channel it reads from.
     observedImage_.reset();
     pipeline_.stop();
@@ -234,29 +216,145 @@ void App::observeAgain() {
     for (const Screen& screen : listScreens(gpuAdapter_.Get())) {
         if (screen.name == observed_->name) {
             observe(screen);
+            if (recording_) {
+                if (canRecord()) {
+                    resumeRecording(); // Same folder, numbering continues.
+                } else {
+                    stopRecording();
+                }
+            }
             return;
         }
     }
-    stopObserving(); // The screen was disconnected.
+    stopRecording(); // The screen was disconnected.
+    stopObserving();
     observed_.reset();
 }
 
+bool App::canRecord() const {
+    return observed_ && pipeline_.recording() != nullptr && pipeline_.state() != Pipeline::State::Failed;
+}
+
+void App::toggleRecording() {
+    if (recording_) {
+        stopRecording();
+    } else {
+        startRecording();
+    }
+}
+
+void App::startRecording() {
+    if (recording_ || !canRecord()) {
+        return;
+    }
+    // Each recording gets its own folder, named by the date and time, e.g. 2026-10-31_23-05-12.
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    char name[40];
+    std::snprintf(name, sizeof(name), "%04u-%02u-%02u_%02u-%02u-%02u", now.wYear, now.wMonth, now.wDay, now.wHour,
+                  now.wMinute, now.wSecond);
+    std::filesystem::path folder = settings_.recordingsFolder / name;
+    std::error_code error;
+    for (int i = 2; std::filesystem::exists(folder, error); ++i) {
+        folder = settings_.recordingsFolder / (std::string(name) + "_" + std::to_string(i));
+    }
+    recordingError_.clear();
+    recording_ = Recording{folder, std::chrono::steady_clock::now(), 0};
+    resumeRecording();
+}
+
+void App::resumeRecording() {
+    try {
+        recorder_ =
+            std::make_unique<Recorder>(*observed_, *pipeline_.recording(), recording_->folder, recording_->saved + 1);
+        pipeline_.setRecordingRate(kRecordingRate);
+    } catch (const std::exception& e) {
+        recordingError_ = std::string("Could not record: ") + e.what();
+        recorder_.reset();
+        recording_.reset();
+    }
+}
+
+void App::pauseRecording() {
+    pipeline_.setRecordingRate(0);
+    if (recorder_) {
+        if (recording_) {
+            recording_->saved += recorder_->saved();
+        }
+        recorder_.reset();
+    }
+}
+
+void App::stopRecording() {
+    pauseRecording();
+    recording_.reset();
+}
+
+void App::saveSettings() {
+    if (!settingsFile_.empty()) {
+        settings_.save(settingsFile_);
+    }
+}
+
+void App::chooseReviewFolder() {
+    std::optional<std::filesystem::path> folder;
+    if (!snapshot_) {
+        folder = pickFolder(window_->handle(), settings_.recordingsFolder, L"Choose a recording to review");
+    } else if (!snapshot_->reviewFolder.empty()) {
+        folder = snapshot_->reviewFolder; // Snapshot mode never shows a Windows dialog.
+    }
+    if (!folder) {
+        return;
+    }
+    reviewError_.clear();
+    reviewFolderImages_ = Review::listImages(*folder).size();
+    if (reviewFolderImages_ == 0) {
+        reviewError_ = "No recorded images in " + toUtf8(folder->c_str());
+        return;
+    }
+    reviewFolder_ = *folder;
+    ImGui::OpenPopup(kCategoryPopup);
+}
+
+void App::startReview(const Category& category) {
+    try {
+        review_ = std::make_unique<Review>(gpu_.device.Get(), reviewFolder_, category);
+    } catch (const std::exception& e) {
+        reviewError_ = std::string("Could not open the recording: ") + e.what();
+    }
+}
+
 bool App::playSnapshot() {
-    // Step 0 lets the UI settle, then one step per click, then the mouse rests and the last frame is saved.
+    // Step 0 lets the UI settle, then one input step each, then the mouse rests and the last frame is saved.
     ImGuiIO& io = ImGui::GetIO();
     const int step = snapshotFrame_ / kSnapshotStepFrames - 1;
     const int frame = snapshotFrame_ % kSnapshotStepFrames;
     ++snapshotFrame_;
-    const int clicks = static_cast<int>(snapshot_->clicks.size());
+    const int steps = static_cast<int>(snapshot_->steps.size());
     if (step < 0) {
         return false;
     }
-    if (step < clicks) {
-        const ImVec2 click = snapshot_->clicks[static_cast<std::size_t>(step)];
+    if (step < steps) {
+        const Snapshot::Step& input = snapshot_->steps[static_cast<std::size_t>(step)];
+        if (input.key != ImGuiKey_None) {
+            if (frame == 1 || frame == 2) {
+                io.AddKeyEvent(input.key, frame == 1);
+            }
+            return false;
+        }
+        // Press at `from`, move to `to` over a few frames (none for a click), let go.
+        const bool drag = input.from.x != input.to.x || input.from.y != input.to.y;
+        const int moveFrames = drag ? 10 : 0;
         if (frame == 0) {
-            io.AddMousePosEvent(click.x, click.y);
-        } else if (frame == 1 || frame == 2) {
-            io.AddMouseButtonEvent(ImGuiMouseButton_Left, frame == 1);
+            io.AddMousePosEvent(input.from.x, input.from.y);
+        } else if (frame == 1) {
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        } else if (frame <= 1 + moveFrames) {
+            const float t = static_cast<float>(frame - 1) / static_cast<float>(moveFrames);
+            io.AddMousePosEvent(input.from.x + (input.to.x - input.from.x) * t,
+                                input.from.y + (input.to.y - input.from.y) * t);
+        } else if (frame == 2 + moveFrames) {
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
         }
         return false;
     }
@@ -280,10 +378,21 @@ void App::drawFrame() {
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + barHeight));
     ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, viewport->Size.y - barHeight));
     ImGui::Begin("##view", nullptr, kFixedWindow);
-    if (observed_) {
+    if (review_) {
+        review_->draw(fonts_);
+    } else if (observed_) {
         drawObservedScreen();
     } else {
         drawChooseScreen();
+    }
+    // Errors stack at the top right.
+    const float inset = std::round(12.0f * dpiScale_);
+    ImVec2 corner(viewport->Pos.x + viewport->Size.x - inset, viewport->Pos.y + barHeight + inset);
+    for (const std::string* error : {&recordingError_, &reviewError_}) {
+        if (!error->empty()) {
+            theme::drawLabel(ImGui::GetWindowDrawList(), corner, ImVec2(1.0f, 0.0f), error->c_str());
+            corner.y += ImGui::GetTextLineHeight() + std::round(16.0f * dpiScale_);
+        }
     }
     ImGui::End();
 }
@@ -300,18 +409,101 @@ void App::drawTopBar(float height) {
     ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(pos.x, pos.y + height - 1.0f),
                                               ImVec2(pos.x + viewport->Size.x, pos.y + height), theme::kBorder);
 
-    // The screen button names the observed screen and opens the miniatures to pick another.
     const float margin = std::round(12.0f * dpiScale_);
-    ImGui::SetCursorScreenPos(ImVec2(pos.x + margin, pos.y + std::round((height - 34.0f * dpiScale_) * 0.5f)));
-    const bool pickerOpen = ImGui::IsPopupOpen(kPickerPopup);
-    const bool clicked = observed_
-                             ? screenButton("Observing", observed_->monitor.c_str(), pickerOpen, fonts_, dpiScale_)
-                             : screenButton(nullptr, "Choose a screen", pickerOpen, fonts_, dpiScale_);
-    if (clicked) {
+    const float buttonY = pos.y + std::round((height - BarButton::kHeight * dpiScale_) * 0.5f);
+    const float popupGap = std::round(6.0f * dpiScale_);
+
+    // Right: Settings, and Record to its left. Drawn first so their popups and tooltips sit on top.
+    BarButton settingsButton;
+    settingsButton.icon = Icon::Gear;
+    settingsButton.open = ImGui::IsPopupOpen(kSettingsPopup);
+    float x = pos.x + viewport->Size.x - margin - settingsButton.width(fonts_);
+    ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
+    if (settingsButton.draw("##settings", fonts_)) {
+        ImGui::OpenPopup(kSettingsPopup);
+    }
+    if (ImGui::IsItemHovered() && !settingsButton.open) {
+        ImGui::SetTooltip("Settings");
+    }
+    const ImVec2 settingsCorner(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap);
+
+    BarButton recordButton;
+    char detail[64];
+    if (recording_) {
+        const unsigned saved = recording_->saved + (recorder_ ? recorder_->saved() : 0);
+        char duration[16];
+        formatDuration(duration, sizeof(duration), std::chrono::steady_clock::now() - recording_->started);
+        std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u %s", duration, saved, saved == 1 ? "image" : "images");
+        recordButton.icon = Icon::Stop;
+        recordButton.text = "Stop";
+        recordButton.detail = detail;
+        recordButton.open = true;
+        recordButton.highlight = theme::kRecord;
+    } else {
+        recordButton.icon = Icon::Record;
+        recordButton.text = "Record";
+        recordButton.detail = hotkeyRegistered_ || snapshot_ ? kHotkeyText : nullptr;
+        recordButton.enabled = canRecord();
+    }
+    x -= std::round(8.0f * dpiScale_) + recordButton.width(fonts_);
+    ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
+    if (recordButton.draw("##record", fonts_)) {
+        toggleRecording();
+    }
+    if (ImGui::IsItemHovered() && !recordButton.enabled) {
+        ImGui::SetTooltip("Choose a screen to record it");
+    }
+
+    // Review, left of Record: opens a recording to answer what observex found in it, or closes the review.
+    BarButton reviewButton;
+    if (review_) {
+        reviewButton.icon = Icon::Close;
+        reviewButton.text = "Close review";
+    } else {
+        reviewButton.icon = Icon::Picture;
+        reviewButton.text = "Review";
+        reviewButton.open = ImGui::IsPopupOpen(kCategoryPopup);
+    }
+    x -= std::round(8.0f * dpiScale_) + reviewButton.width(fonts_);
+    ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
+    if (reviewButton.draw("##review", fonts_)) {
+        if (review_) {
+            closeReview_ = true;
+        } else {
+            chooseReviewFolder();
+        }
+    }
+    if (ImGui::IsItemHovered() && !review_ && !reviewButton.open) {
+        ImGui::SetTooltip("Open a recording and answer what observex found in it");
+    }
+    drawCategoryChooser();
+    if (review_) {
+        drawReviewSteps(height);
+    }
+
+    ImGui::SetNextWindowPos(settingsCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    if (ImGui::BeginPopup(kSettingsPopup)) {
+        drawSettings();
+        ImGui::EndPopup();
+    }
+
+    // Left: the screen button names the observed screen and opens the miniatures to pick another.
+    BarButton screenButton;
+    screenButton.icon = Icon::Monitor;
+    screenButton.arrow = true;
+    screenButton.open = ImGui::IsPopupOpen(kPickerPopup);
+    if (observed_) {
+        screenButton.caption = "Observing";
+        screenButton.text = observed_->monitor.c_str();
+    } else {
+        screenButton.text = "Choose a screen";
+    }
+    ImGui::SetCursorScreenPos(ImVec2(pos.x + margin, buttonY));
+    if (screenButton.draw("##screen", fonts_)) {
         ImGui::OpenPopup(kPickerPopup);
     }
 
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 6.0f * dpiScale_));
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + popupGap));
     if (ImGui::BeginPopup(kPickerPopup)) {
         ImGui::TextDisabled(kChooseText);
         ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
@@ -325,6 +517,150 @@ void App::drawTopBar(float height) {
         ImGui::EndPopup();
     }
     ImGui::End();
+}
+
+void App::drawSettings() {
+    const float width = std::round(460.0f * dpiScale_);
+    const float sectionGap = std::round(10.0f * dpiScale_);
+
+    ImGui::PushFont(fonts_.medium, 0.0f);
+    ImGui::TextUnformatted("Settings");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0.0f, sectionGap * 0.5f));
+
+    // Where recordings are saved. Typing a path is not needed: the folder picker sets it.
+    ImGui::TextDisabled("Recordings folder");
+    std::string folder = toUtf8(settings_.recordingsFolder.c_str());
+    ImGui::SetNextItemWidth(width);
+    ImGui::InputText("##folder", folder.data(), folder.size() + 1, ImGuiInputTextFlags_ReadOnly);
+    if (ImGui::Button("Change\xE2\x80\xA6")) {
+        if (const std::optional<std::filesystem::path> picked =
+                pickFolder(window_->handle(), settings_.recordingsFolder, L"Choose where recordings are saved")) {
+            settings_.recordingsFolder = *picked;
+            saveSettings();
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Open")) {
+        showInExplorer(settings_.recordingsFolder);
+    }
+    if (settings_.recordingsFolder != defaultRecordingsFolder()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Use default")) {
+            settings_.recordingsFolder = defaultRecordingsFolder();
+            saveSettings();
+        }
+    }
+    if (recording_) {
+        ImGui::TextDisabled("A new folder applies from the next recording.");
+    }
+    ImGui::Dummy(ImVec2(0.0f, sectionGap));
+
+    ImGui::TextDisabled(hotkeyRegistered_ || snapshot_
+                            ? "Ctrl+Alt+R starts and stops recording, even while a game is in front."
+                            : "Ctrl+Alt+R is taken by another app, so only the Record button works.");
+}
+
+void App::drawReviewSteps(float height) {
+    // In the middle of the bar: back, where we are, forward.
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float gap = std::round(12.0f * dpiScale_);
+    BarButton back;
+    back.icon = Icon::Back;
+    back.enabled = review_->canGoBack();
+    BarButton forward;
+    forward.icon = Icon::Forward;
+    forward.enabled = review_->canGoOn();
+
+    char position[64];
+    std::snprintf(position, sizeof(position), "Image %zu of %zu", review_->index() + 1, review_->imageCount());
+    char reviewed[64];
+    std::snprintf(reviewed, sizeof(reviewed), "%zu reviewed", review_->reviewedCount());
+    const float fontSize = ImGui::GetFontSize();
+    const float positionWidth = fonts_.medium->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, position).x;
+    const float reviewedWidth = ImGui::CalcTextSize(reviewed).x;
+    const float textGap = std::round(8.0f * dpiScale_);
+    const float total =
+        back.width(fonts_) + gap + positionWidth + textGap + reviewedWidth + gap + forward.width(fonts_);
+
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const float buttonY = pos.y + std::round((height - BarButton::kHeight * dpiScale_) * 0.5f);
+    const float textY = pos.y + std::round((height - fontSize) * 0.5f);
+    float x = std::round(pos.x + (viewport->Size.x - total) * 0.5f);
+    ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
+    if (back.draw("##back", fonts_)) {
+        review_->previous();
+    }
+    if (ImGui::IsItemHovered() && back.enabled) {
+        ImGui::SetTooltip("Previous image (Left arrow)");
+    }
+    x += back.width(fonts_) + gap;
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddText(fonts_.medium, fontSize, ImVec2(x, textY), theme::kText, position);
+    x += positionWidth + textGap;
+    drawList->AddText(ImVec2(x, textY), theme::kTextMuted, reviewed);
+    x += reviewedWidth + gap;
+    ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
+    if (forward.draw("##forward", fonts_)) {
+        review_->next();
+    }
+    if (ImGui::IsItemHovered() && forward.enabled) {
+        ImGui::SetTooltip("Next image (Right arrow). Marks you did not answer count as no.");
+    }
+}
+
+void App::drawCategoryChooser() {
+    // After the folder: what to look for. Only monsters for now; more categories are more tiles.
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + viewport->Size.y * 0.4f), ImGuiCond_Always,
+        ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal(kCategoryPopup, nullptr,
+                                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
+                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+        return;
+    }
+    const float dpi = dpiScale_;
+    ImGui::PushFont(fonts_.medium, 18.0f);
+    ImGui::TextUnformatted(kCategoryPopup);
+    ImGui::PopFont();
+    char where[300];
+    std::snprintf(where, sizeof(where), "%s  \xC2\xB7  %zu images", toUtf8(reviewFolder_.filename().c_str()).c_str(),
+                  reviewFolderImages_);
+    ImGui::TextDisabled("%s", where);
+    ImGui::Dummy(ImVec2(0.0f, 6.0f * dpi));
+
+    const ImVec2 tileSize(std::round(340.0f * dpi), std::round(60.0f * dpi));
+    const ImVec2 padding(std::round(14.0f * dpi), std::round(11.0f * dpi));
+    for (const Category& category : kCategories) {
+        const ImVec2 min = ImGui::GetCursorScreenPos();
+        ImGui::PushID(category.id);
+        const bool clicked = ImGui::InvisibleButton("##category", tileSize);
+        ImGui::PopID();
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
+        const ImVec2 max = ImGui::GetItemRectMax();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        drawList->AddRectFilled(min, max, hovered ? theme::kSurfaceActive : theme::kSurfaceHover, 8.0f * dpi);
+        drawList->AddRect(min, max, hovered ? theme::kAccent : theme::kBorderHover, 8.0f * dpi, 0, 1.0f);
+        drawList->AddText(fonts_.medium, ImGui::GetFontSize(), ImVec2(min.x + padding.x, min.y + padding.y),
+                          theme::kText, category.name);
+        drawList->AddText(ImVec2(min.x + padding.x, max.y - padding.y - ImGui::GetTextLineHeight()), theme::kTextMuted,
+                          category.description);
+        if (clicked) {
+            ImGui::CloseCurrentPopup();
+            startReview(category);
+        }
+    }
+    ImGui::Dummy(ImVec2(0.0f, 2.0f * dpi));
+    ImGui::TextDisabled("More kinds later: party members, terrain, the game's UI.");
+    ImGui::Dummy(ImVec2(0.0f, 4.0f * dpi));
+    if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 void App::drawChooseScreen() {

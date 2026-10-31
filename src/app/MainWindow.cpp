@@ -16,6 +16,7 @@ namespace observex {
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"observex";
+constexpr int kHotkeyId = 1;
 
 // Dark title bar in the app's own colours (Windows 11; older versions keep their default).
 void styleTitleBar(HWND hwnd) {
@@ -82,6 +83,9 @@ MainWindow::MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScal
 
 MainWindow::~MainWindow() {
     if (hwnd_ != nullptr) {
+        if (hotkeyRegistered_) {
+            UnregisterHotKey(hwnd_, kHotkeyId);
+        }
         DestroyWindow(hwnd_);
     }
     UnregisterClassW(kWindowClass, GetModuleHandleW(nullptr));
@@ -133,6 +137,19 @@ ComPtr<ID3D11Texture2D> MainWindow::backBuffer() const {
     return texture;
 }
 
+bool MainWindow::registerHotkey(UINT modifiers, UINT key) {
+    hotkeyRegistered_ = RegisterHotKey(hwnd_, kHotkeyId, modifiers | MOD_NOREPEAT, key) != FALSE;
+    return hotkeyRegistered_;
+}
+
+bool MainWindow::takeHotkeyPress() {
+    if (hotkeyPresses_ == 0) {
+        return false;
+    }
+    --hotkeyPresses_;
+    return true;
+}
+
 void MainWindow::createBackBufferView() {
     check(device_->CreateRenderTargetView(backBuffer().Get(), nullptr, &backBufferView_), "CreateRenderTargetView");
 }
@@ -152,6 +169,11 @@ LRESULT CALLBACK MainWindow::windowProc(HWND hwnd, UINT message, WPARAM wParam, 
         if (self != nullptr && wParam != SIZE_MINIMIZED) {
             self->pendingWidth_ = LOWORD(lParam);
             self->pendingHeight_ = HIWORD(lParam);
+        }
+        return 0;
+    case WM_HOTKEY:
+        if (self != nullptr && wParam == kHotkeyId) {
+            ++self->hotkeyPresses_;
         }
         return 0;
     case WM_SYSCOMMAND:

@@ -56,6 +56,11 @@ void ScreenImage::update(ID3D11Texture2D* image) {
     imageCopied();
 }
 
+void ScreenImage::upload(const void* bgra, unsigned stride) {
+    context_->UpdateSubresource(texture_.Get(), 0, nullptr, bgra, stride, 0);
+    imageCopied();
+}
+
 void ScreenImage::imageCopied() {
     context_->GenerateMips(allLevels_.Get());
     hasImage_ = true;

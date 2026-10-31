@@ -12,7 +12,7 @@
 
 namespace observex {
 
-class PreviewChannel;
+class ImageChannel;
 class ScreenCapture;
 
 // What the pipeline reports to the UI, refreshed once per second.
@@ -28,7 +28,7 @@ struct PipelineStats {
 
 // The real-time loop: capture, then (still to come) recognise and react. It runs on its own time-critical
 // thread with its own GPU device, so nothing the UI does can slow it down. Talks to the UI only through
-// lock-free hand-overs (stats, preview) and atomics.
+// lock-free hand-overs (stats, preview, recording) and atomics.
 class Pipeline {
 public:
     enum class State : std::uint8_t {
@@ -51,7 +51,7 @@ public:
     // state() is then Failed and error() says why.
     bool start(const Screen& screen);
 
-    // Stops the loop and frees its GPU resources. Destroy any PreviewReader of preview() first.
+    // Stops the loop and frees its GPU resources. Destroy any reader of preview() or recording() first.
     void stop();
 
     State state() const { return state_.load(std::memory_order_acquire); }
@@ -59,7 +59,12 @@ public:
 
     // While on, each new image is also copied for the UI preview. Off costs nothing.
     void setPreviewEnabled(bool enabled) { previewEnabled_.store(enabled, std::memory_order_relaxed); }
-    PreviewChannel* preview() const { return preview_.get(); }
+    ImageChannel* preview() const { return preview_.get(); }
+
+    // While above zero, that many images per second are also copied for recording (see Recorder).
+    // Only images the screen actually updated are recorded. Zero (off) costs nothing.
+    void setRecordingRate(unsigned perSecond) { recordingRate_.store(perSecond, std::memory_order_relaxed); }
+    ImageChannel* recording() const { return recording_.get(); }
 
     // Newest statistics. The reference stays valid until the next call or start().
     const PipelineStats& stats();
@@ -75,10 +80,12 @@ private:
 
     GpuDevice gpu_;
     std::unique_ptr<ScreenCapture> capture_;
-    std::unique_ptr<PreviewChannel> preview_;
+    std::unique_ptr<ImageChannel> preview_;
+    std::unique_ptr<ImageChannel> recording_;
     std::unique_ptr<TripleBuffer<PipelineStats>> stats_;
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
+    std::atomic<unsigned> recordingRate_{0};
     std::string error_;
     unsigned width_ = 0;
     unsigned height_ = 0;

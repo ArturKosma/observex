@@ -28,20 +28,24 @@ else()
     target_compile_options(observex_warnings INTERFACE -Wall -Wextra -Wpedantic)
 endif()
 
-# Core: platform-free building blocks (lock-free hand-over, statistics). Header-only, unit tested.
-add_library(observex_core INTERFACE)
-target_include_directories(observex_core INTERFACE src)
+# Core: platform-free building blocks (lock-free hand-over, statistics, marks on images). Unit tested.
+add_library(observex_core STATIC
+    src/core/Marks.cpp)
+target_include_directories(observex_core PUBLIC src)
+target_link_libraries(observex_core PRIVATE observex_warnings)
 
-# Engine: the real-time loop (screen capture on its own thread and GPU device). No UI code.
+# Engine: the real-time loop (screen capture on its own thread and GPU device) and the recorder. No UI code.
 add_library(observex_engine STATIC
     src/engine/Gpu.cpp
+    src/engine/ImageChannel.cpp
+    src/engine/ImageFile.cpp
     src/engine/Pipeline.cpp
-    src/engine/PreviewChannel.cpp
+    src/engine/Recorder.cpp
     src/engine/ScreenCapture.cpp)
 target_compile_definitions(observex_engine PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(observex_engine
     PUBLIC observex_core d3d11 dxgi
-    PRIVATE observex_warnings)
+    PRIVATE windowscodecs observex_warnings)
 
 # App: the window and the UI. The icon and fonts are built into the exe (see src/app/observex.rc.in).
 set(OBSERVEX_SOURCE_DIR ${CMAKE_SOURCE_DIR})
@@ -49,13 +53,16 @@ configure_file(src/app/observex.rc.in ${CMAKE_BINARY_DIR}/observex.rc @ONLY)
 add_executable(observex
     src/app/App.cpp
     src/app/MainWindow.cpp
+    src/app/Review.cpp
     src/app/ScreenImage.cpp
     src/app/ScreenPicker.cpp
+    src/app/Settings.cpp
     src/app/Snapshot.cpp
     src/app/Theme.cpp
+    src/app/Widgets.cpp
     src/app/main.cpp
     ${CMAKE_BINARY_DIR}/observex.rc)
-target_link_libraries(observex PRIVATE observex_engine imgui dwmapi windowscodecs observex_warnings)
+target_link_libraries(observex PRIVATE observex_engine imgui dwmapi observex_warnings)
 
 # Debug builds keep a console window for stderr; other configs are a plain windowed app.
 # The Release build goes straight into the project folder, so C:\_ai\observex\observex.exe is always the newest.
@@ -76,6 +83,7 @@ target_link_libraries(observex_bench PRIVATE observex_engine dwmapi observex_war
 if(OBSERVEX_BUILD_TESTS)
     enable_testing()
     add_executable(observex_tests
+        tests/MarksTests.cpp
         tests/StatWindowTests.cpp
         tests/TripleBufferTests.cpp
         tests/test_main.cpp)

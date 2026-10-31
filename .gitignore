@@ -3,6 +3,10 @@ build/
 out/
 /observex.exe
 
+# The app's settings and recordings (screen images, gigabytes per hour)
+/observex.cfg
+/recordings/
+
 # IDEs
 .vs/
 .vscode/

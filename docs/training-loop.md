@@ -16,13 +16,13 @@ record  ->  propose  ->  review  ->  train  ->  detect live
   +------------------ next round ------------------+
 ```
 
-1. **Record.** While the user plays, observex saves a few frames per second in the background. Nothing is analysed
+1. **Record.** While the user plays, observex saves one frame per second in the background. Nothing is analysed
    during play, so the game and the capture loop are never slowed.
 2. **Propose.** After the session, observex looks through the saved frames and picks out candidate objects. In the
    first round it knows nothing yet, so a general "find every distinct object" model makes the guesses (slow, but it
    runs offline). From the second round on, observex's own trained model makes them.
 3. **Review.** The user asks for "the next thing you think might be a monster" and answers with one key per item:
-   monster, player, NPC, or nothing. observex:
+   monster, player, NPC, or nothing (as built: one category at a time, e.g. monsters, answered yes or no). observex:
    - shows each candidate in its frame, with the box drawn on it;
    - **labels tracks, not single pictures**: the same monster in consecutive frames is followed from frame to frame,
      so one answer covers it from every angle seen;
@@ -73,21 +73,52 @@ when the score is good enough.
 
 ## Build order
 
-Each step can be tried on its own. Status: not started.
+Each step can be tried on its own.
 
 1. **Recording**: save frames (and later the user's clicks and keys) to the data folder, without slowing capture.
+   **Built (frames).** Record button or Ctrl+Alt+R; one folder per recording, named by date and time, holding
+   `000001.jpg`, `000002.jpg`, ...; 1 image per second, fixed (the user asked for no rate setting; neighbouring
+   images would be near copies); only images the screen actually updated. JPEG quality 85: about 0.7 MB per
+   2560 x 1440 Lineage 2 image, about 2.6 GB per hour. No measurable cost to capture. Clicks and keys: not yet.
 2. **Review screen**: step through candidates and answer with one key; show the score.
-3. **First-round proposer**: the general object finder for round one.
+   **Built (answering).** Review button, then the recording's folder, then the category ("What are we looking
+   for?"; only Monsters for now). Each image shows the finder's marks with how sure it is; the user answers yes or
+   no per mark (click, or Y / N), drags a box around anything missed, and moves on with the Right arrow. Moving on
+   makes the image *reviewed*: unanswered marks count as no, and everything in the category on it is marked yes.
+   Answers carry forward to marks on the next image that overlap an answered one by at least half (marked
+   "copied"). Every image is shown, in order.
+   Not yet: tracks (one answer for a monster across many images), most-uncertain-first order, and the score.
+   Files, in each recording's folder, plain text (`src/core/Marks.h`), for the finder and the training tool:
+   ```
+   # <category>-guesses.txt, written by the finder: how sure it is (0 to 1), then x y width height in pixels
+   image 000001.jpg
+   0.81 150 312 34 42
+   # <category>-answers.txt, written by review: only reviewed images
+   image 000001.jpg
+   yes 150 312 34 42
+   no 1408 384 51 79
+   ```
+3. **First-round proposer**: the general object finder for round one. **Probably not needed** (2026-10-31): the
+   user hand-labels the first few dozen images (drawing every monster), the first model is trained on those, and
+   that model is the finder from round two on. Build a general finder only if hand-labelling turns out too slow.
 4. **Training tool**: Python, trains the detector and exports the model file.
 5. **Live detection**: TensorRT in the pipeline, plus the tracker; draw the boxes in the observed view.
 
 ## Open questions
 
-- Which Lineage 2: official (Classic, Essence or the main game) or a private server? The interface and on-screen
-  markers differ. Bots break the rules on official servers and accounts get banned; on a private server it depends
-  on its rules.
-- Where the data folder lives, and how many frames per second to record.
-- Which general object finder for round one (e.g. Segment Anything in its automatic mode).
+- Who labels long sessions. The user suggested Claude could label instead of them. Claude reads these frames well
+  (it can tell gremlins from the Defender guard and the player), but its boxes are only roughly placed, and through
+  a chat it takes many seconds per image. Likely split: a finder model draws precise boxes; Claude (through the API,
+  in a tool, at a cost per image) or the user answers yes or no; the user spot-checks. To decide with step 3.
+
+- Which Lineage 2: the first recordings (2026-10-31) show a private Interlude server (L2 Reborn, "Reborn Eternal
+  Interlude x10"). Not yet confirmed by the user as the target. There, monsters show "Level: N" and their name above
+  their heads, and the targeted one also gets red markers beside its name and the target window at the top; these
+  are the free labels described above. A private server's own rules decide whether bots are allowed.
+- Data folder: decided. `recordings/` next to observex.exe by default, changeable in Settings; 1 image per second.
+- Round one: decided for now. The user draws the boxes on the first few dozen images themselves (varied places,
+  distances and monster kinds, every monster on each image), then the first model is trained. A general object
+  finder (e.g. Segment Anything) only if that proves too slow.
 
 ## Reference numbers (from research, 2026-10-31, not measured here)
 

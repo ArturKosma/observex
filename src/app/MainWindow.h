@@ -32,6 +32,13 @@ public:
     // The image being drawn this frame (for snapshots).
     ComPtr<ID3D11Texture2D> backBuffer() const;
 
+    // Registers a key combination that reaches observex even while another app (a game) has focus, e.g.
+    // registerHotkey(MOD_CONTROL | MOD_ALT, 'R'). One per window. Returns false if another app already uses it.
+    bool registerHotkey(UINT modifiers, UINT key);
+
+    // True once for each press of the hotkey since the last call.
+    bool takeHotkeyPress();
+
 private:
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     void createBackBufferView();
@@ -43,6 +50,8 @@ private:
     ComPtr<ID3D11RenderTargetView> backBufferView_;
     UINT pendingWidth_ = 0;
     UINT pendingHeight_ = 0;
+    bool hotkeyRegistered_ = false;
+    unsigned hotkeyPresses_ = 0;
 };
 
 } // namespace observex
