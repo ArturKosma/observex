@@ -1,0 +1,13 @@
+# Build output
+build/
+out/
+
+# IDEs
+.vs/
+.vscode/
+.idea/
+*.user
+CMakeUserPresets.json
+
+# Saved ImGui window layout
+imgui.ini
