@@ -26,6 +26,8 @@ constexpr char kShowPopup[] = "show";
 constexpr char kCategoryPopup[] = "What are we looking for?";
 constexpr char kChooseText[] = "Choose a screen to observe";
 constexpr char kHotkeyText[] = "Ctrl+Alt+R";
+constexpr int kRecordHotkey = 0; // MainWindow hotkey ids.
+constexpr int kMarkHotkey = 1;
 // Seconds between saved images while recording. Neighbouring images are near copies, so the user asked for one
 // every 3 s (2026-11-01) rather than more to review. Fixed, no setting.
 constexpr unsigned kRecordingInterval = 3;
@@ -64,6 +66,21 @@ void formatBytes(char* text, std::size_t size, std::uint64_t bytes) {
     }
 }
 
+// When `file` was last written, in local time: "2026-11-01 09:44". "missing" if there is no such file.
+std::string fileTime(const std::filesystem::path& file) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    FILETIME local{};
+    SYSTEMTIME time{};
+    if (!GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &data) ||
+        !FileTimeToLocalFileTime(&data.ftLastWriteTime, &local) || !FileTimeToSystemTime(&local, &time)) {
+        return "missing";
+    }
+    char text[24];
+    std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u", time.wYear, time.wMonth, time.wDay, time.wHour,
+                  time.wMinute);
+    return text;
+}
+
 } // namespace
 
 App::~App() {
@@ -85,8 +102,11 @@ int App::run() {
 
     while (window_->pumpMessages()) {
         // Recording works while the window is minimized or behind a game, so this comes before drawing.
-        if (window_->takeHotkeyPress()) {
+        if (window_->takeHotkeyPress(kRecordHotkey)) {
             toggleRecording();
+        }
+        if (window_->takeHotkeyPress(kMarkHotkey)) {
+            markMoment();
         }
         if (recorder_ && recorder_->failed()) {
             recordingError_ = "Recording stopped. " + recorder_->error();
@@ -179,7 +199,8 @@ void App::init() {
     gpu_ = createGpuDevice(gpuAdapter_.Get());
     window_ = std::make_unique<MainWindow>(L"observex", gpu_.device.Get(), dpiScale_, !snapshot_);
     if (!snapshot_) {
-        hotkeyRegistered_ = window_->registerHotkey(MOD_CONTROL | MOD_ALT, 'R');
+        hotkeyRegistered_ = window_->registerHotkey(kRecordHotkey, MOD_CONTROL | MOD_ALT, 'R');
+        markHotkeyRegistered_ = window_->registerHotkey(kMarkHotkey, MOD_CONTROL | MOD_ALT, 'M');
     }
     picker_ = std::make_unique<ScreenPicker>(gpu_.device.Get(), gpuAdapter_.Get());
 
@@ -256,6 +277,9 @@ void App::observeAgain() {
             observe(screen);
             if (recording_) {
                 if (canRecord()) {
+                    if (recording_->log) {
+                        recording_->log->resumed(); // The new pipeline numbers its images from 1 again.
+                    }
                     resumeRecording(); // Same folder, numbering continues.
                 } else {
                     stopRecording();
@@ -297,15 +321,35 @@ void App::startRecording() {
         folder = settings_.recordingsFolder / (std::string(name) + "_" + std::to_string(i));
     }
     recordingError_.clear();
-    recording_ = Recording{folder, std::chrono::steady_clock::now(), 0};
+    // What live recognition sees goes into the recording too (engine/LiveLog), to look at afterwards. A setting, on
+    // by default.
+    std::shared_ptr<LiveLog> log;
+    if (settings_.liveLog) {
+        try {
+            const std::filesystem::path model = modelFolder("monster") / L"model.onnx";
+            char about[600];
+            std::snprintf(about, sizeof(about), "Model %s (written %s), screen %s (%s), %u x %u.",
+                          toUtf8(model.c_str()).c_str(), fileTime(model).c_str(), observed_->monitor.c_str(),
+                          observed_->name.c_str(), pipeline_.width(), pipeline_.height());
+            log = std::make_shared<LiveLog>(folder / L"monster-live.txt", about);
+        } catch (const std::exception& e) {
+            recordingError_ = std::string("Could not record: ") + e.what();
+            return;
+        }
+    }
+    recording_ = Recording{folder, std::chrono::steady_clock::now()};
+    recording_->log = std::move(log);
     resumeRecording();
 }
 
 void App::resumeRecording() {
     try {
-        recorder_ =
-            std::make_unique<Recorder>(*observed_, *pipeline_.recording(), recording_->folder, recording_->saved + 1);
+        recorder_ = std::make_unique<Recorder>(*observed_, *pipeline_.recording(), recording_->folder,
+                                               recording_->saved + 1, recording_->log);
         pipeline_.setRecordingInterval(kRecordingInterval);
+        if (recognizer_) {
+            recognizer_->setLog(recording_->log);
+        }
     } catch (const std::exception& e) {
         recordingError_ = std::string("Could not record: ") + e.what();
         recorder_.reset();
@@ -315,6 +359,9 @@ void App::resumeRecording() {
 
 void App::pauseRecording() {
     pipeline_.setRecordingInterval(0);
+    if (recognizer_) {
+        recognizer_->setLog(nullptr);
+    }
     if (recorder_) {
         if (recording_) {
             recording_->saved += recorder_->saved();
@@ -327,6 +374,14 @@ void App::pauseRecording() {
 void App::stopRecording() {
     pauseRecording();
     recording_.reset();
+}
+
+void App::markMoment() {
+    if (!recording_ || !recorder_ || !recording_->log) {
+        return; // Marks go into a recording's live log.
+    }
+    recording_->log->mark(++recording_->marks);
+    pipeline_.recordNow(); // The image on screen now, to see what the mark is about.
 }
 
 void App::saveSettings() {
@@ -477,8 +532,12 @@ void App::drawTopBar(float height) {
         formatDuration(duration, sizeof(duration), std::chrono::steady_clock::now() - recording_->started);
         char bytes[16];
         formatBytes(bytes, sizeof(bytes), savedBytes);
-        std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u %s  \xC2\xB7  %s", duration, saved,
-                      saved == 1 ? "image" : "images", bytes);
+        const int length = std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u %s  \xC2\xB7  %s", duration, saved,
+                                         saved == 1 ? "image" : "images", bytes);
+        if (recording_->marks > 0 && length > 0) {
+            std::snprintf(detail + length, sizeof(detail) - static_cast<std::size_t>(length), "  \xC2\xB7  %u %s",
+                          recording_->marks, recording_->marks == 1 ? "mark" : "marks");
+        }
         recordButton.icon = Icon::Stop;
         recordButton.text = "Stop";
         recordButton.detail = detail;
@@ -497,6 +556,12 @@ void App::drawTopBar(float height) {
     }
     if (ImGui::IsItemHovered() && !recordButton.enabled) {
         ImGui::SetTooltip("Choose a screen to record it");
+    } else if (ImGui::IsItemHovered() && recording_ && recording_->log) {
+        ImGui::SetTooltip("Saving an image every %u s, and what the model sees on every image it looks at.\n"
+                          "Ctrl+Alt+M marks a moment to talk about later (it saves the image shown then too).",
+                          kRecordingInterval);
+    } else if (ImGui::IsItemHovered() && recording_) {
+        ImGui::SetTooltip("Saving an image every %u s.", kRecordingInterval);
     }
 
     // Review, left of Record: opens a recording to answer what observex found in it, or closes the review.
@@ -621,9 +686,22 @@ void App::drawSettings() {
     }
     ImGui::Dummy(ImVec2(0.0f, sectionGap));
 
+    // The live log (engine/LiveLog): what the model sees, kept with each recording to look at afterwards.
+    if (ImGui::Checkbox("Log what the model sees while recording", &settings_.liveLog)) {
+        saveSettings();
+    }
+    ImGui::TextDisabled("Every box and how sure it is, on every image it looks at (about 85 MB an hour).");
+    if (recording_) {
+        ImGui::TextDisabled("Applies from the next recording.");
+    }
+    ImGui::Dummy(ImVec2(0.0f, sectionGap));
+
     ImGui::TextDisabled(hotkeyRegistered_ || snapshot_
                             ? "Ctrl+Alt+R starts and stops recording, even while a game is in front."
                             : "Ctrl+Alt+R is taken by another app, so only the Record button works.");
+    ImGui::TextDisabled(markHotkeyRegistered_ || snapshot_
+                            ? "Ctrl+Alt+M marks a moment in the log while recording, to talk about later."
+                            : "Ctrl+Alt+M is taken by another app, so moments cannot be marked.");
 }
 
 void App::drawShowFlags() {

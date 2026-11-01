@@ -31,8 +31,8 @@ record  ->  propose  ->  review  ->  train  ->  detect live
      not mark.
 4. **Train.** A separate Python tool trains the detector on all answers so far, on the RTX 4090 (about 15 minutes
    for 120 images), and writes a model file.
-5. **Detect live.** observex runs the model on every captured frame through TensorRT (measured: 4.7 ms per frame on
-   the 4090, RF-DETR Medium at 1024). The next recording uses it to propose, so each round asks fewer questions.
+5. **Detect live.** observex runs the model on every captured frame through TensorRT (measured: 2.1 ms per frame on
+   the 4090, RF-DETR Medium trained at 1024 and run at 768). The next recording uses it to propose, so each round asks fewer questions.
 
 **When is it done?** A small set of the user's answers is kept aside and never trained on. After each round,
 observex reports a score on it, e.g. "finds 94% of monsters, 2 false alarms per 100 frames". The user decides
@@ -111,7 +111,9 @@ Each step can be tried on its own.
    75%: on the user's first 64 reviewed images of a new place, 223 of 230 guesses at 75% or more were monsters
    (97%), 21 of 26 at 70% to 75% (81%), about half at 50% to 70%; the model missed 21 of 312 monsters. A Skip key
    (move on without saving) was tried and dropped the same day: the user preferred recording 1 image every 3 s,
-   so there are fewer near copies to review in the first place. Not fully automatic learning (training on its own guesses): it would learn its wrong sure guesses as right and its
+   so there are fewer near copies to review in the first place. When the model moved to 768 pixels (step 5,
+   *Faster*), it became less sure overall, so 75% became 65%: on the 80 held-out images (238 monsters), 65% at 768
+   pre-answers 196 with 3 wrong, as 75% did at 1024 (196, 1 wrong); 75% at 768 only 171. Not fully automatic learning (training on its own guesses): it would learn its wrong sure guesses as right and its
    misses as "not a monster", exactly the cases it needs to learn; the unsure half is a coin flip only a person (or
    the game's own labels, below) can settle.
    **How to draw a box** (2026-11-01, after checking every answer; mixed habits hurt the model more than anything
@@ -137,7 +139,7 @@ Each step can be tried on its own.
    **Built** (`tools/train/`, its README has the commands). `train.py` collects every recording with
    `<category>-answers.txt`, keeps the last fifth of each recording aside for the score (the last part, not random
    images: neighbouring images are near copies and would flatter it), fine-tunes RF-DETR Medium (pretrained on
-   everyday photos; its 80 kinds replaced by the one category) at 1024 x 1024 for 40 passes, with random colour
+   everyday photos; its 80 kinds replaced by the one category) at 768 x 768 (1024 until 2026-11-01) for 40 passes, with random colour
    changes on the training images, and saves
    `models/<category>/model.pth` and `model.json` (settings, counts, score). `guess.py RECORDING` writes the model's
    guesses as `<category>-guesses.txt` for the review, down to 30% sure. The review used to run it by itself; since
@@ -173,6 +175,18 @@ Each step can be tried on its own.
      Spartoi in Ruins of Agony (seen at 18% to 34% sure), an eye peeking out of a tree; one false alarm is a rock.
      The weakest place by far is Ruins of Agony when it is not trained on (18 of 70): more reviewed recordings,
      Agony above all, will help most.
+   - *Third model (2026-11-01, 09:45, the user's new reviews):* 8 recordings, 398 reviewed images (3 new places:
+     Ruins of Despair, 205 images reviewed with the 75% pre-answer; a grassy field with Werewolf Hunters; a rocky
+     path; 953 of the new 1,050 monsters were the model's boxes the user kept, 97 drawn). Same settings; 318 images
+     (1,233 monsters) to train on, 16 s per pass, 12 minutes. Both models scored on the same 80 held-out images
+     (238 monsters), which neither trained on: AP50 0.920 → 0.960; at 40% sure finds 192 (81%) → 219 (92%), false
+     alarms 16 → 14; at 75% (what the review pre-answers) 117 (49%) → 196 (82%), 1 wrong either way. Old places
+     alone: unchanged (58 of 64, 2 false alarms). Ruins of Despair: 76% → 92% at 40%, 43% → 87% at 75% (partly
+     because it now knows the place). Of the 14 false alarms, 7 are monsters missing from the answers (e.g. a
+     Veelan Bugbear Warrior by the posts in images 196 to 202 of 2026-11-01_08-48-08), 3 are marked monsters with a
+     box of another size, 1 a dying monster, and 3 are players (the user's own character, another player twice):
+     the only real mistakes. observex's TensorRT copy: 218 of 238, 15 false alarms at 40%; 5.1 ms per image live.
+     The second model is kept in `models/monster/previous-2026-11-01-0621/`.
    - *Speed* (RTX 4090, Python, image already in memory): Small, Medium and Large all about 26 ms at 1024 (the
      resolution sets the cost, not the size); 768 pixels 18 ms; half precision, compiled, 14 ms with the same
      guesses (`guess.py` uses it). Run trainings one at a time: two at once filled the 24 GB, Windows moved GPU
@@ -181,7 +195,7 @@ Each step can be tried on its own.
    output) for live detection; `train.py` runs it at the end. Not yet: starting training from observex's UI.
 5. **Live detection**: TensorRT on every captured image, plus the tracker; draw the boxes in the observed view.
    **Built (detector and boxes), 2026-11-01.** `engine/Detector` runs `model.onnx` through TensorRT 11.4 (FP16):
-   a compute shader squeezes the captured image to 1024 x 1024 (bilinear, ImageNet colours, as RF-DETR does) into a
+   a compute shader squeezes the captured image to the model's size, 768 x 768 (bilinear, ImageNet colours, as RF-DETR does) into a
    buffer CUDA shares with Direct3D 11, TensorRT runs the network on it, and only the 300 candidate boxes come back
    to the CPU. `engine/Recognizer` runs it on its own thread (above normal priority) and its own GPU device, on the
    newest captured image, and hands the boxes to the UI lock-free. Starting it on a screen loads the saved engine in
@@ -203,8 +217,31 @@ Each step can be tried on its own.
    - *The review's finder* (`engine/Finder`) runs the same Detector over a recording, in observex, instead of
      Python's `guess.py`: the same 40 guesses on a 30-image recording (sureness within 0.002 on average, boxes
      within 2 pixels), about 1 s to start instead of 5.
-   Not yet: the tracker; making it faster (well under the 4.2 ms of one 240 Hz frame: CUDA graphs, cropping the
-   game's fixed UI panels, 768 pixels); the playing logic.
+   - *Live log* (2026-11-01; the user sees sureness high at some moments, 30% to 40% at others, and one-image
+     blips, and wanted to show Claude): while recording, every look goes into `monster-live.txt` (everything at
+     least 10% sure), tied to the saved images by screen image number, with Ctrl+Alt+M marks (a Settings
+     checkbox, on by default, turns it off). On a 15 s test the same monster ranged from 20% to 88% sure (median
+     84%). The user's first fight log (17.5 s): far monsters standing apart hold 85-90% (the model's ceiling is
+     about 90%); the small dark Nightmare Weaver wanders 40-85%; close-ups cut by the screen edge and piles of
+     monsters swing 20-90% and blink (box count changing on about a third of looks).
+   - *Tracker* (`core/Tracker`, 2026-11-01): follows each monster from look to look (identity, speed, smoothed
+     sureness). A new one counts after 3 looks in a row; a missed one is held where it is heading, as long as it
+     was seen, up to 150 ms. On that fight log, boxes appearing or vanishing went from 21.1 to 3.8 a second, with
+     none shown for one look and 99.6% of what the model saw still covered; 0.2 microseconds per look. Rules
+     chosen by replaying the live logs (`observex_bench --track LOG`). What is left is crowds and close-ups: only
+     8% of the labelled monsters are 250 px tall or more, so recordings of fights up close help the model most.
+   - *Faster* (2026-11-01; the user wants room for more recognitions: walls, ground, text, party members): the
+     network now runs as one CUDA graph, 4.7 -> 3.3 ms per image live (235 of the 240 images a second), the same
+     guesses. TensorRT's builder level 5 was slower. Then 768 pixels instead of 1024 (the user agreed): the model
+     still trains at 1024 and is run at 768 (`LIVE_RESOLUTION` in train.py), 3.3 -> 2.1 ms per image live, all
+     240 images a second, the GPU about half busy. On the 80 held-out images (238 monsters), AP50 0.960 -> 0.957;
+     at 30% sure (what the tracker takes) 222 found, 18 false alarms -> 220 and 14; at 40% 219 and 14 -> 214 and
+     9. Retrained at 768 it did worse (AP50 0.931, 215 and 31 at 30%), so it was not kept. observex's TensorRT
+     copy gives the same counts as Python. Left: FP8 or INT8 (needs calibration images, may cost accuracy). For
+     more categories, one model with more classes costs
+     about the same per image as one class; surfaces (walls, ground) need a segmentation head instead of boxes,
+     and text only needs reading inside small regions (name tags), not the whole screen.
+   Not yet: the playing logic.
 6. **Learn while observing** (the user's idea, 2026-11-01; agreed order). The model already runs while the user
    watches the game; when it is unsure about something, it saves a question for the user to answer later, and each
    answer improves the model without leaving the app, so the user can walk back to the same place and see the
@@ -218,10 +255,9 @@ Each step can be tried on its own.
 
 ## Open questions
 
-- Who labels long sessions. The user suggested Claude could label instead of them. Claude reads these frames well
-  (it can tell gremlins from the Defender guard and the player), but its boxes are only roughly placed, and through
-  a chat it takes many seconds per image. Likely split: a finder model draws precise boxes; Claude (through the API,
-  in a tool, at a cost per image) or the user answers yes or no; the user spot-checks. To decide with step 3.
+- Who labels long sessions: decided (2026-11-01). The user labels, in the review, with the model's boxes
+  pre-answered at 75%. Their answers are the data as given: no AI pass that cleans or second-guesses them (an
+  in-app "check your answers against the new model" was proposed and declined).
 
 - Which Lineage 2: the first recordings (2026-10-31) show a private Interlude server (L2 Reborn, "Reborn Eternal
   Interlude x10"). Not yet confirmed by the user as the target. There, monsters show "Level: N" and their name above

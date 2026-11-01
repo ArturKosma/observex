@@ -8,6 +8,7 @@
 #include "app/Theme.h"
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
+#include "engine/LiveLog.h"
 #include "engine/Pipeline.h"
 #include "engine/Recognizer.h"
 #include "engine/Recorder.h"
@@ -78,6 +79,8 @@ private:
     void stopRecording();
     void pauseRecording();
     void resumeRecording();
+    // Ctrl+Alt+M while recording: a numbered mark in the live log, and the image on screen is saved too.
+    void markMoment();
 
     // Review: pick a recording's folder, then what to look for in it (the category popup), then review it.
     void chooseReviewFolder();
@@ -106,6 +109,8 @@ private:
         std::chrono::steady_clock::time_point started;
         unsigned saved = 0;           // Images saved by earlier Recorders, before a pipeline restart,
         std::uint64_t savedBytes = 0; // and the bytes their files take.
+        std::shared_ptr<LiveLog> log; // What live recognition sees, the saved images and the marks.
+        unsigned marks = 0;
     };
 
     float dpiScale_ = 1.0f;
@@ -132,7 +137,8 @@ private:
     std::size_t reviewFolderImages_ = 0;
     bool closeReview_ = false;      // Close was clicked; closed between frames.
     std::string reviewError_;       // Why the last review could not start.
-    bool hotkeyRegistered_ = false; // Ctrl+Alt+R toggles recording.
+    bool hotkeyRegistered_ = false;     // Ctrl+Alt+R toggles recording.
+    bool markHotkeyRegistered_ = false; // Ctrl+Alt+M marks a moment while recording.
     bool showStats_ = false;        // Toggled with F3.
     bool imguiReady_ = false;
     std::optional<Snapshot> snapshot_;

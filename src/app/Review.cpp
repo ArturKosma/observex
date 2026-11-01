@@ -24,9 +24,10 @@ constexpr ImGuiWindowFlags kAnswerBox = ImGuiWindowFlags_NoDecoration | ImGuiWin
                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
 
-// Guesses at least this sure start answered yes; the user only flips the wrong ones. On the user's first 64 reviewed
-// images of a new place (2026-11-01), 223 of 230 such guesses were monsters (97%); at 70% to 75% only 81% were.
-constexpr float kPresumeYes = 0.75f;
+// Guesses at least this sure start answered yes; the user only flips the wrong ones. Run at 768 pixels (since
+// 2026-11-01) the model is less sure than at 1024: on 80 held-out images (238 monsters), 65% pre-answers 196 of them
+// with 3 wrong, as 75% did at 1024 (196, 1 wrong); 75% at 768 only 171.
+constexpr float kPresumeYes = 0.65f;
 // While a mark is selected, the others fade to this opacity, so it is clear which one the Yes / No box asks about
 // when monsters stand close together (the user could not tell, 2026-11-01).
 constexpr float kOtherMarks = 0.35f;

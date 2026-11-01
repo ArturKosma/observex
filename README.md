@@ -21,21 +21,28 @@ Screen capture, recording, reviewing, training and recognising monsters live wor
   of every screen, arranged as on your desktop and labelled with each monitor's name. Click one and observex watches
   it; the window shows that screen live. F3 shows the capture and recognition numbers.
 - **Live recognition**: while a screen is observed, the trained monster model runs on every new image on the GPU
-  (about 5 ms each on an RTX 4090, about 210 images a second), on its own thread, so capture never waits for it.
+  (about 2.1 ms each on an RTX 4090, all 240 images a second), on its own thread, so capture never
+  waits for it.
   **Show** (the eye, next to the screen button) holds flags like Unreal's view flags: **Monsters** draws a box with
-  how sure the model is ("Monster 81%") around each monster it finds. Turning a flag off only hides the boxes;
+  how sure the model is ("Monster 81%") around each monster it finds. Each monster is followed from image to image,
+  so its box stays steady: a box shows once the model has found it on three images in a row (one-image flickers
+  never show), and stays through a short gap. Turning a flag off only hides the boxes;
   recognition keeps running. It pauses only while you review, so the review gets the GPU. The first time observex sees a new model, it prepares it for your GPU (about 35 s,
   with progress under the flag) and keeps the result for the next starts.
 - **Record**: saves the observed screen as numbered JPEG images, one every 3 seconds, into a new folder per recording
   (`recordings/` next to observex.exe unless you pick another folder in Settings). Ctrl+Alt+R starts and stops it
   even while a game is in front. A 2560 x 1440 game image is about 0.7 MB, so expect about 0.85 GB per hour.
   While recording, the button shows the time, the number of images and how much disk space they take. Recording
-  does not slow capture.
+  does not slow capture. It also keeps a log of what live recognition sees on every image it looks at (each box
+  and how sure the model is, about 85 MB per hour, `monster-live.txt`), and **Ctrl+Alt+M** marks a moment you want
+  to talk about later (it also saves the image on screen right then), so you can say "at mark 3 the werewolf
+  dropped to 35%" and the log shows exactly what happened. The log can be turned off in Settings ("Log what
+  the model sees while recording", on by default); marks need it.
 - **Review**: open a recording, choose what to look for (Monsters for now), and step through its images. Each thing
   observex marked shows as a box with its guess ("Monster? 81%"); the one you are answering has a white ring and the
   others fade back, so it is clear even among close monsters. Answer it with Yes / No (or the Y / N keys), and
-  drag a box around anything it missed. What the model is at least 75% sure of starts as yes ("Monster 92%",
-  green; it was right 97% of the time), so you only answer the unsure ones and flip the rare wrong one. Moving on
+  drag a box around anything it missed. What the model is at least 65% sure of starts as yes ("Monster 92%",
+  green; it was right about 98% of the time), so you only answer the unsure ones and flip the rare wrong one. Moving on
   with the Right arrow saves the image's answers, and answers carry over to the same thing on the next image.
   Answers are saved next to the images, in `monster-answers.txt`. Once a
   model is trained, opening a new recording runs it in the background, inside observex on the GPU ("Looking for
@@ -90,7 +97,8 @@ It lists the screens, captures one (`--screen N`, the primary by default) and pr
 updates, latency and work per image once a second. To give capture something to do, it presents an invisible 2 x 2
 pixel window in the screen's corner every refresh, like a game would (`--no-pulse` turns that off). `--no-preview`
 leaves out the copy the UI makes to show the screen. `--record FOLDER` also saves images like the Record button
-(`--every S`, one every 3 seconds like the app), to measure what recording costs. `--model models/monster` runs live
+(`--every S`, one every 3 seconds like the app), to measure what recording costs; with `--model` it also writes
+the live log. `--model models/monster` runs live
 recognition alongside and prints its speed and how many monsters it found.
 
 ## UI snapshots
@@ -111,7 +119,7 @@ before the picture (e.g. for the trained model's guesses). The snapshot shows yo
 
 | Path | What it holds |
 | --- | --- |
-| `src/core/` | Platform-free building blocks: lock-free hand-over, statistics, marks and answers. Unit tested. |
+| `src/core/` | Platform-free building blocks: lock-free hand-over, statistics, marks and answers, the tracker. Unit tested. |
 | `src/engine/` | The real-time pipeline: GPU setup, screen capture, image hand-over, the recorder, the recogniser. No UI code. |
 | `src/app/` | The window and UI: main window, theme, buttons, screen picker, screen view, review, settings, UI snapshots. |
 | `bench/` | The headless capture benchmark. |

@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 
 from marks import Mark, image_files, model_folder, write_guesses
-from train import load_trained, utf8_output
+from train import load_live, utf8_output
 
 
 def main() -> None:
@@ -32,7 +32,7 @@ def main() -> None:
     if not (folder / "model.pth").exists():
         raise SystemExit(f"No trained model in {folder}. Run train.py first.")
     info = json.loads((folder / "model.json").read_text(encoding="utf-8"))
-    model = load_trained(folder / "model.pth")
+    model = load_live(folder / "model.pth")  # At observex's size, so the guesses match its own.
     # Half precision, compiled: about 2.5 s once, then about 24 ms per image instead of 43 (RTX 4090, 2026-11-01),
     # with the same guesses (boxes at most a pixel apart).
     model.inference(dtype=torch.float16)

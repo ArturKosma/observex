@@ -32,7 +32,7 @@ ImageChannel::~ImageChannel() {
     CloseHandle(writtenEvent_);
 }
 
-void ImageChannel::write(ID3D11DeviceContext* context, ID3D11Texture2D* image) {
+void ImageChannel::write(ID3D11DeviceContext* context, ID3D11Texture2D* image, const ImageStamp& stamp) {
     Slot& slot = slots_[static_cast<std::size_t>(handover_.writeIndex())];
 
     // Zero timeout: the triple buffer guarantees the reader is not using this texture, so this never waits.
@@ -42,7 +42,7 @@ void ImageChannel::write(ID3D11DeviceContext* context, ID3D11Texture2D* image) {
     context->CopyResource(slot.texture.Get(), image);
     slot.mutex->ReleaseSync(kReaderKey);
 
-    handover_.writeSlot() = ++written_;
+    handover_.writeSlot() = stamp;
     // A texture handed back unread is still released with kReaderKey; one the reader returned has kWriterKey.
     writeKey_ = handover_.publish() ? kReaderKey : kWriterKey;
     SetEvent(writtenEvent_); // Never waits.
@@ -57,8 +57,8 @@ ImageReader::ImageReader(ID3D11Device* device, ImageChannel& channel) : channel_
     }
 }
 
-bool ImageReader::copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* target) {
-    TripleBuffer<std::uint64_t>& handover = channel_.handover_;
+bool ImageReader::copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* target, ImageStamp* stamp) {
+    TripleBuffer<ImageStamp>& handover = channel_.handover_;
     if (!handover.fetch()) {
         return false;
     }
@@ -70,6 +70,9 @@ bool ImageReader::copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* ta
     }
     context->CopySubresourceRegion(target, 0, 0, 0, 0, slot.texture.Get(), 0, nullptr);
     slot.mutex->ReleaseSync(ImageChannel::kWriterKey);
+    if (stamp != nullptr) {
+        *stamp = handover.readSlot();
+    }
     return true;
 }
 

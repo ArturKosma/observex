@@ -32,8 +32,8 @@ each recording aside, and prints the score on it: how many of those monsters it 
 raises. The model goes to `models/monster/` next to observex.exe (`model.pth`, plus `model.json` with its settings,
 numbers and score); its working files (`dataset/`, `training/`) stay there too and are rebuilt on each run.
 It prints the score at three cutoffs (marks at least 30%, 40% and 50% sure): a lower cutoff finds more and raises
-more false alarms. On the RTX 4090, 165 images take about 9 s per pass, so the default 40 passes take about
-6 minutes, using about 12.6 GB of GPU memory. Run it in the background or in its own terminal, and never two
+more false alarms. On the RTX 4090, 400 reviewed images take about 16 s per pass, so the default 40 passes
+take about 12 minutes, using about 13 GB of GPU memory. Run it in the background or in its own terminal, and never two
 trainings at once: they do not fit in 24 GB together, Windows then moves GPU memory into normal RAM, and both crawl
 or hang.
 
@@ -59,16 +59,16 @@ its review runs `model.onnx` itself when you open a recording whose guesses are 
 (the same guesses, without starting Python). `guess.py` stays as the Python reference, to check observex against.
 
 Options: `--category` (default `monster`), and for `train.py` `--model nano|small|medium|large` (default `medium`),
-`--resolution` (default 1024: the image is squeezed to that many pixels square, so far-away monsters stay a few
-pixels big), `--epochs` (passes over the images, default 40), `--augment flip|color` (random changes to each
+`--resolution` (default 1024: the image is squeezed to that many pixels square while training, so far-away monsters
+stay a few pixels big; observex runs the model at 768, `LIVE_RESOLUTION` in train.py, a third faster with nearly the
+same answers: trained at 1024 and run at 768 beat trained at 768, 2026-11-01), `--epochs` (passes over the images, default 40), `--augment flip|color` (random changes to each
 training image, default `color`: mirror, plus small shifts of brightness, contrast, saturation and hue, so a monster
 in a dark cave or in fog still looks like itself), `--held-out` (default 0.2) and `--batch` (images through the GPU
 at once, default 4; each learning step uses 16 either way). `guess.py --threshold` (default 0.3) leaves out guesses
 less sure than that.
 
 Why these defaults (tested 2026-11-01 on 5 recordings, each place scored by a model that never saw it): Medium beat
-Small and Large; colour changes beat mirror only; 1024 beat 1280 and tied 768 (768 is faster, keep it in mind for
-live detection); the best pass always came before 35, so 80 passes gained nothing. Details in
+Small and Large; colour changes beat mirror only; 1024 beat 1280 and tied 768; the best pass always came before 35, so 80 passes gained nothing. Details in
 [the training loop](../../docs/training-loop.md), step 4.
 
 The batch size is fixed on purpose. RF-DETR's `batch_size="auto"` tries bigger batches until one does not fit, but on

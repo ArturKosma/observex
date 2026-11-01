@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Tracker.h"
 #include "core/TripleBuffer.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
@@ -17,11 +18,12 @@ namespace observex {
 
 class ImageChannel;
 class ImageReader;
+class LiveLog;
 
-// What the recogniser found on one screen image, surest first.
+// What the recogniser is following on the screen after one image (see Tracker), surest first.
 struct Found {
     static constexpr int kMax = 100;
-    std::array<Detection, kMax> things{};
+    std::array<Tracked, kMax> things{};
     int count = 0;
     std::uint64_t image = 0; // Counts the images looked at; 0 before the first.
 };
@@ -34,9 +36,10 @@ struct RecognizerStats {
 };
 
 // Finds one category of things (e.g. monsters) on the observed screen with a trained model (see Detector), on every
-// new image, as fast as the GPU allows. It works on its own thread with its own GPU device, so it never holds up
-// capture: the pipeline hands it the newest image through an ImageChannel the moment it arrives, and images that
-// arrive while it is busy replace each other. Talks to the UI only through lock-free hand-overs and atomics.
+// new image, as fast as the GPU allows, and follows them from image to image (see Tracker), so each keeps a steady
+// box and an identity. It works on its own thread with its own GPU device, so it never holds up capture: the
+// pipeline hands it the newest image through an ImageChannel the moment it arrives, and images that arrive while it
+// is busy replace each other. Talks to the UI only through lock-free hand-overs and atomics.
 class Recognizer {
 public:
     enum class State : std::uint8_t {
@@ -45,7 +48,7 @@ public:
         Failed, // See error().
     };
 
-    // Things found less sure than this are left out.
+    // Things the model is less sure of than this are not followed (the live log goes lower, see setLog).
     static constexpr float kMinSure = 0.3f;
 
     // Starts on the images of `channel`, which come from `screen`, with the model in `modelFolder`
@@ -62,9 +65,13 @@ public:
     float preparing() const { return progress_.load(std::memory_order_relaxed); }
     const std::string& error() const { return error_; } // Valid once state() is Failed.
 
-    // For one reader thread (the UI): what was found on the newest image looked at. Valid until the next call.
+    // For one reader thread (the UI): what is followed after the newest image looked at. Valid until the next call.
     const Found& found();
     const RecognizerStats& stats();
+
+    // While set (recording), every image looked at and everything found on it at least LiveLog::kMinSure sure also
+    // goes into `log`. Any thread; null stops it. The log stays alive while the recogniser is writing to it.
+    void setLog(std::shared_ptr<LiveLog> log) { log_.store(std::move(log), std::memory_order_release); }
 
 private:
     void run(std::stop_token stop);
@@ -78,6 +85,7 @@ private:
     unsigned height_ = 0;
     TripleBuffer<Found> found_;
     TripleBuffer<RecognizerStats> stats_;
+    std::atomic<std::shared_ptr<LiveLog>> log_;
     std::atomic<State> state_{State::Starting};
     std::atomic<float> progress_{0.0f};
     std::string error_;

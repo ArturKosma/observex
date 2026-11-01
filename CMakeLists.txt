@@ -29,20 +29,23 @@ else()
     target_compile_options(observex_warnings INTERFACE -Wall -Wextra -Wpedantic)
 endif()
 
-# Core: platform-free building blocks (lock-free hand-over, statistics, marks on images). Unit tested.
+# Core: platform-free building blocks (lock-free hand-over, statistics, marks on images, the tracker). Unit tested.
 add_library(observex_core STATIC
-    src/core/Marks.cpp)
+    src/core/Marks.cpp
+    src/core/Tracker.cpp)
 target_include_directories(observex_core PUBLIC src)
 target_link_libraries(observex_core PRIVATE observex_warnings)
 
 # Engine: the real-time loop (screen capture on its own thread and GPU device), the recorder, the recogniser (a
-# trained model on the GPU through TensorRT) and the finder (the same model over a recording). No UI code.
+# trained model on the GPU through TensorRT), its live log while recording, and the finder (the same model over a
+# recording). No UI code.
 add_library(observex_engine STATIC
     src/engine/Detector.cpp
     src/engine/Finder.cpp
     src/engine/Gpu.cpp
     src/engine/ImageChannel.cpp
     src/engine/ImageFile.cpp
+    src/engine/LiveLog.cpp
     src/engine/Pipeline.cpp
     src/engine/Recognizer.cpp
     src/engine/Recorder.cpp
@@ -90,6 +93,7 @@ if(OBSERVEX_BUILD_TESTS)
     add_executable(observex_tests
         tests/MarksTests.cpp
         tests/StatWindowTests.cpp
+        tests/TrackerTests.cpp
         tests/TripleBufferTests.cpp
         tests/test_main.cpp)
     target_link_libraries(observex_tests PRIVATE observex_core doctest::doctest observex_warnings)

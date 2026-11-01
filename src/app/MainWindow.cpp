@@ -16,7 +16,7 @@ namespace observex {
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"observex";
-constexpr int kHotkeyId = 1;
+constexpr int kFirstHotkeyId = 1; // Windows' id for hotkey 0; hotkey N gets kFirstHotkeyId + N.
 
 // Dark title bar in the app's own colours (Windows 11; older versions keep their default).
 void styleTitleBar(HWND hwnd) {
@@ -83,8 +83,10 @@ MainWindow::MainWindow(const wchar_t* title, ID3D11Device* device, float dpiScal
 
 MainWindow::~MainWindow() {
     if (hwnd_ != nullptr) {
-        if (hotkeyRegistered_) {
-            UnregisterHotKey(hwnd_, kHotkeyId);
+        for (int id = 0; id < kMaxHotkeys; ++id) {
+            if (hotkeyRegistered_[static_cast<std::size_t>(id)]) {
+                UnregisterHotKey(hwnd_, kFirstHotkeyId + id);
+            }
         }
         DestroyWindow(hwnd_);
     }
@@ -137,16 +139,18 @@ ComPtr<ID3D11Texture2D> MainWindow::backBuffer() const {
     return texture;
 }
 
-bool MainWindow::registerHotkey(UINT modifiers, UINT key) {
-    hotkeyRegistered_ = RegisterHotKey(hwnd_, kHotkeyId, modifiers | MOD_NOREPEAT, key) != FALSE;
-    return hotkeyRegistered_;
+bool MainWindow::registerHotkey(int id, UINT modifiers, UINT key) {
+    bool& registered = hotkeyRegistered_[static_cast<std::size_t>(id)];
+    registered = RegisterHotKey(hwnd_, kFirstHotkeyId + id, modifiers | MOD_NOREPEAT, key) != FALSE;
+    return registered;
 }
 
-bool MainWindow::takeHotkeyPress() {
-    if (hotkeyPresses_ == 0) {
+bool MainWindow::takeHotkeyPress(int id) {
+    unsigned& presses = hotkeyPresses_[static_cast<std::size_t>(id)];
+    if (presses == 0) {
         return false;
     }
-    --hotkeyPresses_;
+    --presses;
     return true;
 }
 
@@ -172,8 +176,8 @@ LRESULT CALLBACK MainWindow::windowProc(HWND hwnd, UINT message, WPARAM wParam, 
         }
         return 0;
     case WM_HOTKEY:
-        if (self != nullptr && wParam == kHotkeyId) {
-            ++self->hotkeyPresses_;
+        if (self != nullptr && wParam >= kFirstHotkeyId && wParam < kFirstHotkeyId + kMaxHotkeys) {
+            ++self->hotkeyPresses_[wParam - kFirstHotkeyId];
         }
         return 0;
     case WM_SYSCOMMAND:

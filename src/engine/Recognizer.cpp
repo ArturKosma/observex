@@ -2,6 +2,7 @@
 
 #include "core/StatWindow.h"
 #include "engine/ImageChannel.h"
+#include "engine/LiveLog.h"
 
 #include <exception>
 #include <utility>
@@ -70,18 +71,35 @@ void Recognizer::run(std::stop_token stop) {
     StatWindow work;
     std::uint64_t images = 0;
     std::int64_t windowStart = qpcNow();
+    Tracker tracker;
+    std::array<Detection, Found::kMax> detections;
+    const std::int64_t timeOrigin = windowStart;
 
+    ImageStamp stamp;
     while (!stop.stop_requested()) {
-        if (reader_->waitForImage(kWaitMs) && reader_->copyNewImage(gpu_.context.Get(), detector->input())) {
+        if (reader_->waitForImage(kWaitMs) && reader_->copyNewImage(gpu_.context.Get(), detector->input(), &stamp)) {
             const std::int64_t start = qpcNow();
-            Found& found = found_.writeSlot();
-            const int count =
-                detector->detect(gpu_.context.Get(), kMinSure, found.things.data(), static_cast<int>(Found::kMax));
+            const std::shared_ptr<LiveLog> log = log_.load(std::memory_order_acquire);
+            // While logging, also the things it is less sure of, for the log only.
+            const int count = detector->detect(gpu_.context.Get(), log ? LiveLog::kMinSure : kMinSure,
+                                               detections.data(), static_cast<int>(Found::kMax));
             if (count < 0) {
                 fail("The GPU stopped running the model (it may have been reset)");
                 return;
             }
-            found.count = count;
+            if (log) {
+                log->looked(stamp, detections.data(), count);
+            }
+            int sure = 0; // Surest first, so what is at least kMinSure sure comes first.
+            while (sure < count && detections[static_cast<std::size_t>(sure)].sure >= kMinSure) {
+                ++sure;
+            }
+            // Followed by when the screen showed the image, so the speeds are true on-screen speeds.
+            const std::int64_t shownQpc = stamp.shownQpc != 0 ? stamp.shownQpc : start;
+            const double timeMs = static_cast<double>(shownQpc - timeOrigin) * msPerTick;
+            Found& found = found_.writeSlot();
+            found.count = tracker.update(timeMs, detections.data(), sure, found.things.data(),
+                                         static_cast<int>(Found::kMax));
             found.image = ++images;
             found_.publish();
             work.add(static_cast<float>(static_cast<double>(qpcNow() - start) * msPerTick));

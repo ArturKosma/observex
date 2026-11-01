@@ -44,14 +44,14 @@ minimized or with the flag off. While reviewing it pauses (the user asked, 2026-
 images, so the review's finder gets the GPU; the model stays loaded and it picks up again when the review closes.
 **Show** (eye icon, right of the screen button, only while the screen
 is shown) is a dropdown of flags like Unreal's view flags: **Monsters** draws a violet box tagged "Monster 81%"
-around each monster found at least 30% sure (saved in observex.cfg as `show-monsters`). Under the flag: how
-recognition is doing ("3 found · 210 images a second · 4.7 ms each"), the progress of preparing a new model for the
+around each monster the tracker follows (saved in observex.cfg as `show-monsters`). Under the flag: how
+recognition is doing ("3 found · 240 images a second · 2.1 ms each"), the progress of preparing a new model for the
 GPU (once per new model, 35 s on the 4090, saved as `model.engine` next to it; later starts load in 0.4 s), or why it
 cannot run (e.g. no model.onnx). Hiding a flag never stops recognition: later flags (and the reactor) rely on it.
-Measured on the 4090: 4.7 ms per image, about 210 images a second; capture unchanged (239.7 images a second, 0.05 ms
-latency). The GPU is then nearly fully used, so other GPU work feels it: the finder took 37 ms per image instead of
-5 next to it (hence the pause while reviewing), and a game will too; a looks-per-second limit is the fix if needed
-(not built).
+Measured on the 4090: 2.1 ms per image, all 240 images a second (2026-11-01: 4.7 ms and 210 a second at first,
+3.3 ms and 235 once the network ran as a CUDA graph, 2.1 ms at 768 pixels instead of 1024); capture unchanged (239.8 images a second, 0.04 ms latency). The GPU is then nearly fully used, so other GPU work feels it: the finder took 37 ms per image instead of
+5 next to it (hence the pause while reviewing), and a game does too: with the user's Lineage 2 running, about 100
+images a second at 10 ms each (2026-11-01); a looks-per-second limit is the fix if the game suffers (not built).
 
 Recording (step 1 of the training loop): **Record** (or Ctrl+Alt+R, a system-wide hotkey that works while the game
 has focus or observex is minimized) saves the observed screen into a new folder named by date and time, e.g.
@@ -60,10 +60,23 @@ user asked for no rate settings, then for 1 every 3 s instead of skipping near-c
 2026-11-01). Only images the screen actually updated are saved.
 While recording, the button reads "Stop", the time, the number of images and their size on disk (the Recorder sums
 each file's size; shown in 1024s, as File Explorer does). JPEG quality 85: about 0.7 MB per 2560 x 1440 Lineage 2
-image, so about 0.85 GB per hour. **Settings** (gear) holds only the recordings folder (default: `recordings` next to
-observex.exe; folder picker, Open, Use default). Settings live in `observex.cfg` next to the exe. Both it and
+image, so about 0.85 GB per hour. **Settings** (gear) holds the recordings folder (default: `recordings` next to
+observex.exe; folder picker, Open, Use default) and the live log flag (below). Settings live in `observex.cfg` next to the exe. Both it and
 `recordings/` are gitignored.
 Recording costs capture nothing measurable (bench: 238.7 and 239.3 images/s recording, 238.2 and 239.2 not).
+Live log (the user asked, 2026-11-01, to show Claude what they see live: sureness that is high at times and low at
+others, one-image blips): while recording, `engine/LiveLog` writes `monster-live.txt` into the recording's folder:
+a `look` line for every image the recogniser looked at (screen image number, time, everything found at least 10%
+sure with its box; the app draws 30% and up), `saved` lines tying each saved JPEG to its screen image number, and
+`mark` lines. **Ctrl+Alt+M** (second system-wide hotkey) marks a moment: a numbered `mark` line, and the image on
+screen is saved right then (`Pipeline::recordNow`; the 3 s rhythm counts on from it); the Record button shows the
+mark count. The user then says "at mark 3 ..." and Claude reads the log: follow each thing from look to look
+(match boxes), plot its sureness over time, find one-look blips, and line them up with the saved images. About 85
+MB per hour; lines are formatted outside a lock and buffered (1 MB), marks flushed. The file's header explains the
+lines. A Settings checkbox, "Log what the model sees while recording" (`live-log` in observex.cfg, on by
+default; the user asked for it), turns the log off from the next recording; with it off Ctrl+Alt+M does nothing
+and the Record tooltip only mentions images. Image numbers come from `ImageStamp` (the pipeline's count and the time the screen showed it), which every
+`ImageChannel` hand-over now carries.
 
 Review (step 2 of the training loop, `app/Review`): **Review** asks for a recording's folder (Windows folder picker),
 then "What are we looking for?" (categories in `kCategories`; only Monsters for now), then shows the recording's
@@ -74,9 +87,10 @@ monsters was selected, 2026-11-01). Dragging
 on the image draws a missed one (yes; Remove / Del deletes it). The bar's middle shows back / "Image 5 of 340 · 11
 reviewed" / forward (Left / Right keys). Moving forward makes the image "reviewed": unanswered marks become no and
 the answers are saved. Answers carry forward: a guess on the next image overlapping an answered mark by at least
-half (`carryAnswers`) gets its answer, tagged "copied". Then guesses at least 75% sure start as yes (`presumeSure`, `kPresumeYes`; green, tagged "Monster 92%"): the
+half (`carryAnswers`) gets its answer, tagged "copied". Then guesses at least 65% sure start as yes (`presumeSure`, `kPresumeYes`; green, tagged "Monster 92%"): the
 user only answers the unsure ones and flips wrong ones (the user asked, 2026-11-01: reviewing took too long; on the
-user's first 64 images of a new place, 223 of 230 such guesses were monsters, 97%; at 70% to 75% only 81%).
+user's first 64 images of a new place, 223 of 230 guesses at 75% were monsters, 97%; 75% became 65% when the model
+moved to 768 pixels, where it is less sure: the same 196 of 238 held-out monsters pre-answered, 3 wrong).
 There is no Skip: the user chose recording 1 image every 3 s over skipping near copies in the review. No setting
 for a review step (the user removed one before).
 Files, in the recording's folder, in the text format of `core/Marks.h`: `<category>-guesses.txt` (from the finder,
@@ -112,14 +126,28 @@ weights; run it again by hand to re-export a model). `guess.py RECORDING` writes
 Python model (half precision); observex no longer runs it (its own finder does the same, see above), but it stays as
 the Python reference to check observex's results against.
 Its own Python in `tools/train/.venv` (gitignored; setup in `tools/train/README.md`). Training runs on the GPU for
-about 6 minutes on 165 images: run it in the background, never in the foreground, and never two trainings at once
+about 12 minutes on 398 images: run it in the background, never in the foreground, and never two trainings at once
 (two filled the 24 GB, Windows spilled GPU memory into normal RAM, both slowed to half and one hung). Keep the batch
 size fixed (see the README).
 Answers follow the box rule in docs/training-loop.md, step 2 (body only, every visible monster, none for hidden
-ones). Current model, 2026-11-01: finds 58 of 64 held-out monsters at 40% sure, 2 false alarms in 33 images; the
-first model found 45 of the same 64 (details in docs/training-loop.md, step 4).
+ones). It trains at 1024 pixels and observex runs it at 768 (`LIVE_RESOLUTION` in train.py; export.py, guess.py
+and the score use it): a third less time live, nearly the same answers; training at 768 was worse (2026-11-01).
+Current model (third, 2026-11-01 09:45, 8 recordings), run at 768: finds 214 of 238 held-out monsters at 40% sure,
+9 false alarms in 80 images (at 1024: 219 and 14, half of them unmarked monsters, 3 players); the model before
+found 192 of the same 238 (details in docs/training-loop.md, step 4).
 
-Not built yet: the tracker, react (mouse and keyboard), and the knowledge file (what to look for and how to react,
+Tracker (`core/Tracker`, built 2026-11-01; the user saw sureness swing and one-image blips, see the live log):
+follows what the model finds from look to look, so each monster keeps one steady box and an identity (id, speed).
+A new thing counts once found (at least 30% sure) on 3 looks in a row; one that is not found is held where its
+speed takes it, as long as it was seen, up to 150 ms; matching is nearest-first to where each is heading (reach
+grows 0.5 sides per 100 ms unseen), or a box lying 80% inside the other (cut by the screen edge); `sure` is smoothed
+over about 60 ms. On the user's fight log (17.5 s, `observex_bench --track`): boxes appearing or vanishing 21.1 ->
+3.8 a second, none shown for a single look, 99.6% of what the model saw still covered, a new monster shows at most
+~20 ms later at 100 looks/s; 0.2 microseconds per look. The rules were picked by replaying the live logs in Python
+(Python and C++ give identical numbers); calm logs barely change (they were already steady). Remaining churn is
+crowds and close-ups, which only more labelled images of those fix. The live log stays raw (what the model saw).
+
+Not built yet: react (mouse and keyboard), and the knowledge file (what to look for and how to react,
 saved and loaded).
 
 **Next: learn while observing** (agreed with the user, 2026-11-01, one step at a time; step 6 of the training
@@ -139,21 +167,28 @@ captures only the screens on that GPU):
 - **Pipeline thread** (`engine/Pipeline`, time-critical priority): `ScreenCapture` waits for a new screen image (DXGI
   Desktop Duplication; the image stays on the GPU), then copies it into the recognition `ImageChannel` (first, so the
   recogniser gets it at once), into the preview `ImageChannel` while the UI shows it, and into the recording
-  `ImageChannel` when a recording image is due (`setRecordingInterval`, seconds between images). React will run here. Once a
-  second it hands `PipelineStats` to the UI.
+  `ImageChannel` when a recording image is due (`setRecordingInterval`, seconds between images; `recordNow` for a
+  mark). Each hand-over carries an `ImageStamp` (image number, time shown). React will run here. Once a second it
+  hands `PipelineStats` to the UI.
 - **Recogniser thread** (`engine/Recognizer`, above-normal priority, while a screen is observed): waits on the
   recognition channel's event, copies the newest image into the `Detector`'s input texture and runs it: a compute
-  shader squeezes the image to the model's 1024 x 1024 into a buffer shared with CUDA, TensorRT runs the network,
-  and only the candidate boxes come back. Hands `Found` (the boxes, surest first) and `RecognizerStats` to the UI.
+  shader squeezes the image to the model's size (768 x 768) into a buffer shared with CUDA, TensorRT runs the network,
+  and only the candidate boxes come back. The network and the copies back run as one CUDA graph, recorded on the
+  first look (one launch instead of hundreds: 5.56 -> 4.68 ms per image on recording files, same guesses; the
+  Finder gets it too). TensorRT's highest builder optimisation level (5) was tried: slower (4.86 ms) and 141 s to
+  prepare, so the default stays. Those at least 30% sure go through the `Tracker` (timed by when the
+  screen showed the image). Hands `Found` (what it follows, surest first) and `RecognizerStats` to the UI.
   TensorRT is loaded at run time from `deps/` (no import libraries); the engine for this GPU is built once per new
   model.onnx and cached as `model.engine` (one Detector loads or builds at a time; a second waits, then loads it).
-  Paused while reviewing (the pipeline stops handing it images).
+  Paused while reviewing (the pipeline stops handing it images). While recording it also writes each look into the
+  live log (`setLog`), down to 10% sure.
 - **Finder thread** (`engine/Finder`, below-normal priority, only while a review needs guesses): its own GPU device
   and `Detector`; reads the recording's JPEGs and writes `<category>-guesses.txt`.
 - **Recorder thread** (`engine/Recorder`, below-normal priority, only while recording): its own GPU device reads the
   recording channel into a CPU-readable texture and writes numbered JPEGs (`engine/ImageFile`, WIC). Slow disks or
-  encoding can never hold up capture; images that arrive while one is saving replace each other.
-- **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window, swap chain, hotkey), ImGui, `Theme`
+  encoding can never hold up capture; images that arrive while one is saving replace each other. Each saved image
+  gets a `saved` line in the live log.
+- **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window, swap chain, system-wide hotkeys: Ctrl+Alt+R, Ctrl+Alt+M), ImGui, `Theme`
   (fonts, colours, logo, the boxes and tags drawn over screen images, shared by the review and the live view), `Widgets` (`BarButton`, the top-bar button look), `ScreenPicker` (the miniatures),
   `ScreenImage` (a screen image the UI can draw at any size: it keeps a mip chain so shrunken views look smooth, and
   draws opaque), `Settings` (observex.cfg, folder picker) and `Review` (the review screen; it reads each image with
@@ -177,7 +212,7 @@ and made again after, numbering on in the same folder). Picking a screen, a disc
 ends it. The `Recognizer` lives with the observed screen: made in `App::observe`, destroyed in `stopObserving`
 before the pipeline frees its channel (its destructor also cancels preparing a model).
 
-Planned next, inside `engine/`: a tracker (after the recogniser), a reactor (`SendInput`), and a knowledge file; see
+Planned next, inside `engine/`: a reactor (`SendInput`) and a knowledge file; see
 [docs/training-loop.md](docs/training-loop.md).
 
 ## What speed means in practice
@@ -206,10 +241,13 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   [--record FOLDER [--every S]] [--model FOLDER]`. Lists the screens and measures one (the primary by default).
   Its "pulse" is an invisible 2 x 2 pixel, click-through, never-focused window in the screen's corner that presents
   every refresh like a game, so the screen has something to capture. `--record` saves images like the Record button
-  does (into a scratch folder, never the repo), so its cost shows in the numbers. `--model models/monster` runs the
+  does (into a scratch folder, never the repo), so its cost shows in the numbers; with `--model` too it writes the
+  live log like the app and marks once halfway (the way to test the log headless). `--model models/monster` runs the
   recogniser too and prints its numbers (recognised/s, ms per image, found). `observex_bench --model FOLDER --images
   FOLDER --out FILE` runs the C++ detector over a folder of JPEGs and writes its guesses in the marks format (to
-  compare with Python's `guess.py`).
+  compare with Python's `guess.py`). `observex_bench --track LOG` replays a live log (a recording's
+  `monster-live.txt`) through the C++ tracker and prints boxes appearing or vanishing per second with and without
+  it, things followed, and its cost per look; no GPU. Use it after any tracker change.
 - The app: `observex.exe` in the project folder. The Release build writes it there (gitignored). The Debug build
   stays in `build/vs2022/bin/Debug/`.
 - UI snapshot: `observex.exe --snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --key NAME]...
@@ -229,7 +267,7 @@ Configuring, building and running the tests and the bench here is fine. Do not l
 ## Layout
 
 - `src/core/`: platform-free building blocks (`TripleBuffer`, `StatWindow`, `Marks`: boxes, answers, the marks file
-  format, carrying answers forward). No Windows or GPU headers. Unit tested.
+  format, carrying answers forward; `Detection`, `Tracker`: following found things from look to look). No Windows or GPU headers. Unit tested.
 - `src/engine/`: the real-time pipeline, the recorder and the recogniser (`Gpu`, `ScreenCapture`, `ImageChannel`,
   `Pipeline`, `Recorder`, `ImageFile`, `Detector`, `Recognizer`, `Finder`). Windows, Direct3D 11, CUDA and TensorRT,
   no ImGui.

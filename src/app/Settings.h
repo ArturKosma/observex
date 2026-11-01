@@ -11,6 +11,7 @@ namespace observex {
 struct Settings {
     std::filesystem::path recordingsFolder; // Each recording gets its own folder inside it.
     bool showMonsters = true;               // Show flag: draw the monsters found on the observed screen.
+    bool liveLog = true; // Recordings also log what live recognition sees (monster-live.txt) and take marks.
 
     // Reads `file` (one "key=value" per line, UTF-8). A missing file or key keeps the default.
     static Settings load(const std::filesystem::path& file);

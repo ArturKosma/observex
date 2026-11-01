@@ -8,6 +8,14 @@
 
 namespace observex {
 
+// Which captured image an image is: the pipeline's count of new screen images since it started (1 for the first),
+// and when the screen showed it (QueryPerformanceCounter ticks). Lets readers on different threads (the recogniser,
+// the recorder) say they handled the same image.
+struct ImageStamp {
+    std::uint64_t number = 0;
+    std::int64_t shownQpc = 0;
+};
+
 // Carries the newest captured image from the pipeline's GPU device to one reader on another GPU device
 // (the UI's preview, or the recorder) without either side ever waiting for the other. Three shared
 // textures rotate through a TripleBuffer: the pipeline writes one, the reader uses another, and the third
@@ -23,7 +31,7 @@ public:
     ImageChannel& operator=(const ImageChannel&) = delete;
 
     // Pipeline thread: copies `image` (same size and format) into a free texture and hands it to the reader.
-    void write(ID3D11DeviceContext* context, ID3D11Texture2D* image);
+    void write(ID3D11DeviceContext* context, ID3D11Texture2D* image, const ImageStamp& stamp);
 
     unsigned width() const { return width_; }
     unsigned height() const { return height_; }
@@ -43,9 +51,8 @@ private:
     };
 
     std::array<Slot, 3> slots_;
-    TripleBuffer<std::uint64_t> handover_; // Slot index = texture index; the value is the image number.
-    HANDLE writtenEvent_ = nullptr;       // Set after each write, for ImageReader::waitForImage.
-    std::uint64_t written_ = 0;
+    TripleBuffer<ImageStamp> handover_; // Slot index = texture index; the value says which image it holds.
+    HANDLE writtenEvent_ = nullptr;     // Set after each write, for ImageReader::waitForImage.
     UINT64 writeKey_ = kWriterKey; // Key the current write texture was last released with.
     unsigned width_;
     unsigned height_;
@@ -62,8 +69,8 @@ public:
     ImageReader& operator=(const ImageReader&) = delete;
 
     // If a new image arrived, copies it into mip 0 of `target` (same size and format, on the reader's
-    // device) and returns true. Never waits.
-    bool copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* target);
+    // device), sets `stamp` (if given) to which image it is, and returns true. Never waits.
+    bool copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* target, ImageStamp* stamp = nullptr);
 
     // Waits up to `timeoutMs` for the pipeline to write an image. Returns true if one may have arrived since the
     // last wait (call copyNewImage to take it). For a reader that wants every image the moment it comes.

@@ -14,6 +14,7 @@ namespace observex {
 
 class ImageChannel;
 class ImageReader;
+class LiveLog;
 
 // Saves the images handed to it through an ImageChannel as numbered JPEG files (000001.jpg, 000002.jpg, ...)
 // in one folder. It works on its own low-priority thread with its own GPU device, so reading the images back
@@ -22,8 +23,9 @@ class ImageReader;
 class Recorder {
 public:
     // Starts saving the images of `channel`, which come from `screen`, into `folder` (created if missing),
-    // numbering them from `firstNumber`. Throws on failure.
-    Recorder(const Screen& screen, ImageChannel& channel, std::filesystem::path folder, unsigned firstNumber);
+    // numbering them from `firstNumber`. Each saved image also goes into `log`, if given. Throws on failure.
+    Recorder(const Screen& screen, ImageChannel& channel, std::filesystem::path folder, unsigned firstNumber,
+             std::shared_ptr<LiveLog> log = nullptr);
     // Stops once the image being saved, if any, is written. Destroy it before the channel.
     ~Recorder();
 
@@ -46,6 +48,7 @@ private:
     std::unique_ptr<ImageReader> reader_;
     ComPtr<ID3D11Texture2D> staging_; // CPU-readable copy of the image being saved.
     std::filesystem::path folder_;
+    std::shared_ptr<LiveLog> log_;
     unsigned nextNumber_;
     unsigned width_ = 0;
     unsigned height_ = 0;

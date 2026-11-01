@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Detection.h"
 #include "engine/Gpu.h"
 
 #include <atomic>
@@ -8,15 +9,6 @@
 #include <stop_token>
 
 namespace observex {
-
-// Something a model found on a screen image: a box in image pixels, and how sure the model is (0 to 1).
-struct Detection {
-    float x = 0.0f;
-    float y = 0.0f;
-    float width = 0.0f;
-    float height = 0.0f;
-    float sure = 0.0f;
-};
 
 // One trained model (models/<category>/model.onnx, written by tools/train) running on the GPU through TensorRT.
 // The image never leaves the GPU: a compute shader squeezes it to the model's size into a buffer that CUDA shares

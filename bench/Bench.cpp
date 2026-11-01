@@ -3,6 +3,7 @@
 //   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--every S]]
 //                  [--model FOLDER]
 //   observex_bench --model FOLDER --images FOLDER --out FILE
+//   observex_bench --track LOG
 //
 // Lists the screens, runs the real Pipeline on one (the primary by default, or number N from the list)
 // and prints its numbers once a second.
@@ -17,18 +18,25 @@
 //
 // Record: --record saves images into FOLDER the way the app's Record button does, one every S seconds (default 3,
 // like the app), so its cost on capture shows in the numbers. The pulse is near-black, so most saved images show the screen
-// as it is.
+// as it is. With --model too, it also writes the live log (e.g. monster-live.txt, see engine/LiveLog) like the app,
+// and marks once halfway, as if Ctrl+Alt+M were pressed.
 //
 // Model: --model runs live recognition with the model in FOLDER (e.g. models/monster) the way the app does while
 // observing, and adds its numbers: images recognised per second, milliseconds per image, things found.
 // With --images it looks at the image files of a recording instead of the screen and writes what it found to FILE
 // in the marks format (like tools/train/guess.py's <category>-guesses.txt), to compare with the Python model.
+//
+// Track: --track follows the things of a live log (a recording's monster-live.txt) with the Tracker, look by look as
+// the recogniser does, and prints how steady the boxes are with and without it, and what following costs. No GPU.
 
 #include "core/Marks.h"
+#include "core/StatWindow.h"
+#include "core/Tracker.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
 #include "engine/ImageFile.h"
+#include "engine/LiveLog.h"
 #include "engine/Pipeline.h"
 #include "engine/Recognizer.h"
 #include "engine/Recorder.h"
@@ -37,6 +45,7 @@
 #include <dwmapi.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -46,7 +55,9 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -65,6 +76,7 @@ struct Options {
     const char* model = nullptr;
     const char* images = nullptr;
     const char* out = nullptr;
+    const char* track = nullptr;
 };
 
 bool parse(int argc, char** argv, Options& options) {
@@ -87,10 +99,13 @@ bool parse(int argc, char** argv, Options& options) {
             options.images = argv[++i];
         } else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
             options.out = argv[++i];
+        } else if (std::strcmp(argv[i], "--track") == 0 && i + 1 < argc) {
+            options.track = argv[++i];
         } else {
             std::printf("usage: observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] "
                         "[--record FOLDER [--every S]] [--model FOLDER]\n"
-                        "       observex_bench --model FOLDER --images FOLDER --out FILE\n");
+                        "       observex_bench --model FOLDER --images FOLDER --out FILE\n"
+                        "       observex_bench --track LOG\n");
             return false;
         }
     }
@@ -253,12 +268,94 @@ int detectImages(const Options& options) {
     return 0;
 }
 
+// --track: follows the things of a live log with the Tracker and prints how steady the boxes are.
+int replayTrack(const Options& options) {
+    std::ifstream in(options.track, std::ios::binary);
+    if (!in) {
+        std::printf("Cannot read %s\n", options.track);
+        return 1;
+    }
+    struct Life {
+        double firstMs;
+        double lastMs;
+    };
+    Tracker tracker;
+    std::vector<Detection> found;
+    std::array<Tracked, Found::kMax> followed;
+    std::map<std::uint32_t, Life> lives; // Per identity: when it was first and last shown.
+    StatWindow cost;
+    int looks = 0;
+    double firstMs = 0.0;
+    double lastMs = 0.0;
+    long long previousFound = 0;
+    long long previousFollowed = 0;
+    long long foundChanges = 0; // Boxes appearing or vanishing between looks, as the model alone shows them.
+    long long followedChanges = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("look ", 0) != 0) {
+            continue;
+        }
+        std::istringstream words(line.substr(5));
+        unsigned long long image = 0;
+        double timeMs = 0.0;
+        words >> image >> timeMs;
+        found.clear();
+        Detection box;
+        while (words >> box.sure >> box.x >> box.y >> box.width >> box.height) {
+            if (box.sure >= Recognizer::kMinSure) {
+                found.push_back(box);
+            }
+        }
+        const auto start = std::chrono::steady_clock::now();
+        const int count = tracker.update(timeMs, found.data(), static_cast<int>(found.size()), followed.data(),
+                                         static_cast<int>(followed.size()));
+        cost.add(static_cast<float>(
+            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count()));
+        if (looks == 0) {
+            firstMs = timeMs;
+        } else {
+            foundChanges += std::llabs(static_cast<long long>(found.size()) - previousFound);
+            followedChanges += std::llabs(count - previousFollowed);
+        }
+        previousFound = static_cast<long long>(found.size());
+        previousFollowed = count;
+        for (int i = 0; i < count; ++i) {
+            const auto [life, added] =
+                lives.try_emplace(followed[static_cast<std::size_t>(i)].id, Life{timeMs, timeMs});
+            life->second.lastMs = timeMs;
+        }
+        lastMs = timeMs;
+        ++looks;
+    }
+    if (looks < 2 || lastMs <= firstMs) {
+        std::printf("Not enough looks in %s\n", options.track);
+        return 1;
+    }
+    const double seconds = (lastMs - firstMs) / 1000.0;
+    int brief = 0;
+    for (const auto& [id, life] : lives) {
+        brief += life.lastMs - life.firstMs < 50.0 ? 1 : 0;
+    }
+    const StatWindow::Summary summary = cost.take();
+    std::printf("%d looks over %.1f s (%.0f a second)\n", looks, seconds, looks / seconds);
+    std::printf("Boxes appearing or vanishing: %.1f a second from the model alone, %.1f followed\n",
+                static_cast<double>(foundChanges) / seconds, static_cast<double>(followedChanges) / seconds);
+    std::printf("Things followed: %zu, of them shown under 50 ms: %d\n", lives.size(), brief);
+    std::printf("Following: %.2f us per look on average, %.2f us at most\n", static_cast<double>(summary.average),
+                static_cast<double>(summary.max));
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     Options options;
     if (!parse(argc, argv, options)) {
         return 2;
+    }
+    if (options.track != nullptr) {
+        return replayTrack(options);
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); // Required by DuplicateOutput1.
     if (options.images != nullptr) {
@@ -301,11 +398,6 @@ int main(int argc, char** argv) {
             if (options.preview) {
                 consumer = std::make_unique<PreviewConsumer>(gpu.Get(), *pipeline.preview());
             }
-            std::unique_ptr<Recorder> recorder;
-            if (options.recordFolder != nullptr) {
-                recorder = std::make_unique<Recorder>(screen, *pipeline.recording(), options.recordFolder, 1);
-                pipeline.setRecordingInterval(options.recordEvery);
-            }
             std::unique_ptr<Recognizer> recognizer;
             if (options.model != nullptr) {
                 recognizer = std::make_unique<Recognizer>(screen, *pipeline.recognition(), options.model);
@@ -325,6 +417,24 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
+            // Recording with a model also writes the live log, as the app does (once the model is ready).
+            std::shared_ptr<LiveLog> log;
+            std::unique_ptr<Recorder> recorder;
+            if (options.recordFolder != nullptr) {
+                if (recognizer) {
+                    const std::filesystem::path model(options.model);
+                    char about[512];
+                    std::snprintf(about, sizeof(about), "Model %s, screen %s (%s), %u x %u. Written by observex_bench.",
+                                  toUtf8((model / L"model.onnx").c_str()).c_str(), screen.monitor.c_str(),
+                                  screen.name.c_str(), pipeline.width(), pipeline.height());
+                    log = std::make_shared<LiveLog>(
+                        std::filesystem::path(options.recordFolder) / (model.filename().string() + "-live.txt"), about);
+                    recognizer->setLog(log);
+                }
+                recorder = std::make_unique<Recorder>(screen, *pipeline.recording(), options.recordFolder, 1, log);
+                pipeline.setRecordingInterval(options.recordEvery);
+            }
+            bool marked = false;
             std::jthread pulse;
             if (options.pulse) {
                 pulse = std::jthread([&](std::stop_token stop) { runPulse(gpu.Get(), screen.bounds, stop); });
@@ -351,6 +461,11 @@ int main(int argc, char** argv) {
                     consumer->poll();
                 }
                 DwmFlush(); // Pace like a UI synced to the screen.
+                if (log && !marked && Clock::now() - start >= std::chrono::milliseconds(options.seconds * 500)) {
+                    log->mark(1); // Halfway, as if the user pressed Ctrl+Alt+M.
+                    pipeline.recordNow();
+                    marked = true;
+                }
 
                 if (Clock::now() >= nextPrint) {
                     nextPrint += std::chrono::seconds(1);

@@ -295,6 +295,12 @@ struct Detector::Impl {
     void* deviceScores = nullptr;
     float* hostBoxes = nullptr; // Page-locked, so the copies back are fast.
     float* hostScores = nullptr;
+    cudaGraphExec_t graph = nullptr; // The network and the copies back, recorded for `graphInput` (see runNetwork).
+    void* graphInput = nullptr;
+    bool noGraph = false; // Recording failed: run the network step by step.
+
+    bool enqueueNetwork(void* input);
+    bool runNetwork(void* input);
 
     Logger logger;
     std::unique_ptr<nvinfer1::IRuntime> runtime;
@@ -302,6 +308,9 @@ struct Detector::Impl {
     std::unique_ptr<nvinfer1::IExecutionContext> context;
 
     ~Impl() {
+        if (graph != nullptr) {
+            cudaGraphExecDestroy(graph);
+        }
         context.reset(); // TensorRT first, then the memory it used.
         engine.reset();
         runtime.reset();
@@ -317,6 +326,53 @@ struct Detector::Impl {
         }
     }
 };
+
+// Queues the network on `input` and the copies of the candidates back, step by step.
+bool Detector::Impl::enqueueNetwork(void* input) {
+    const std::size_t boxesBytes = static_cast<std::size_t>(candidates) * 4 * sizeof(float);
+    const std::size_t scoresBytes = static_cast<std::size_t>(candidates * scoresPerCandidate) * sizeof(float);
+    return context->setTensorAddress(kInputName, input) && context->enqueueV3(stream) &&
+           cudaMemcpyAsync(hostBoxes, deviceBoxes, boxesBytes, cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
+           cudaMemcpyAsync(hostScores, deviceScores, scoresBytes, cudaMemcpyDeviceToHost, stream) == cudaSuccess;
+}
+
+// Queues the network on `input` and the copies back as one CUDA graph: a single launch replays the network's
+// hundreds of GPU steps, so the CPU does not launch each one and the GPU does not wait between them. The graph is
+// recorded on the first look (after a plain run, which TensorRT needs first) and again only if the input moves.
+bool Detector::Impl::runNetwork(void* input) {
+    if (graph != nullptr && input == graphInput) {
+        return cudaGraphLaunch(graph, stream) == cudaSuccess;
+    }
+    if (!enqueueNetwork(input)) {
+        return false;
+    }
+    if (noGraph) {
+        return true;
+    }
+    if (graph != nullptr) {
+        cudaGraphExecDestroy(graph);
+        graph = nullptr;
+    }
+    // Recording only notes the steps; this look's results come from the plain run above.
+    cudaGraph_t recorded = nullptr;
+    bool ok = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) == cudaSuccess;
+    if (ok) {
+        ok = enqueueNetwork(input);
+        ok = cudaStreamEndCapture(stream, &recorded) == cudaSuccess && ok && recorded != nullptr;
+    }
+    ok = ok && cudaGraphInstantiate(&graph, recorded, 0) == cudaSuccess;
+    if (recorded != nullptr) {
+        cudaGraphDestroy(recorded);
+    }
+    if (ok) {
+        graphInput = input;
+    } else {
+        cudaGetLastError(); // Clears the failure; the plain run above already worked.
+        graph = nullptr;
+        noGraph = true;
+    }
+    return true;
+}
 
 Detector::Detector(ID3D11Device* device, IDXGIAdapter* adapter, const fs::path& modelFolder, unsigned width,
                    unsigned height, std::stop_token stop, std::atomic<float>& progress)
@@ -486,12 +542,7 @@ int Detector::detect(ID3D11DeviceContext* context, float minSure, Detection* fou
     void* input = nullptr;
     std::size_t inputBytes = 0;
     bool ok = cudaGraphicsResourceGetMappedPointer(&input, &inputBytes, d.tensorResource) == cudaSuccess &&
-              d.context->setTensorAddress(kInputName, input) && d.context->enqueueV3(d.stream);
-    const std::size_t boxesBytes = static_cast<std::size_t>(d.candidates) * 4 * sizeof(float);
-    const std::size_t scoresBytes = static_cast<std::size_t>(d.candidates * d.scoresPerCandidate) * sizeof(float);
-    ok = ok &&
-         cudaMemcpyAsync(d.hostBoxes, d.deviceBoxes, boxesBytes, cudaMemcpyDeviceToHost, d.stream) == cudaSuccess &&
-         cudaMemcpyAsync(d.hostScores, d.deviceScores, scoresBytes, cudaMemcpyDeviceToHost, d.stream) == cudaSuccess;
+              d.runNetwork(input);
     ok = cudaGraphicsUnmapResources(1, &d.tensorResource, d.stream) == cudaSuccess && ok;
     if (cudaStreamSynchronize(d.stream) != cudaSuccess || !ok) {
         return -1;

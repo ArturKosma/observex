@@ -46,6 +46,8 @@ Settings Settings::load(const std::filesystem::path& file) {
             settings.recordingsFolder = fromUtf8(value);
         } else if (key == "show-monsters") {
             settings.showMonsters = value != "0";
+        } else if (key == "live-log") {
+            settings.liveLog = value != "0";
         }
     }
     return settings;
@@ -55,6 +57,7 @@ bool Settings::save(const std::filesystem::path& file) const {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     out << "recordings=" << toUtf8(recordingsFolder) << "\r\n";
     out << "show-monsters=" << (showMonsters ? 1 : 0) << "\r\n";
+    out << "live-log=" << (liveLog ? 1 : 0) << "\r\n";
     return static_cast<bool>(out);
 }
 

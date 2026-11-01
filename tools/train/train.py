@@ -9,7 +9,7 @@
    score. The last part, not random images, because neighbouring images are near copies and would flatter it.
 3. Fine-tunes RF-DETR (pretrained on everyday photos) on the rest, on the GPU.
 4. Saves the model as models/<category>/model.pth, its settings and score in model.json, and prints the score:
-   how many of the held-out things it finds, and how many false alarms it raises.
+   how many of the held-out things it finds, and how many false alarms it raises, at LIVE_RESOLUTION.
 5. Writes model.onnx, the form observex runs live (see export.py).
 """
 
@@ -28,6 +28,11 @@ from marks import Mark, model_folder, overlap, read_marks, recordings_folder
 
 MODELS = {"nano": "RFDETRNano", "small": "RFDETRSmall", "medium": "RFDETRMedium", "large": "RFDETRLarge"}
 SCORE_CUTOFFS = (0.3, 0.4, 0.5)  # The score counts marks the model is at least this sure about, for each of these.
+# observex runs the model on images squeezed to this many pixels square: smaller than it trains at (--resolution),
+# so it costs about a quarter less live. Tested 2026-11-01 on 80 held-out images (238 monsters): trained at 1024 and
+# run at 768, it found 214 at 40% sure with 9 false alarms (run at 1024: 219 and 14; AP50 0.957 against 0.960);
+# trained at 768 it did worse (AP50 0.931, 17 false alarms). The score, guess.py and model.onnx all use it.
+LIVE_RESOLUTION = 768
 # Images per learning step, RF-DETR's usual recipe. They go through the GPU --batch at a time, and the step waits for
 # all of them. Not batch_size="auto": it tries bigger batches until one does not fit, but on Windows the NVIDIA driver
 # then moves GPU memory into normal RAM instead of failing, so the search never ends (it ran 7 minutes, 15 GB RAM).
@@ -62,6 +67,14 @@ def load_trained(path: Path):
     from rfdetr import RFDETR
 
     return RFDETR.from_checkpoint(str(path))
+
+
+def load_live(path: Path):
+    """A model saved by train.py, set to see images at LIVE_RESOLUTION, as observex runs it: predict, inference
+    (half precision, compiled) and export then all use that size."""
+    model = load_trained(path)
+    model.model.resolution = LIVE_RESOLUTION
+    return model
 
 
 def link_or_copy(source: Path, target: Path) -> None:
@@ -132,8 +145,8 @@ def build_dataset(recordings: list[Path], category: str, held_out_share: float, 
 
 
 def score(model, dataset: Path, cutoff: float) -> dict:
-    """How the model does on the held-out images, counting marks at least `cutoff` sure: things found, things
-    missed, false alarms."""
+    """How the model (from load_live) does on the held-out images, counting marks at least `cutoff` sure: things
+    found, things missed, false alarms."""
     coco = json.loads((dataset / "valid" / "_annotations.coco.json").read_text(encoding="utf-8"))
     truth: dict[int, list[Mark]] = {image["id"]: [] for image in coco["images"]}
     for annotation in coco["annotations"]:
@@ -172,8 +185,8 @@ def main() -> None:
     parser.add_argument("--recordings", type=Path, default=None, help="default: the folder in observex.cfg")
     parser.add_argument("--model", choices=sorted(MODELS), default="medium")
     parser.add_argument("--resolution", type=int, default=1024,
-                        help="the image is squeezed to this many pixels square (multiple of 32); "
-                             "higher finds smaller things but is slower")
+                        help="while training, the image is squeezed to this many pixels square (multiple of 32); "
+                             "observex runs the model at LIVE_RESOLUTION")
     parser.add_argument("--epochs", type=int, default=40,
                         help="passes over the images; on 2026-11-01 the best pass was always before 35")
     parser.add_argument("--augment", choices=sorted(AUGMENTATIONS), default="color",
@@ -212,12 +225,13 @@ def main() -> None:
     shutil.copy2(best, out / "model.pth")
     for resume_file in training.glob("*.ckpt"):  # 0.5 GB each, only for resuming a stopped run.
         resume_file.unlink()
-    trained = load_trained(out / "model.pth")
+    trained = load_live(out / "model.pth")
     scores = [score(trained, dataset, cutoff) for cutoff in SCORE_CUTOFFS]
     info = {
         "category": args.category,
         "model": args.model,
         "resolution": args.resolution,
+        "live_resolution": LIVE_RESOLUTION,
         "trained": datetime.now().isoformat(timespec="seconds"),
         "minutes": round(minutes, 1),
         "epochs": args.epochs,
@@ -231,7 +245,8 @@ def main() -> None:
 
     onnx = export_onnx(args.category)  # What observex runs live.
     print(f"\nTrained in {minutes:.0f} min. Saved {out / 'model.pth'} and {onnx.name}.")
-    print(f"Held-out score, on {counts['held_out_images']} images it never learned from:")
+    print(f"Held-out score, on {counts['held_out_images']} images it never learned from (at {LIVE_RESOLUTION} "
+          "pixels, as observex runs it):")
     for result in scores:
         print(f"  marks at least {result['cutoff']:.0%} sure: finds {result['found']} of "
               f"{result['found'] + result['missed']} ({result['found_share']:.0%}), {result['false_alarms']} false "

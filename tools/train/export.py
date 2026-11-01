@@ -7,7 +7,7 @@ turns it into a TensorRT engine for this GPU the first time it observes a screen
 or two), and keeps that next to it as model.engine.
 
 The network is stored in half precision, because TensorRT 11 takes the precision from the file; its input and outputs
-stay 32-bit. Input: the screen image squeezed to the model's resolution, colours scaled the way RF-DETR does.
+stay 32-bit. Input: the screen image squeezed to LIVE_RESOLUTION (train.py), colours scaled the way RF-DETR does.
 Outputs: 300 candidate boxes (centre x, centre y, width and height, as shares of the image) and two scores for each,
 before the sigmoid: the first is the category, the second an unused slot.
 """
@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from marks import model_folder
-from train import load_trained, utf8_output
+from train import load_live, utf8_output
 
 
 def export_onnx(category: str) -> Path:
@@ -29,7 +29,7 @@ def export_onnx(category: str) -> Path:
     from rfdetr.export._tensorrt.exporter import _cast_onnx_to_fp16  # RF-DETR's own half-precision cast (1.11.2).
 
     folder = model_folder(category)
-    model = load_trained(folder / "model.pth")
+    model = load_live(folder / "model.pth")
     target = folder / "model.onnx"
     with tempfile.TemporaryDirectory(dir=folder) as work:
         full = model.export(output_dir=work, format="onnx", verbose=False)

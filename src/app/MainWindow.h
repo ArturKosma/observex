@@ -2,6 +2,8 @@
 
 #include "engine/Gpu.h"
 
+#include <array>
+
 namespace observex {
 
 // The app's top-level Win32 window and its swap chain.
@@ -33,11 +35,13 @@ public:
     ComPtr<ID3D11Texture2D> backBuffer() const;
 
     // Registers a key combination that reaches observex even while another app (a game) has focus, e.g.
-    // registerHotkey(MOD_CONTROL | MOD_ALT, 'R'). One per window. Returns false if another app already uses it.
-    bool registerHotkey(UINT modifiers, UINT key);
+    // registerHotkey(0, MOD_CONTROL | MOD_ALT, 'R'). `id` (0 to kMaxHotkeys - 1) tells them apart. Returns false if
+    // another app already uses it.
+    static constexpr int kMaxHotkeys = 4;
+    bool registerHotkey(int id, UINT modifiers, UINT key);
 
-    // True once for each press of the hotkey since the last call.
-    bool takeHotkeyPress();
+    // True once for each press of hotkey `id` since the last call.
+    bool takeHotkeyPress(int id);
 
 private:
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -50,8 +54,8 @@ private:
     ComPtr<ID3D11RenderTargetView> backBufferView_;
     UINT pendingWidth_ = 0;
     UINT pendingHeight_ = 0;
-    bool hotkeyRegistered_ = false;
-    unsigned hotkeyPresses_ = 0;
+    std::array<bool, kMaxHotkeys> hotkeyRegistered_{};
+    std::array<unsigned, kMaxHotkeys> hotkeyPresses_{};
 };
 
 } // namespace observex

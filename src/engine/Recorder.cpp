@@ -2,6 +2,7 @@
 
 #include "engine/ImageChannel.h"
 #include "engine/ImageFile.h"
+#include "engine/LiveLog.h"
 #include "engine/ScreenCapture.h"
 
 #include <chrono>
@@ -20,8 +21,10 @@ constexpr auto kPollInterval = std::chrono::milliseconds(5);
 
 } // namespace
 
-Recorder::Recorder(const Screen& screen, ImageChannel& channel, std::filesystem::path folder, unsigned firstNumber)
-    : folder_(std::move(folder)), nextNumber_(firstNumber), width_(channel.width()), height_(channel.height()) {
+Recorder::Recorder(const Screen& screen, ImageChannel& channel, std::filesystem::path folder, unsigned firstNumber,
+                   std::shared_ptr<LiveLog> log)
+    : folder_(std::move(folder)), log_(std::move(log)), nextNumber_(firstNumber), width_(channel.width()),
+      height_(channel.height()) {
     std::filesystem::create_directories(folder_);
 
     const Screen own = findOnOwnAdapter(screen); // So this device cannot hold up the pipeline's.
@@ -55,8 +58,9 @@ void Recorder::run(std::stop_token stop) {
     SetThreadDescription(GetCurrentThread(), L"observex recorder");
     const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); // Once, for every image saved.
 
+    ImageStamp stamp;
     while (!stop.stop_requested()) {
-        if (!reader_->copyNewImage(gpu_.context.Get(), staging_.Get())) {
+        if (!reader_->copyNewImage(gpu_.context.Get(), staging_.Get(), &stamp)) {
             std::this_thread::sleep_for(kPollInterval);
             continue;
         }
@@ -77,6 +81,9 @@ void Recorder::run(std::stop_token stop) {
             break;
         }
         gpu_.context->Unmap(staging_.Get(), 0);
+        if (log_) {
+            log_->saved(stamp, name);
+        }
         ++nextNumber_;
         std::error_code sizeError;
         const std::uintmax_t bytes = std::filesystem::file_size(file, sizeError);

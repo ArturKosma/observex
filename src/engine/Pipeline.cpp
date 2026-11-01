@@ -105,15 +105,19 @@ void Pipeline::run(std::stop_token stop) {
 
             // Recognition first: the newest image goes to the recogniser the moment it arrives (it takes it on its
             // own thread and device). React will run here too.
+            const ImageStamp stamp{images, frame.presentQpc};
             if (recognitionEnabled_.load(std::memory_order_relaxed)) {
-                recognition_->write(gpu_.context.Get(), frame.texture);
+                recognition_->write(gpu_.context.Get(), frame.texture, stamp);
             }
             if (previewEnabled_.load(std::memory_order_relaxed)) {
-                preview_->write(gpu_.context.Get(), frame.texture);
+                preview_->write(gpu_.context.Get(), frame.texture, stamp);
             }
             const unsigned recordingInterval = recordingInterval_.load(std::memory_order_relaxed);
+            if (recordingInterval != 0 && recordNow_.exchange(false, std::memory_order_relaxed)) {
+                nextRecording = now; // Asked for this image (a mark); the interval counts on from it.
+            }
             if (recordingInterval != 0 && now >= nextRecording) {
-                recording_->write(gpu_.context.Get(), frame.texture);
+                recording_->write(gpu_.context.Get(), frame.texture, stamp);
                 const std::int64_t period = frequency.QuadPart * recordingInterval;
                 nextRecording += period;
                 if (nextRecording <= now) {
