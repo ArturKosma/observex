@@ -111,10 +111,10 @@ void Pipeline::run(std::stop_token stop) {
             if (previewEnabled_.load(std::memory_order_relaxed)) {
                 preview_->write(gpu_.context.Get(), frame.texture);
             }
-            const unsigned recordingRate = recordingRate_.load(std::memory_order_relaxed);
-            if (recordingRate != 0 && now >= nextRecording) {
+            const unsigned recordingInterval = recordingInterval_.load(std::memory_order_relaxed);
+            if (recordingInterval != 0 && now >= nextRecording) {
                 recording_->write(gpu_.context.Get(), frame.texture);
-                const std::int64_t period = frequency.QuadPart / recordingRate;
+                const std::int64_t period = frequency.QuadPart * recordingInterval;
                 nextRecording += period;
                 if (nextRecording <= now) {
                     nextRecording = now + period; // Starting, or the screen was still: count from now.

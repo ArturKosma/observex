@@ -15,7 +15,7 @@ namespace observex {
 
 namespace {
 
-// How often the recorder looks for a new image. Recording rates are a few per second, so this is plenty.
+// How often the recorder looks for a new image. Recording images come seconds apart, so this is plenty.
 constexpr auto kPollInterval = std::chrono::milliseconds(5);
 
 } // namespace

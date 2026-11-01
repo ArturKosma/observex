@@ -139,4 +139,16 @@ int carryAnswers(const std::vector<Mark>& previous, std::vector<Mark>& marks, fl
     return carried;
 }
 
+int presumeSure(std::vector<Mark>& marks, float minSure) {
+    int presumed = 0;
+    for (Mark& mark : marks) {
+        if (mark.answer == Answer::None && mark.guess >= minSure) {
+            mark.answer = Answer::Yes;
+            mark.presumed = true;
+            ++presumed;
+        }
+    }
+    return presumed;
+}
+
 } // namespace observex

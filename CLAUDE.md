@@ -55,11 +55,12 @@ latency). The GPU is then nearly fully used, so other GPU work feels it: the fin
 
 Recording (step 1 of the training loop): **Record** (or Ctrl+Alt+R, a system-wide hotkey that works while the game
 has focus or observex is minimized) saves the observed screen into a new folder named by date and time, e.g.
-`recordings/2026-10-31_23-05-12/000001.jpg`, 1 image per second (fixed, `kRecordingRate` in App.cpp: the user asked
-for no rate settings; neighbouring images would be near copies). Only images the screen actually updated are saved.
+`recordings/2026-10-31_23-05-12/000001.jpg`, 1 image every 3 seconds (fixed, `kRecordingInterval` in App.cpp: the
+user asked for no rate settings, then for 1 every 3 s instead of skipping near-copy images in the review,
+2026-11-01). Only images the screen actually updated are saved.
 While recording, the button reads "Stop", the time, the number of images and their size on disk (the Recorder sums
 each file's size; shown in 1024s, as File Explorer does). JPEG quality 85: about 0.7 MB per 2560 x 1440 Lineage 2
-image, so about 2.6 GB per hour. **Settings** (gear) holds only the recordings folder (default: `recordings` next to
+image, so about 0.85 GB per hour. **Settings** (gear) holds only the recordings folder (default: `recordings` next to
 observex.exe; folder picker, Open, Use default). Settings live in `observex.cfg` next to the exe. Both it and
 `recordings/` are gitignored.
 Recording costs capture nothing measurable (bench: 238.7 and 239.3 images/s recording, 238.2 and 239.2 not).
@@ -71,7 +72,11 @@ the selected mark gets Yes / No buttons under it (Y / N keys; answering moves to
 on the image draws a missed one (yes; Remove / Del deletes it). The bar's middle shows back / "Image 5 of 340 · 11
 reviewed" / forward (Left / Right keys). Moving forward makes the image "reviewed": unanswered marks become no and
 the answers are saved. Answers carry forward: a guess on the next image overlapping an answered mark by at least
-half (`carryAnswers`) gets its answer, tagged "copied". Review shows every image, in order.
+half (`carryAnswers`) gets its answer, tagged "copied". Then guesses at least 75% sure start as yes (`presumeSure`, `kPresumeYes`; green, tagged "Monster 92%"): the
+user only answers the unsure ones and flips wrong ones (the user asked, 2026-11-01: reviewing took too long; on the
+user's first 64 images of a new place, 223 of 230 such guesses were monsters, 97%; at 70% to 75% only 81%).
+There is no Skip: the user chose recording 1 image every 3 s over skipping near copies in the review. No setting
+for a review step (the user removed one before).
 Files, in the recording's folder, in the text format of `core/Marks.h`: `<category>-guesses.txt` (from the finder,
 read only) and `<category>-answers.txt` (written by review; only reviewed images, rewritten through a temporary file
 on every change). The finder (`engine/Finder`): when a review opens a recording with images not reviewed yet, and
@@ -132,7 +137,7 @@ captures only the screens on that GPU):
 - **Pipeline thread** (`engine/Pipeline`, time-critical priority): `ScreenCapture` waits for a new screen image (DXGI
   Desktop Duplication; the image stays on the GPU), then copies it into the recognition `ImageChannel` (first, so the
   recogniser gets it at once), into the preview `ImageChannel` while the UI shows it, and into the recording
-  `ImageChannel` when a recording image is due (`setRecordingRate`, images per second). React will run here. Once a
+  `ImageChannel` when a recording image is due (`setRecordingInterval`, seconds between images). React will run here. Once a
   second it hands `PipelineStats` to the UI.
 - **Recogniser thread** (`engine/Recognizer`, above-normal priority, while a screen is observed): waits on the
   recognition channel's event, copies the newest image into the `Detector`'s input texture and runs it: a compute
@@ -196,7 +201,7 @@ Configuring, building and running the tests and the bench here is fine. Do not l
 - Build: `cmake --build --preset debug` (or `release`)
 - Test: `ctest --preset debug`
 - Bench: `build/vs2022/bin/Release/observex_bench.exe [--screen N] [--seconds S] [--no-pulse] [--no-preview]
-  [--record FOLDER [--per-second N]] [--model FOLDER]`. Lists the screens and measures one (the primary by default).
+  [--record FOLDER [--every S]] [--model FOLDER]`. Lists the screens and measures one (the primary by default).
   Its "pulse" is an invisible 2 x 2 pixel, click-through, never-focused window in the screen's corner that presents
   every refresh like a game, so the screen has something to capture. `--record` saves images like the Record button
   does (into a scratch folder, never the repo), so its cost shows in the numbers. `--model models/monster` runs the

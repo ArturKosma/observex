@@ -26,7 +26,9 @@ constexpr char kShowPopup[] = "show";
 constexpr char kCategoryPopup[] = "What are we looking for?";
 constexpr char kChooseText[] = "Choose a screen to observe";
 constexpr char kHotkeyText[] = "Ctrl+Alt+R";
-constexpr unsigned kRecordingRate = 1;  // Images saved per second while recording; more would be near copies.
+// Seconds between saved images while recording. Neighbouring images are near copies, so the user asked for one
+// every 3 s (2026-11-01) rather than more to review. Fixed, no setting.
+constexpr unsigned kRecordingInterval = 3;
 constexpr int kSnapshotStepFrames = 36; // Snapshot frames are 16 ms apart, so each step gets about 0.6 s.
 
 void centredText(const char* text, ImU32 color, float y) {
@@ -303,7 +305,7 @@ void App::resumeRecording() {
     try {
         recorder_ =
             std::make_unique<Recorder>(*observed_, *pipeline_.recording(), recording_->folder, recording_->saved + 1);
-        pipeline_.setRecordingRate(kRecordingRate);
+        pipeline_.setRecordingInterval(kRecordingInterval);
     } catch (const std::exception& e) {
         recordingError_ = std::string("Could not record: ") + e.what();
         recorder_.reset();
@@ -312,7 +314,7 @@ void App::resumeRecording() {
 }
 
 void App::pauseRecording() {
-    pipeline_.setRecordingRate(0);
+    pipeline_.setRecordingInterval(0);
     if (recorder_) {
         if (recording_) {
             recording_->saved += recorder_->saved();

@@ -39,7 +39,8 @@ inline constexpr Category kCategories[] = {
 // - <id>-answers.txt: the user's answers. An image is in it once the user moved on from it with Next; it is then
 //   "reviewed": everything in the category on it is marked yes. Unanswered marks count as no when moving on.
 //   Saved on every change to a reviewed image.
-// Answers carry forward: a mark on the next image that overlaps an answered one gets the same answer.
+// Answers carry forward: a mark on the next image that overlaps an answered one gets the same answer. Guesses the
+// finder is sure of (75% or more) then start as yes, so the user only answers the unsure ones and flips wrong ones.
 // If a trained model exists (models/<id>/model.onnx) and the recording's guesses are missing or older than it, the
 // Finder writes them in the background while the review is open; they show as soon as it is done.
 class Review {

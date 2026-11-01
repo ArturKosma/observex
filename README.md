@@ -26,15 +26,17 @@ Screen capture, recording, reviewing, training and recognising monsters live wor
   how sure the model is ("Monster 81%") around each monster it finds. Turning a flag off only hides the boxes;
   recognition keeps running. It pauses only while you review, so the review gets the GPU. The first time observex sees a new model, it prepares it for your GPU (about 35 s,
   with progress under the flag) and keeps the result for the next starts.
-- **Record**: saves the observed screen as numbered JPEG images, one per second, into a new folder per recording
+- **Record**: saves the observed screen as numbered JPEG images, one every 3 seconds, into a new folder per recording
   (`recordings/` next to observex.exe unless you pick another folder in Settings). Ctrl+Alt+R starts and stops it
-  even while a game is in front. A 2560 x 1440 game image is about 0.7 MB, so expect about 2.6 GB per hour.
+  even while a game is in front. A 2560 x 1440 game image is about 0.7 MB, so expect about 0.85 GB per hour.
   While recording, the button shows the time, the number of images and how much disk space they take. Recording
   does not slow capture.
 - **Review**: open a recording, choose what to look for (Monsters for now), and step through its images. Each thing
   observex marked shows as a box with its guess ("Monster? 81%"); answer it with Yes / No (or the Y / N keys), and
-  drag a box around anything it missed. Moving on with the Right arrow saves the image's answers, and answers carry
-  over to the same thing on the next image. Answers are saved next to the images, in `monster-answers.txt`. Once a
+  drag a box around anything it missed. What the model is at least 75% sure of starts as yes ("Monster 92%",
+  green; it was right 97% of the time), so you only answer the unsure ones and flip the rare wrong one. Moving on
+  with the Right arrow saves the image's answers, and answers carry over to the same thing on the next image.
+  Answers are saved next to the images, in `monster-answers.txt`. Once a
   model is trained, opening a new recording runs it in the background, inside observex on the GPU ("Looking for
   monsters with the trained model", with progress; about 1 s to start, then about 20 ms per image), and its guesses
   appear when it is done. Before the first training there are no guesses, so you draw the boxes yourself.
@@ -87,7 +89,7 @@ It lists the screens, captures one (`--screen N`, the primary by default) and pr
 updates, latency and work per image once a second. To give capture something to do, it presents an invisible 2 x 2
 pixel window in the screen's corner every refresh, like a game would (`--no-pulse` turns that off). `--no-preview`
 leaves out the copy the UI makes to show the screen. `--record FOLDER` also saves images like the Record button
-(`--per-second N`, default 1 like the app), to measure what recording costs. `--model models/monster` runs live
+(`--every S`, one every 3 seconds like the app), to measure what recording costs. `--model models/monster` runs live
 recognition alongside and prints its speed and how many monsters it found.
 
 ## UI snapshots

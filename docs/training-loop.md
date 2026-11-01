@@ -16,7 +16,7 @@ record  ->  propose  ->  review  ->  train  ->  detect live
   +------------------ next round ------------------+
 ```
 
-1. **Record.** While the user plays, observex saves one frame per second in the background. Nothing is analysed
+1. **Record.** While the user plays, observex saves one frame every 3 seconds in the background. Nothing is analysed
    during play, so the game and the capture loop are never slowed.
 2. **Propose.** After the session, observex looks through the saved frames and picks out candidate objects. In the
    first round it knows nothing yet, so a general "find every distinct object" model makes the guesses (slow, but it
@@ -95,9 +95,10 @@ Each step can be tried on its own.
 
 1. **Recording**: save frames (and later the user's clicks and keys) to the data folder, without slowing capture.
    **Built (frames).** Record button or Ctrl+Alt+R; one folder per recording, named by date and time, holding
-   `000001.jpg`, `000002.jpg`, ...; 1 image per second, fixed (the user asked for no rate setting; neighbouring
-   images would be near copies); only images the screen actually updated. JPEG quality 85: about 0.7 MB per
-   2560 x 1440 Lineage 2 image, about 2.6 GB per hour. No measurable cost to capture. Clicks and keys: not yet.
+   `000001.jpg`, `000002.jpg`, ...; 1 image every 3 seconds, fixed (the user asked for no rate setting; it was 1 per
+   second until 2026-11-01, when the user chose fewer images over skipping near copies in the review); only images
+   the screen actually updated. JPEG quality 85: about 0.7 MB per 2560 x 1440 Lineage 2 image, about 0.85 GB per
+   hour. No measurable cost to capture. Clicks and keys: not yet.
 2. **Review screen**: step through candidates and answer with one key; show the score.
    **Built (answering).** Review button, then the recording's folder, then the category ("What are we looking
    for?"; only Monsters for now). Each image shows the finder's marks with how sure it is; the user answers yes or
@@ -105,6 +106,14 @@ Each step can be tried on its own.
    makes the image *reviewed*: unanswered marks count as no, and everything in the category on it is marked yes.
    Answers carry forward to marks on the next image that overlap an answered one by at least half (marked
    "copied"). Every image is shown, in order.
+   **Faster review (2026-11-01, the user found a 205-image recording too slow):** guesses at least 75% sure start
+   as yes ("Monster 92%", green), so the user answers only the unsure ones, flips wrong ones and draws misses. Why
+   75%: on the user's first 64 reviewed images of a new place, 223 of 230 guesses at 75% or more were monsters
+   (97%), 21 of 26 at 70% to 75% (81%), about half at 50% to 70%; the model missed 21 of 312 monsters. A Skip key
+   (move on without saving) was tried and dropped the same day: the user preferred recording 1 image every 3 s,
+   so there are fewer near copies to review in the first place. Not fully automatic learning (training on its own guesses): it would learn its wrong sure guesses as right and its
+   misses as "not a monster", exactly the cases it needs to learn; the unsure half is a coin flip only a person (or
+   the game's own labels, below) can settle.
    **How to draw a box** (2026-11-01, after checking every answer; mixed habits hurt the model more than anything
    else): one box per monster, tight around its body only, never the name and level above it. Every visible monster
    counts, far-off ones too. A monster that is fully hidden (behind the player, the chat or a wall), or of which only
@@ -218,7 +227,7 @@ Each step can be tried on its own.
   Interlude x10"). Not yet confirmed by the user as the target. There, monsters show "Level: N" and their name above
   their heads, and the targeted one also gets red markers beside its name and the target window at the top; these
   are the free labels described above. A private server's own rules decide whether bots are allowed.
-- Data folder: decided. `recordings/` next to observex.exe by default, changeable in Settings; 1 image per second.
+- Data folder: decided. `recordings/` next to observex.exe by default, changeable in Settings; 1 image every 3 seconds.
 - Round one: decided for now. The user draws the boxes on the first few dozen images themselves (varied places,
   distances and monster kinds, every monster on each image), then the first model is trained. A general object
   finder (e.g. Segment Anything) only if that proves too slow.

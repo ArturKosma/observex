@@ -100,3 +100,24 @@ TEST_CASE("carryAnswers copies the answer of the most overlapping answered mark"
     CHECK_FALSE(marks[4].carried);
     CHECK(marks[4].answer == Answer::No);
 }
+
+TEST_CASE("presumeSure answers yes only the unanswered guesses that are sure enough") {
+    std::vector<Mark> marks = {
+        Mark{Box{100, 100, 40, 40}, Answer::None, 0.92f}, // Sure: yes.
+        Mark{Box{200, 100, 40, 40}, Answer::None, 0.75f}, // Exactly sure enough: yes.
+        Mark{Box{300, 100, 40, 40}, Answer::None, 0.6f},  // Unsure: left to the user.
+        Mark{Box{400, 100, 40, 40}, Answer::No, 0.9f},    // Answered no (e.g. carried): stays no.
+        Mark{Box{500, 100, 40, 40}, Answer::Yes},         // Drawn by the user: untouched.
+    };
+
+    CHECK(presumeSure(marks, 0.75f) == 2);
+    CHECK(marks[0].answer == Answer::Yes);
+    CHECK(marks[0].presumed);
+    CHECK(marks[1].answer == Answer::Yes);
+    CHECK(marks[1].presumed);
+    CHECK(marks[2].answer == Answer::None);
+    CHECK_FALSE(marks[2].presumed);
+    CHECK(marks[3].answer == Answer::No);
+    CHECK_FALSE(marks[3].presumed);
+    CHECK_FALSE(marks[4].presumed);
+}

@@ -32,8 +32,9 @@ enum class Answer : std::uint8_t {
 struct Mark {
     Box box;
     Answer answer = Answer::None;
-    float guess = -1.0f;  // How sure the finder was that it belongs to the category (0 to 1); -1 if the user drew it.
-    bool carried = false; // The answer was copied from the image before, not given on this one.
+    float guess = -1.0f;    // How sure the finder was that it belongs to the category (0 to 1); -1 if the user drew it.
+    bool carried = false;   // The answer was copied from the image before, not given on this one.
+    bool presumed = false;  // Answered yes because the finder was sure enough (presumeSure), not by the user.
 };
 
 // The marks of each image, by image file name (e.g. "000001.jpg"), in name order.
@@ -53,5 +54,9 @@ std::string formatMarks(const ImageMarks& marks, std::string_view comment = {});
 // they overlap at least `minOverlap`, and flags it as carried. Returns how many marks got an answer.
 // This is how one answer covers the same thing on the next image, as long as it has not moved much.
 int carryAnswers(const std::vector<Mark>& previous, std::vector<Mark>& marks, float minOverlap = 0.5f);
+
+// Answers yes each unanswered mark the finder was at least `minSure` sure of, and flags it as presumed. Returns how
+// many marks got an answer. Run it after carryAnswers, so an answer from the image before wins (a "no" stays no).
+int presumeSure(std::vector<Mark>& marks, float minSure);
 
 } // namespace observex

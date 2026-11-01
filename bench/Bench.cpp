@@ -1,6 +1,6 @@
 // observex_bench: measures the capture pipeline from a console, without opening the app window.
 //
-//   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--per-second N]]
+//   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--every S]]
 //                  [--model FOLDER]
 //   observex_bench --model FOLDER --images FOLDER --out FILE
 //
@@ -15,8 +15,8 @@
 // Preview: by default a second GPU device takes every new image the way the UI does (copy, then build
 // the smaller versions), so the cost of showing the screen is included. --no-preview measures capture alone.
 //
-// Record: --record saves images into FOLDER the way the app's Record button does, N per second (default 1),
-// so its cost on capture shows in the numbers. The pulse is near-black, so most saved images show the screen
+// Record: --record saves images into FOLDER the way the app's Record button does, one every S seconds (default 3,
+// like the app), so its cost on capture shows in the numbers. The pulse is near-black, so most saved images show the screen
 // as it is.
 //
 // Model: --model runs live recognition with the model in FOLDER (e.g. models/monster) the way the app does while
@@ -61,7 +61,7 @@ struct Options {
     bool pulse = true;
     bool preview = true;
     const char* recordFolder = nullptr;
-    unsigned recordPerSecond = 1; // As the app records.
+    unsigned recordEvery = 3; // Seconds between saved images, as the app records.
     const char* model = nullptr;
     const char* images = nullptr;
     const char* out = nullptr;
@@ -79,8 +79,8 @@ bool parse(int argc, char** argv, Options& options) {
             options.preview = false;
         } else if (std::strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
             options.recordFolder = argv[++i];
-        } else if (std::strcmp(argv[i], "--per-second") == 0 && i + 1 < argc) {
-            options.recordPerSecond = static_cast<unsigned>(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--every") == 0 && i + 1 < argc) {
+            options.recordEvery = static_cast<unsigned>(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             options.model = argv[++i];
         } else if (std::strcmp(argv[i], "--images") == 0 && i + 1 < argc) {
@@ -89,7 +89,7 @@ bool parse(int argc, char** argv, Options& options) {
             options.out = argv[++i];
         } else {
             std::printf("usage: observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] "
-                        "[--record FOLDER [--per-second N]] [--model FOLDER]\n"
+                        "[--record FOLDER [--every S]] [--model FOLDER]\n"
                         "       observex_bench --model FOLDER --images FOLDER --out FILE\n");
             return false;
         }
@@ -98,7 +98,7 @@ bool parse(int argc, char** argv, Options& options) {
         std::printf("--images needs --model and --out\n");
         return false;
     }
-    return options.seconds > 0 && options.recordPerSecond > 0;
+    return options.seconds > 0 && options.recordEvery > 0;
 }
 
 // Presents a 2 x 2 pixel window in the corner of `bounds` once per screen refresh until stopped, the way a
@@ -304,7 +304,7 @@ int main(int argc, char** argv) {
             std::unique_ptr<Recorder> recorder;
             if (options.recordFolder != nullptr) {
                 recorder = std::make_unique<Recorder>(screen, *pipeline.recording(), options.recordFolder, 1);
-                pipeline.setRecordingRate(options.recordPerSecond);
+                pipeline.setRecordingInterval(options.recordEvery);
             }
             std::unique_ptr<Recognizer> recognizer;
             if (options.model != nullptr) {
@@ -392,7 +392,7 @@ int main(int argc, char** argv) {
                 recognizer.reset();
             }
             if (recorder) {
-                pipeline.setRecordingRate(0);
+                pipeline.setRecordingInterval(0);
                 std::this_thread::sleep_for(std::chrono::milliseconds(300)); // Let the last image finish saving.
                 if (recorder->failed()) {
                     std::printf("Recording failed: %s\n", recorder->error().c_str());

@@ -61,9 +61,9 @@ public:
     void setPreviewEnabled(bool enabled) { previewEnabled_.store(enabled, std::memory_order_relaxed); }
     ImageChannel* preview() const { return preview_.get(); }
 
-    // While above zero, that many images per second are also copied for recording (see Recorder).
+    // While above zero, one image every that many seconds is also copied for recording (see Recorder).
     // Only images the screen actually updated are recorded. Zero (off) costs nothing.
-    void setRecordingRate(unsigned perSecond) { recordingRate_.store(perSecond, std::memory_order_relaxed); }
+    void setRecordingInterval(unsigned seconds) { recordingInterval_.store(seconds, std::memory_order_relaxed); }
     ImageChannel* recording() const { return recording_.get(); }
 
     // While on, every new image is also copied for recognition (see Recognizer). Off costs nothing.
@@ -90,7 +90,7 @@ private:
     std::unique_ptr<TripleBuffer<PipelineStats>> stats_;
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
-    std::atomic<unsigned> recordingRate_{0};
+    std::atomic<unsigned> recordingInterval_{0};
     std::atomic<bool> recognitionEnabled_{false};
     std::string error_;
     unsigned width_ = 0;

@@ -18,7 +18,7 @@ class ImageReader;
 // Saves the images handed to it through an ImageChannel as numbered JPEG files (000001.jpg, 000002.jpg, ...)
 // in one folder. It works on its own low-priority thread with its own GPU device, so reading the images back
 // and encoding them never slows the pipeline. The pipeline decides how often it hands over an image
-// (Pipeline::setRecordingRate); images that arrive while one is still being saved replace each other.
+// (Pipeline::setRecordingInterval); images that arrive while one is still being saved replace each other.
 class Recorder {
 public:
     // Starts saving the images of `channel`, which come from `screen`, into `folder` (created if missing),
