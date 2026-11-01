@@ -18,6 +18,7 @@ enum class Icon : std::uint8_t {
     Close,   // A cross.
     Back,    // A chevron pointing left.
     Forward, // A chevron pointing right.
+    Eye,     // An open eye: what is shown over the screen.
 };
 
 // A top-bar button that plainly looks clickable: a rounded border, an icon, then an optional muted caption,

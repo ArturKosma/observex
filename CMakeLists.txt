@@ -19,6 +19,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 option(OBSERVEX_BUILD_TESTS "Build the observex unit tests" ON)
 
 include(cmake/Dependencies.cmake)
+include(cmake/TensorRT.cmake)
 
 # Warning flags for our own targets only (third-party code is left alone).
 add_library(observex_warnings INTERFACE)
@@ -34,24 +35,28 @@ add_library(observex_core STATIC
 target_include_directories(observex_core PUBLIC src)
 target_link_libraries(observex_core PRIVATE observex_warnings)
 
-# Engine: the real-time loop (screen capture on its own thread and GPU device) and the recorder. No UI code.
+# Engine: the real-time loop (screen capture on its own thread and GPU device), the recorder and the recogniser
+# (a trained model on the GPU through TensorRT). No UI code.
 add_library(observex_engine STATIC
+    src/engine/Detector.cpp
     src/engine/Gpu.cpp
     src/engine/ImageChannel.cpp
     src/engine/ImageFile.cpp
     src/engine/Pipeline.cpp
+    src/engine/Recognizer.cpp
     src/engine/Recorder.cpp
     src/engine/ScreenCapture.cpp)
 target_compile_definitions(observex_engine PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(observex_engine
     PUBLIC observex_core d3d11 dxgi
-    PRIVATE windowscodecs observex_warnings)
+    PRIVATE windowscodecs d3dcompiler observex_tensorrt observex_warnings)
 
 # App: the window and the UI. The icon and fonts are built into the exe (see src/app/observex.rc.in).
 set(OBSERVEX_SOURCE_DIR ${CMAKE_SOURCE_DIR})
 configure_file(src/app/observex.rc.in ${CMAKE_BINARY_DIR}/observex.rc @ONLY)
 add_executable(observex
     src/app/App.cpp
+    src/app/Finder.cpp
     src/app/MainWindow.cpp
     src/app/Review.cpp
     src/app/ScreenImage.cpp

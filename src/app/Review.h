@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/Finder.h"
 #include "app/ScreenImage.h"
 #include "app/Theme.h"
 #include "core/Marks.h"
@@ -20,13 +21,14 @@ struct Category {
     const char* id;          // In the review's file names, e.g. "monster" for monster-answers.txt.
     const char* name;        // "Monsters".
     const char* noun;        // One of them, in running text: "monster".
+    const char* nouns;       // Several, in running text: "monsters".
     const char* description; // One line for the category chooser.
     const char* yes;         // The label of a mark answered yes: "Monster".
     const char* no;          // The label of a mark answered no: "Not a monster".
 };
 
 inline constexpr Category kCategories[] = {
-    {"monster", "Monsters", "monster", "Creatures you can fight", "Monster", "Not a monster"},
+    {"monster", "Monsters", "monster", "monsters", "Creatures you can fight", "Monster", "Not a monster"},
 };
 
 // The review screen. Shows a recording's images one at a time with the things marked on them. The user answers
@@ -38,12 +40,15 @@ inline constexpr Category kCategories[] = {
 //   "reviewed": everything in the category on it is marked yes. Unanswered marks count as no when moving on.
 //   Saved on every change to a reviewed image.
 // Answers carry forward: a mark on the next image that overlaps an answered one gets the same answer.
+// If a trained model exists and the recording's guesses are missing or older than it, the Finder writes them in the
+// background while the review is open; they show as soon as it is done.
 class Review {
 public:
     // The image files of a recording (.jpg or .png), in name order. Empty if there are none.
     static std::vector<std::string> listImages(const std::filesystem::path& folder);
 
-    // Opens the recording in `folder` at its first image not reviewed yet. Throws if the folder holds no images.
+    // Opens the recording in `folder` at its first image not reviewed yet, and starts the finder if needed. Throws if
+    // the folder holds no images.
     Review(ID3D11Device* device, std::filesystem::path folder, const Category& category);
 
     Review(const Review&) = delete;
@@ -63,12 +68,19 @@ public:
     // Marks the image as reviewed (unanswered marks become no), saves, and shows the next one.
     void next();
 
+    // Follows the finder, and shows its guesses once it is done. Call on every pass of the main loop, outside an
+    // ImGui frame, also while the window is minimized.
+    void update();
+
     // Draws the image with its marks, the answer box of the selected mark and a status line, into the rest of the
     // current window. Handles the mouse and keys (call before anything else draws the image this frame).
     void draw(const theme::Fonts& fonts);
 
 private:
     void show(std::size_t index);
+    // The marks of the image shown: its answers, its draft, or the finder's guesses with answers carried forward.
+    void loadMarks();
+    void loadGuesses();
     void loadImage();
     // Call after marks_ changed: keeps the change, and saves it if the image is reviewed.
     void changed();
@@ -95,6 +107,8 @@ private:
     std::filesystem::path folder_;
     const Category& category_;
     std::vector<std::string> images_; // File names, in name order.
+    std::unique_ptr<Finder> finder_;  // While it writes this recording's guesses.
+    std::string finderError_;         // Why it could not.
     bool hasGuesses_ = false;         // Whether the finder has looked at this recording.
     ImageMarks guesses_;              // From <id>-guesses.txt.
     ImageMarks answers_;              // Reviewed images; what <id>-answers.txt holds.

@@ -22,7 +22,6 @@ namespace {
 constexpr ImGuiWindowFlags kAnswerBox = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-constexpr ImU32 kHalo = IM_COL32(0, 0, 0, 140); // Behind mark outlines, so they show on snow as well as on rock.
 
 std::string toUtf8(const std::filesystem::path& path) {
     const std::u8string text = path.u8string();
@@ -78,17 +77,42 @@ Review::Review(ID3D11Device* device, std::filesystem::path folder, const Categor
     if (images_.empty()) {
         throw std::runtime_error("This folder holds no recorded images.");
     }
-    const std::filesystem::path guesses = marksFile(folder_, category_, "guesses");
-    std::error_code error;
-    hasGuesses_ = std::filesystem::exists(guesses, error);
-    guesses_ = parseMarks(readTextFile(guesses));
+    loadGuesses();
     answers_ = parseMarks(readTextFile(marksFile(folder_, category_, "answers")));
+    if (answers_.size() < images_.size() && Finder::needed(folder_, category_.id)) {
+        try {
+            finder_ = std::make_unique<Finder>(folder_, category_.id);
+        } catch (const std::exception& e) {
+            finderError_ = e.what();
+        }
+    }
 
     std::size_t start = 0;
     while (start + 1 < images_.size() && answers_.contains(images_[start])) {
         ++start;
     }
     show(start);
+}
+
+void Review::update() {
+    if (!finder_) {
+        return;
+    }
+    switch (finder_->poll()) {
+    case Finder::State::Running:
+        return;
+    case Finder::State::Done:
+        loadGuesses();
+        // The image shown gets the guesses too, unless the user already started on it.
+        if (!reviewed_ && !drafts_.contains(images_[index_]) && !dragging_) {
+            loadMarks();
+        }
+        break;
+    case Finder::State::Failed:
+        finderError_ = finder_->error();
+        break;
+    }
+    finder_.reset();
 }
 
 void Review::previous() {
@@ -118,6 +142,11 @@ void Review::show(std::size_t index) {
     index_ = index;
     dragging_ = false;
     hovered_ = -1;
+    loadMarks();
+    loadImage();
+}
+
+void Review::loadMarks() {
     const std::string& name = images_[index_];
     reviewed_ = answers_.contains(name);
     if (reviewed_) {
@@ -136,7 +165,13 @@ void Review::show(std::size_t index) {
         }
     }
     selected_ = nextUnanswered(-1);
-    loadImage();
+}
+
+void Review::loadGuesses() {
+    const std::filesystem::path file = marksFile(folder_, category_, "guesses");
+    std::error_code error;
+    hasGuesses_ = std::filesystem::exists(file, error);
+    guesses_ = parseMarks(readTextFile(file));
 }
 
 void Review::loadImage() {
@@ -352,10 +387,25 @@ void Review::draw(const theme::Fonts& fonts) {
         drawMarks(drawList, fonts);
         drawList->PopClipRect();
 
-        if (!hasGuesses_ && marks_.empty() && !dragging_) {
-            const char* text = "Nothing is marked: the finder has not looked at this recording yet.";
-            char detail[160];
+        // A note at the top: the finder at work, why it failed, or that nothing is marked.
+        char text[160] = {};
+        char detail[200] = {};
+        if (finder_) {
+            std::snprintf(text, sizeof(text), "Looking for %s with the trained model", category_.nouns);
+            if (finder_->total() > 0) {
+                std::snprintf(detail, sizeof(detail), "Image %d of %d. Its marks show here when it is done.",
+                              finder_->done(), finder_->total());
+            } else {
+                std::snprintf(detail, sizeof(detail), "Starting it (a few seconds).");
+            }
+        } else if (!finderError_.empty()) {
+            std::snprintf(text, sizeof(text), "The trained model could not look at this recording.");
+            std::snprintf(detail, sizeof(detail), "%.190s", finderError_.c_str());
+        } else if (!hasGuesses_ && marks_.empty()) {
+            std::snprintf(text, sizeof(text), "Nothing is marked: the finder has not looked at this recording yet.");
             std::snprintf(detail, sizeof(detail), "Drag a box around each %s it should learn.", category_.noun);
+        }
+        if (text[0] != '\0' && !dragging_) {
             theme::drawLabel(drawList, ImVec2((imageMin_.x + imageMax.x) * 0.5f, imageMin_.y + 12.0f * dpi),
                              ImVec2(0.5f, 0.0f), text, detail);
         }
@@ -366,9 +416,8 @@ void Review::draw(const theme::Fonts& fonts) {
 
 void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
     const float dpi = ImGui::GetStyle().FontScaleDpi;
-    const float tagSize = std::round(ImGui::GetFontSize() * 0.87f);
-    const ImVec2 tagPadding(std::round(5.0f * dpi), std::round(2.0f * dpi));
-    const float imageRight = imageMin_.x + static_cast<float>(image_->width()) * scale_;
+    const ImVec2 imageMax(imageMin_.x + static_cast<float>(image_->width()) * scale_,
+                          imageMin_.y + static_cast<float>(image_->height()) * scale_);
 
     // The selected mark last, so it is on top.
     for (int pass = 0; pass < 2; ++pass) {
@@ -387,8 +436,7 @@ void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
             if (selected) {
                 drawList->AddRectFilled(min, max, (color & 0x00FFFFFFu) | 0x22000000u);
             }
-            drawList->AddRect(min, max, kHalo, 0.0f, 0, thickness + 2.0f * dpi);
-            drawList->AddRect(min, max, color, 0.0f, 0, thickness);
+            theme::drawBox(drawList, min, max, color, thickness);
 
             // A tag above the box says what it is. Marks answered no only get one while pointed at.
             if (mark.answer == Answer::No && !lit) {
@@ -406,21 +454,9 @@ void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
                 std::snprintf(text, sizeof(text), "%s%s", mark.answer == Answer::Yes ? category_.yes : category_.no,
                               mark.carried ? "  \xC2\xB7  copied" : "");
             }
-            const ImVec2 textSize = fonts.medium->CalcTextSizeA(tagSize, FLT_MAX, 0.0f, text);
-            const float tagHeight = textSize.y + tagPadding.y * 2.0f;
-            const float half = thickness * 0.5f;
-            ImVec2 tagMin(min.x - half, min.y - half - tagHeight);
-            if (tagMin.y < imageMin_.y) {
-                tagMin.y = min.y + half; // No room above: inside the box.
-            }
-            const float tagWidth = textSize.x + tagPadding.x * 2.0f;
-            tagMin.x = std::max(std::min(tagMin.x, imageRight - tagWidth), imageMin_.x); // Inside the image.
-            tagMin = ImVec2(std::round(tagMin.x), std::round(tagMin.y));
-            const ImVec2 tagMax(tagMin.x + tagWidth, tagMin.y + tagHeight);
             const bool dim = mark.answer == Answer::No;
-            drawList->AddRectFilled(tagMin, tagMax, dim ? theme::kSurfaceActive : color, 3.0f * dpi);
-            drawList->AddText(fonts.medium, tagSize, ImVec2(tagMin.x + tagPadding.x, tagMin.y + tagPadding.y),
-                              dim ? theme::kText : theme::kBackground, text);
+            theme::drawTag(drawList, fonts.medium, min, thickness, imageMin_, imageMax, text,
+                           dim ? theme::kSurfaceActive : color, dim ? theme::kText : theme::kBackground);
         }
     }
 
@@ -428,8 +464,7 @@ void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
         const Box box = dragBox();
         const ImVec2 min = toScreen(box.x, box.y);
         const ImVec2 max = toScreen(box.x + box.width, box.y + box.height);
-        drawList->AddRect(min, max, kHalo, 0.0f, 0, 4.0f * dpi);
-        drawList->AddRect(min, max, theme::kYes, 0.0f, 0, 2.0f * dpi);
+        theme::drawBox(drawList, min, max, theme::kYes, 2.0f * dpi);
     }
 }
 

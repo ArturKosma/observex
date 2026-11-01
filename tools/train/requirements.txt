@@ -1,0 +1,11 @@
+# The training tool's Python packages, pinned. Install into tools/train/.venv (see tools/train/README.md).
+# PyTorch with CUDA comes from pytorch.org; everything else from PyPI.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.14.1+cu130
+torchvision==0.29.1+cu130
+rfdetr[train,augment]==1.11.2
+# export.py: writing model.onnx for observex's live detection (RF-DETR's exporter and its half-precision cast).
+onnx==1.23.2
+onnx_graphsurgeon==0.6.1
+polygraphy==0.53.6
+onnxconverter-common==1.16.0

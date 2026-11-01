@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <stdexcept>
 
@@ -121,6 +122,30 @@ void drawLabel(ImDrawList* drawList, ImVec2 anchor, ImVec2 pivot, const char* te
     if (detail != nullptr) {
         drawList->AddText(ImVec2(min.x + padding.x, min.y + padding.y + lineHeight + lineGap), kTextMuted, detail);
     }
+}
+
+void drawBox(ImDrawList* drawList, ImVec2 min, ImVec2 max, ImU32 color, float thickness) {
+    const float dpi = ImGui::GetStyle().FontScaleDpi;
+    drawList->AddRect(min, max, kHalo, 0.0f, 0, thickness + 2.0f * dpi);
+    drawList->AddRect(min, max, color, 0.0f, 0, thickness);
+}
+
+void drawTag(ImDrawList* drawList, ImFont* font, ImVec2 boxMin, float thickness, ImVec2 areaMin, ImVec2 areaMax,
+             const char* text, ImU32 fill, ImU32 textColor) {
+    const float dpi = ImGui::GetStyle().FontScaleDpi;
+    const float size = std::round(ImGui::GetFontSize() * 0.87f);
+    const ImVec2 padding(std::round(5.0f * dpi), std::round(2.0f * dpi));
+    const ImVec2 textSize = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+    const ImVec2 tagSize(textSize.x + padding.x * 2.0f, textSize.y + padding.y * 2.0f);
+    const float half = thickness * 0.5f;
+    ImVec2 min(boxMin.x - half, boxMin.y - half - tagSize.y);
+    if (min.y < areaMin.y) {
+        min.y = boxMin.y + half; // No room above: inside the box.
+    }
+    min.x = std::max(std::min(min.x, areaMax.x - tagSize.x), areaMin.x);
+    min = ImVec2(std::round(min.x), std::round(min.y));
+    drawList->AddRectFilled(min, ImVec2(min.x + tagSize.x, min.y + tagSize.y), fill, 3.0f * dpi);
+    drawList->AddText(font, size, ImVec2(min.x + padding.x, min.y + padding.y), textColor, text);
 }
 
 void drawLogo(ImDrawList* drawList, ImVec2 centre, float size) {

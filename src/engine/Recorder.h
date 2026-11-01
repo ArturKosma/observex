@@ -3,6 +3,7 @@
 #include "engine/Gpu.h"
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <stop_token>
@@ -29,8 +30,9 @@ public:
     Recorder(const Recorder&) = delete;
     Recorder& operator=(const Recorder&) = delete;
 
-    // Images saved so far.
+    // Images saved so far, and the bytes their files take on disk.
     unsigned saved() const { return saved_.load(std::memory_order_acquire); }
+    std::uint64_t savedBytes() const { return savedBytes_.load(std::memory_order_acquire); }
 
     // True once saving has stopped because of an error (e.g. the disk is full); error() says why.
     bool failed() const { return failed_.load(std::memory_order_acquire); }
@@ -48,6 +50,7 @@ private:
     unsigned width_ = 0;
     unsigned height_ = 0;
     std::atomic<unsigned> saved_{0};
+    std::atomic<std::uint64_t> savedBytes_{0};
     std::atomic<bool> failed_{false};
     std::string error_;
     std::jthread thread_; // Last, so it stops before the members it uses are destroyed.

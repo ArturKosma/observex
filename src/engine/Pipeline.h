@@ -26,9 +26,9 @@ struct PipelineStats {
     float workMaxMs = 0.0f;
 };
 
-// The real-time loop: capture, then (still to come) recognise and react. It runs on its own time-critical
-// thread with its own GPU device, so nothing the UI does can slow it down. Talks to the UI only through
-// lock-free hand-overs (stats, preview, recording) and atomics.
+// The real-time loop: capture, then hand each image on to recognise (see Recognizer) and, still to come, react. It
+// runs on its own time-critical thread with its own GPU device, so nothing the UI does can slow it down. Talks to the
+// UI only through lock-free hand-overs (stats, preview, recording, recognition) and atomics.
 class Pipeline {
 public:
     enum class State : std::uint8_t {
@@ -66,6 +66,10 @@ public:
     void setRecordingRate(unsigned perSecond) { recordingRate_.store(perSecond, std::memory_order_relaxed); }
     ImageChannel* recording() const { return recording_.get(); }
 
+    // While on, every new image is also copied for recognition (see Recognizer). Off costs nothing.
+    void setRecognitionEnabled(bool enabled) { recognitionEnabled_.store(enabled, std::memory_order_relaxed); }
+    ImageChannel* recognition() const { return recognition_.get(); }
+
     // Newest statistics. The reference stays valid until the next call or start().
     const PipelineStats& stats();
 
@@ -82,10 +86,12 @@ private:
     std::unique_ptr<ScreenCapture> capture_;
     std::unique_ptr<ImageChannel> preview_;
     std::unique_ptr<ImageChannel> recording_;
+    std::unique_ptr<ImageChannel> recognition_;
     std::unique_ptr<TripleBuffer<PipelineStats>> stats_;
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
     std::atomic<unsigned> recordingRate_{0};
+    std::atomic<bool> recognitionEnabled_{false};
     std::string error_;
     unsigned width_ = 0;
     unsigned height_ = 0;

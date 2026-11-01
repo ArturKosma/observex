@@ -19,3 +19,10 @@ imgui.ini
 
 # Python bytecode
 __pycache__/
+
+# Training tool: its Python environment, and the models it trains (with their datasets).
+/tools/train/.venv/
+/models/
+
+# TensorRT and the CUDA runtime, downloaded by cmake/TensorRT.cmake (about 2 GB).
+/deps/

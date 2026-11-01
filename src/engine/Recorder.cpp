@@ -5,8 +5,10 @@
 #include "engine/ScreenCapture.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <system_error>
 #include <utility>
 
 namespace observex {
@@ -66,16 +68,22 @@ void Recorder::run(std::stop_token stop) {
         }
         char name[32];
         std::snprintf(name, sizeof(name), "%06u.jpg", nextNumber_);
+        const std::filesystem::path file = folder_ / name;
         try {
-            writeImageFile(folder_ / name, ImageFormat::Jpeg, mapped.pData, width_, height_, mapped.RowPitch);
+            writeImageFile(file, ImageFormat::Jpeg, mapped.pData, width_, height_, mapped.RowPitch);
         } catch (const std::exception& e) {
             gpu_.context->Unmap(staging_.Get(), 0);
-            fail(std::string("Could not save ") + toUtf8((folder_ / name).c_str()) + ": " + e.what());
+            fail(std::string("Could not save ") + toUtf8(file.c_str()) + ": " + e.what());
             break;
         }
         gpu_.context->Unmap(staging_.Get(), 0);
         ++nextNumber_;
-        saved_.fetch_add(1, std::memory_order_release);
+        std::error_code sizeError;
+        const std::uintmax_t bytes = std::filesystem::file_size(file, sizeError);
+        if (!sizeError) {
+            savedBytes_.fetch_add(bytes, std::memory_order_relaxed);
+        }
+        saved_.fetch_add(1, std::memory_order_release); // Last: publishes the bytes too.
     }
 
     if (com) {

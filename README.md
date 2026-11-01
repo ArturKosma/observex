@@ -9,24 +9,38 @@ knowledge later to play on its own.
 
 Speed comes first: the highest capture rate and the lowest reaction latency possible.
 
-C++20, Direct3D 11, DXGI Desktop Duplication, [Dear ImGui](https://github.com/ocornut/imgui) (docking branch).
+C++20, Direct3D 11, DXGI Desktop Duplication, CUDA and TensorRT, [Dear ImGui](https://github.com/ocornut/imgui)
+(docking branch).
 
 ## Status
 
-Screen capture, recording and reviewing work; learning to recognise (see [the training loop](docs/training-loop.md)) is next.
+Screen capture, recording, reviewing, training and recognising monsters live work; learning while observing (see
+[the training loop](docs/training-loop.md)) is next.
 
 - **Screen button**: shows which screen observex is watching ("Observing Odyssey G61SH") and opens live miniatures
   of every screen, arranged as on your desktop and labelled with each monitor's name. Click one and observex watches
-  it; the window shows that screen live. F3 shows the capture numbers.
+  it; the window shows that screen live. F3 shows the capture and recognition numbers.
+- **Live recognition**: while a screen is observed, the trained monster model runs on every new image on the GPU
+  (about 5 ms each on an RTX 4090, about 210 images a second), on its own thread, so capture never waits for it.
+  **Show** (the eye, next to the screen button) holds flags like Unreal's view flags: **Monsters** draws a box with
+  how sure the model is ("Monster 81%") around each monster it finds. Turning a flag off only hides the boxes;
+  recognition keeps running. The first time observex sees a new model, it prepares it for your GPU (about 35 s,
+  with progress under the flag) and keeps the result for the next starts.
 - **Record**: saves the observed screen as numbered JPEG images, one per second, into a new folder per recording
   (`recordings/` next to observex.exe unless you pick another folder in Settings). Ctrl+Alt+R starts and stops it
   even while a game is in front. A 2560 x 1440 game image is about 0.7 MB, so expect about 2.6 GB per hour.
-  Recording does not slow capture.
+  While recording, the button shows the time, the number of images and how much disk space they take. Recording
+  does not slow capture.
 - **Review**: open a recording, choose what to look for (Monsters for now), and step through its images. Each thing
   observex marked shows as a box with its guess ("Monster? 81%"); answer it with Yes / No (or the Y / N keys), and
   drag a box around anything it missed. Moving on with the Right arrow saves the image's answers, and answers carry
-  over to the same thing on the next image. Answers are saved next to the images, in `monster-answers.txt`. The part that makes the first guesses does not exist yet, so for now you
-  draw the boxes yourself.
+  over to the same thing on the next image. Answers are saved next to the images, in `monster-answers.txt`. Once a
+  model is trained, opening a new recording runs it in the background ("Looking for monsters with the trained
+  model", with progress), and its guesses appear when it is done. Before the first training there are no guesses,
+  so you draw the boxes yourself.
+- **Train**: `tools/train/` (Python, on the GPU) learns from your answers, writes the model live recognition uses,
+  and writes its guesses for the next recording, which the review then shows. See
+  [tools/train/README.md](tools/train/README.md).
 - **Capture**: every new image of the observed screen, kept on the GPU. On a 240 Hz monitor it captures every refresh
   (about 240 images per second) and has the image 0.05 ms after the screen updates, with about 0.1 ms of CPU work
   per image.
@@ -36,7 +50,9 @@ Screen capture, recording and reviewing work; learning to recognise (see [the tr
 ## Build (Windows)
 
 Needs Visual Studio 2022 with the "Desktop development with C++" workload, and CMake 3.25 or newer.
-The first configure downloads Dear ImGui, doctest and the Inter font (pinned versions, checked by SHA256).
+The first configure downloads Dear ImGui, doctest and the Inter font, and, into `deps/`, NVIDIA TensorRT 11.4 and the
+CUDA 13.3 runtime (about 2 GB, once; from NVIDIA's public pip server, GitHub and CUDA download site). All pinned
+versions, checked by SHA256. Live recognition needs an NVIDIA GPU with a recent driver (CUDA 13).
 
 ```bash
 cmake --preset vs2022
@@ -71,7 +87,8 @@ It lists the screens, captures one (`--screen N`, the primary by default) and pr
 updates, latency and work per image once a second. To give capture something to do, it presents an invisible 2 x 2
 pixel window in the screen's corner every refresh, like a game would (`--no-pulse` turns that off). `--no-preview`
 leaves out the copy the UI makes to show the screen. `--record FOLDER` also saves images like the Record button
-(`--per-second N`, default 1 like the app), to measure what recording costs.
+(`--per-second N`, default 1 like the app), to measure what recording costs. `--model models/monster` runs live
+recognition alongside and prints its speed and how many monsters it found.
 
 ## UI snapshots
 
@@ -84,26 +101,30 @@ plays some input, and saves a PNG:
 
 Each step (`--click X Y`, `--drag X1 Y1 X2 Y2` or `--key NAME`, in window pixels and ImGui key names) happens about
 0.6 s after the one before, and `--mouse X Y` is where the mouse rests for the picture. `--review FOLDER` is what the
-Review button opens, since snapshot mode never shows a Windows dialog. The snapshot shows your real screens.
+Review button opens, since snapshot mode never shows a Windows dialog. `--wait SECONDS` waits that much longer
+before the picture (e.g. for the trained model's guesses). The snapshot shows your real screens.
 
 ## Layout
 
 | Path | What it holds |
 | --- | --- |
 | `src/core/` | Platform-free building blocks: lock-free hand-over, statistics, marks and answers. Unit tested. |
-| `src/engine/` | The real-time pipeline: GPU setup, screen capture, image hand-over, the recorder. No UI code. |
+| `src/engine/` | The real-time pipeline: GPU setup, screen capture, image hand-over, the recorder, the recogniser. No UI code. |
 | `src/app/` | The window and UI: main window, theme, buttons, screen picker, screen view, review, settings, UI snapshots. |
 | `bench/` | The headless capture benchmark. |
 | `assets/` | Logo and app icon, made by `tools/make_logo.py`. |
+| `tools/train/` | The training tool (Python): learns from review answers, writes guesses. |
 | `tests/` | doctest unit tests for `src/core`. |
 | `docs/` | Longer plans, such as [the training loop](docs/training-loop.md). |
-| `cmake/Dependencies.cmake` | Third-party libraries and their pinned versions. |
+| `cmake/` | Third-party libraries and their pinned versions (`TensorRT.cmake`: TensorRT and CUDA into `deps/`). |
 
 ## Next steps
 
-- Learn to recognise: record play, review what observex found, train, repeat. First target: monsters in
-  Lineage 2. The plan is in [docs/training-loop.md](docs/training-loop.md).
-- Recognise live: run the trained detector on every captured image on the GPU, reading back only the results.
+- Learn to recognise: record play, review what observex found, train, repeat, until the score is good enough.
+  First target: monsters in Lineage 2. The plan is in [docs/training-loop.md](docs/training-loop.md).
+- Learn while observing: save a question whenever the model is unsure, and let answers update the running model
+  without leaving the app.
+- Track: follow each monster from image to image.
 - React: press keys and click the mouse in response.
 - Knowledge: save what observex learned (what to look for, how to react) and load it on start.
 

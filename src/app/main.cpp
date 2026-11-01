@@ -3,6 +3,7 @@
 #include <shellapi.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <cwchar>
 #include <cwctype>
 #include <optional>
@@ -26,7 +27,7 @@ ImGuiKey keyNamed(const std::wstring& name) {
 }
 
 // observex.exe [--snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --key NAME]... [--mouse X Y]
-//              [--review FOLDER]]
+//              [--review FOLDER] [--wait SECONDS]]
 // The snapshot options draw the UI in a hidden window and save it; see App::Snapshot.
 std::optional<observex::App::Snapshot> readSnapshotOptions() {
     int count = 0;
@@ -54,6 +55,8 @@ std::optional<observex::App::Snapshot> readSnapshotOptions() {
         } else if (snapshot && arg == L"--mouse" && i + 2 < count) {
             snapshot->mouse = point(i + 1);
             i += 2;
+        } else if (snapshot && arg == L"--wait" && i + 1 < count) {
+            snapshot->wait = std::max(0.0f, std::wcstof(args[++i], nullptr));
         }
     }
     LocalFree(args);

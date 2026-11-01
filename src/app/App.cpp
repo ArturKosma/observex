@@ -22,6 +22,7 @@ constexpr ImGuiWindowFlags kFixedWindow = ImGuiWindowFlags_NoDecoration | ImGuiW
                                           ImGuiWindowFlags_NoScrollWithMouse;
 constexpr char kPickerPopup[] = "screens";
 constexpr char kSettingsPopup[] = "settings";
+constexpr char kShowPopup[] = "show";
 constexpr char kCategoryPopup[] = "What are we looking for?";
 constexpr char kChooseText[] = "Choose a screen to observe";
 constexpr char kHotkeyText[] = "Ctrl+Alt+R";
@@ -43,6 +44,21 @@ void formatDuration(char* text, std::size_t size, std::chrono::steady_clock::dur
         std::snprintf(text, size, "%lld:%02lld:%02lld", seconds / 3600, seconds / 60 % 60, seconds % 60);
     } else {
         std::snprintf(text, size, "%02lld:%02lld", seconds / 60, seconds % 60);
+    }
+}
+
+// "840 KB", "7.3 MB", "312 MB" or "2.41 GB", counted in 1024s like File Explorer, so the numbers match it.
+void formatBytes(char* text, std::size_t size, std::uint64_t bytes) {
+    const double kb = static_cast<double>(bytes) / 1024.0;
+    const double mb = kb / 1024.0;
+    if (mb < 1.0) {
+        std::snprintf(text, size, "%.0f KB", kb);
+    } else if (mb < 10.0) {
+        std::snprintf(text, size, "%.1f MB", mb);
+    } else if (mb < 1024.0) {
+        std::snprintf(text, size, "%.0f MB", mb);
+    } else {
+        std::snprintf(text, size, "%.2f GB", mb / 1024.0);
     }
 }
 
@@ -80,6 +96,9 @@ int App::run() {
             review_.reset();
             closeReview_ = false;
         }
+        if (review_) {
+            review_->update(); // The finder's progress, also while minimized.
+        }
         if (chosen_) {
             review_.reset();  // Picking a screen is asking to see it.
             stopRecording();  // A recording is of one screen.
@@ -89,6 +108,8 @@ int App::run() {
         } else if (pipeline_.state() == Pipeline::State::NeedsRestart) {
             observeAgain();
         }
+        // Recognition goes on whatever is shown, minimized too; only a recogniser that stopped needs no images.
+        pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed);
         if (!window_->prepareFrame()) {
             pipeline_.setPreviewEnabled(false); // Minimized: nobody sees it.
             picker_->close();
@@ -192,7 +213,9 @@ void App::observe(const Screen& screen) {
     stopObserving();
     observed_ = screen;
     error_.clear();
-    pipeline_.setPreviewEnabled(true); // Before the loop starts, so its very first image reaches the UI.
+    // Before the loop starts, so its very first image reaches the UI and the recogniser.
+    pipeline_.setPreviewEnabled(true);
+    pipeline_.setRecognitionEnabled(true);
     if (!pipeline_.start(screen)) {
         return; // The view shows pipeline_.error().
     }
@@ -202,13 +225,26 @@ void App::observe(const Screen& screen) {
     } catch (const std::exception& e) {
         stopObserving();
         error_ = std::string("Could not show the screen: ") + e.what();
+        return;
+    }
+
+    // The monster model tools/train made: models/monster in the project folder (next to observex.exe if none).
+    recognizerError_.clear();
+    const std::filesystem::path project = projectFolder();
+    try {
+        recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(),
+                                                   (project.empty() ? appFolder() : project) / L"models" / L"monster");
+    } catch (const std::exception& e) {
+        recognizerError_ = e.what();
     }
 }
 
 void App::stopObserving() {
-    pauseRecording(); // The recorder reads from the pipeline's channel; it goes first.
-    preview_.reset(); // Before the pipeline frees the channel it reads from.
+    pauseRecording();     // The recorder reads from the pipeline's channel; it goes first.
+    recognizer_.reset();  // So does the recogniser.
+    preview_.reset();     // Before the pipeline frees the channel it reads from.
     observedImage_.reset();
+    pipeline_.setRecognitionEnabled(false);
     pipeline_.stop();
 }
 
@@ -280,6 +316,7 @@ void App::pauseRecording() {
     if (recorder_) {
         if (recording_) {
             recording_->saved += recorder_->saved();
+            recording_->savedBytes += recorder_->savedBytes();
         }
         recorder_.reset();
     }
@@ -358,11 +395,13 @@ bool App::playSnapshot() {
         }
         return false;
     }
-    if (frame == 0) {
+    // After the steps: the mouse rests, and the frame is saved after the usual step time plus `wait`.
+    const int rest = snapshotFrame_ - 1 - (steps + 1) * kSnapshotStepFrames;
+    if (rest == 0) {
         const ImVec2 mouse = snapshot_->mouse.value_or(ImVec2(-FLT_MAX, -FLT_MAX));
         io.AddMousePosEvent(mouse.x, mouse.y);
     }
-    return frame == kSnapshotStepFrames - 1;
+    return rest == kSnapshotStepFrames - 1 + static_cast<int>(snapshot_->wait * 1000.0f / 16.0f);
 }
 
 void App::drawFrame() {
@@ -428,12 +467,16 @@ void App::drawTopBar(float height) {
     const ImVec2 settingsCorner(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap);
 
     BarButton recordButton;
-    char detail[64];
+    char detail[96];
     if (recording_) {
         const unsigned saved = recording_->saved + (recorder_ ? recorder_->saved() : 0);
+        const std::uint64_t savedBytes = recording_->savedBytes + (recorder_ ? recorder_->savedBytes() : 0);
         char duration[16];
         formatDuration(duration, sizeof(duration), std::chrono::steady_clock::now() - recording_->started);
-        std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u %s", duration, saved, saved == 1 ? "image" : "images");
+        char bytes[16];
+        formatBytes(bytes, sizeof(bytes), savedBytes);
+        std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u %s  \xC2\xB7  %s", duration, saved,
+                      saved == 1 ? "image" : "images", bytes);
         recordButton.icon = Icon::Stop;
         recordButton.text = "Stop";
         recordButton.detail = detail;
@@ -502,8 +545,28 @@ void App::drawTopBar(float height) {
     if (screenButton.draw("##screen", fonts_)) {
         ImGui::OpenPopup(kPickerPopup);
     }
+    const ImVec2 screenMin = ImGui::GetItemRectMin();
+    const ImVec2 screenMax = ImGui::GetItemRectMax();
 
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + popupGap));
+    // Right of it, while the screen shows: Show, the flags for what is drawn over it (like view flags in Unreal).
+    if (observed_ && !review_) {
+        BarButton showButton;
+        showButton.icon = Icon::Eye;
+        showButton.text = "Show";
+        showButton.arrow = true;
+        showButton.open = ImGui::IsPopupOpen(kShowPopup);
+        ImGui::SetCursorScreenPos(ImVec2(screenMax.x + std::round(8.0f * dpiScale_), buttonY));
+        if (showButton.draw("##show", fonts_)) {
+            ImGui::OpenPopup(kShowPopup);
+        }
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + popupGap));
+        if (ImGui::BeginPopup(kShowPopup)) {
+            drawShowFlags();
+            ImGui::EndPopup();
+        }
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(screenMin.x, screenMax.y + popupGap));
     if (ImGui::BeginPopup(kPickerPopup)) {
         ImGui::TextDisabled(kChooseText);
         ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
@@ -559,6 +622,44 @@ void App::drawSettings() {
     ImGui::TextDisabled(hotkeyRegistered_ || snapshot_
                             ? "Ctrl+Alt+R starts and stops recording, even while a game is in front."
                             : "Ctrl+Alt+R is taken by another app, so only the Record button works.");
+}
+
+void App::drawShowFlags() {
+    // Each flag only says what is drawn: hiding monsters does not stop looking for them.
+    ImGui::TextDisabled("Draw over the screen");
+    ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
+    if (ImGui::Checkbox("Monsters", &settings_.showMonsters)) {
+        saveSettings();
+    }
+
+    // Under it, how looking for them goes.
+    char text[256];
+    if (!recognizer_) {
+        std::snprintf(text, sizeof(text), "%s",
+                      recognizerError_.empty() ? "Not looking: the screen is not captured."
+                                               : recognizerError_.c_str());
+    } else if (recognizer_->state() == Recognizer::State::Starting) {
+        const float preparing = recognizer_->preparing();
+        if (preparing > 0.0f) {
+            std::snprintf(text, sizeof(text), "Preparing the model for this GPU: %.0f%% (once per new model)",
+                          static_cast<double>(preparing * 100.0f));
+        } else {
+            std::snprintf(text, sizeof(text), "Loading the model\xE2\x80\xA6");
+        }
+    } else if (recognizer_->state() == Recognizer::State::Failed) {
+        std::snprintf(text, sizeof(text), "%s", recognizer_->error().c_str());
+    } else {
+        const RecognizerStats& stats = recognizer_->stats();
+        const int found = recognizer_->found().count;
+        std::snprintf(text, sizeof(text), "%d found  \xC2\xB7  %.0f images a second  \xC2\xB7  %.1f ms each", found,
+                      static_cast<double>(stats.imagesPerSecond), static_cast<double>(stats.workAvgMs));
+    }
+    const float indent = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x; // Under "Monsters".
+    ImGui::Indent(indent);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
+    ImGui::TextDisabled("%s", text);
+    ImGui::PopTextWrapPos();
+    ImGui::Unindent(indent);
 }
 
 void App::drawReviewSteps(float height) {
@@ -714,6 +815,9 @@ void App::drawObservedScreen() {
     observedImage_->draw(drawList, min, max, rounding, theme::kBackground);
     drawList->PathRect(ImVec2(min.x - 0.5f, min.y - 0.5f), ImVec2(max.x + 0.5f, max.y + 0.5f), rounding + 0.5f);
     drawList->PathStroke(theme::kBorder, ImDrawFlags_Closed, 1.0f);
+    if (settings_.showMonsters && recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+        drawFound(drawList, min, max);
+    }
 
     const float inset = 12.0f * dpiScale_;
     if (pipeline_.state() == Pipeline::State::Reconnecting) {
@@ -727,8 +831,36 @@ void App::drawObservedScreen() {
                       "%.0f images/s  \xC2\xB7  %.2f ms latency  \xC2\xB7  %.2f ms work  \xC2\xB7  UI %.0f fps",
                       static_cast<double>(stats.imagesPerSecond), static_cast<double>(stats.latencyAvgMs),
                       static_cast<double>(stats.workAvgMs), static_cast<double>(ImGui::GetIO().Framerate));
-        theme::drawLabel(drawList, ImVec2(min.x + inset, max.y - inset), ImVec2(0.0f, 1.0f), text);
+        char detail[128] = {};
+        if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+            const RecognizerStats& found = recognizer_->stats();
+            std::snprintf(detail, sizeof(detail),
+                          "Monsters: %.0f images/s  \xC2\xB7  %.2f ms each  \xC2\xB7  %.2f ms slowest",
+                          static_cast<double>(found.imagesPerSecond), static_cast<double>(found.workAvgMs),
+                          static_cast<double>(found.workMaxMs));
+        }
+        theme::drawLabel(drawList, ImVec2(min.x + inset, max.y - inset), ImVec2(0.0f, 1.0f), text,
+                         detail[0] != '\0' ? detail : nullptr);
     }
+}
+
+void App::drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
+    const Found& found = recognizer_->found();
+    const float scale = (max.x - min.x) / static_cast<float>(pipeline_.width());
+    const float thickness = 1.5f * dpiScale_;
+    drawList->PushClipRect(min, max, true);
+    for (int i = found.count - 1; i >= 0; --i) { // Surest last, so it is on top.
+        const Detection& thing = found.things[static_cast<std::size_t>(i)];
+        const ImVec2 boxMin(std::round(min.x + thing.x * scale), std::round(min.y + thing.y * scale));
+        const ImVec2 boxMax(std::round(min.x + (thing.x + thing.width) * scale),
+                            std::round(min.y + (thing.y + thing.height) * scale));
+        theme::drawBox(drawList, boxMin, boxMax, theme::kAccent, thickness);
+        char tag[32];
+        std::snprintf(tag, sizeof(tag), "Monster %.0f%%", static_cast<double>(thing.sure * 100.0f));
+        theme::drawTag(drawList, fonts_.medium, boxMin, thickness, min, max, tag, theme::kAccent,
+                       theme::kBackground);
+    }
+    drawList->PopClipRect();
 }
 
 } // namespace observex

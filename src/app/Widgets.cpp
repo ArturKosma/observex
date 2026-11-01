@@ -112,6 +112,24 @@ void drawIcon(ImDrawList* drawList, Icon icon, ImVec2 centre, ImU32 color, const
         drawList->PathStroke(color, 0, l.stroke);
         break;
     }
+    case Icon::Eye: {
+        // Two lids from corner to corner, drawn as one outline, and a pupil.
+        constexpr int kSteps = 12;
+        constexpr float kPi = 3.14159265f;
+        const float half = l.iconWidth * 0.5f;
+        const float open = 5.5f * dpi;
+        for (int i = 0; i < kSteps; ++i) { // Upper lid, left to right.
+            const float t = static_cast<float>(i) / kSteps;
+            drawList->PathLineTo(ImVec2(centre.x - half + 2.0f * half * t, centre.y - open * std::sin(t * kPi)));
+        }
+        for (int i = 0; i < kSteps; ++i) { // Lower lid, right to left.
+            const float t = static_cast<float>(i) / kSteps;
+            drawList->PathLineTo(ImVec2(centre.x + half - 2.0f * half * t, centre.y + open * std::sin(t * kPi)));
+        }
+        drawList->PathStroke(color, ImDrawFlags_Closed, l.stroke);
+        drawList->AddCircleFilled(centre, 2.6f * dpi, color);
+        break;
+    }
     case Icon::None:
         break;
     }

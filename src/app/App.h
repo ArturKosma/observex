@@ -9,9 +9,11 @@
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
 #include "engine/Pipeline.h"
+#include "engine/Recognizer.h"
 #include "engine/Recorder.h"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -25,14 +27,16 @@ namespace observex {
 // the pipeline runs on its own.
 //
 // The UI is a top bar and, below it, the screen being observed or a recording being reviewed. The bar holds the
-// screen button (live miniatures of all screens; picking one starts the pipeline on it), the Review button,
-// the Record button and Settings. While reviewing, its middle steps through the images.
+// screen button (live miniatures of all screens; picking one starts the pipeline on it), Show (what is drawn over
+// the observed screen, e.g. the monsters the recogniser finds on it), the Review button, the Record button and
+// Settings. While reviewing, its middle steps through the images.
 class App {
 public:
     // Snapshot mode, for checking the UI without showing it: the window stays hidden, the input `steps` play in
-    // order (about 0.6 s apart), the mouse rests at `mouse`, and the frame is saved as a PNG at `path`. Then the
-    // app quits. Settings are not read or saved, recordings go to a "recordings" folder next to the PNG, and no
-    // Windows dialog is shown: the Review button opens `reviewFolder`.
+    // order (about 0.6 s apart), the mouse rests at `mouse`, and after `wait` more seconds (at least; e.g. for the
+    // finder) the frame is saved as a PNG at `path`. Then the app quits. Settings are not read or saved, recordings
+    // go to a "recordings" folder next to the PNG, and no Windows dialog is shown: the Review button opens
+    // `reviewFolder`.
     struct Snapshot {
         // A click (from == to), a drag (from somewhere to somewhere else), or a key press. Window pixels.
         struct Step {
@@ -44,6 +48,7 @@ public:
         std::vector<Step> steps;
         std::optional<ImVec2> mouse;
         std::filesystem::path reviewFolder;
+        float wait = 0.0f;
     };
 
     explicit App(std::optional<Snapshot> snapshot = std::nullopt) : snapshot_(std::move(snapshot)) {}
@@ -59,7 +64,7 @@ private:
     void init();
     void shutdown();
 
-    // Starts the pipeline on `screen` and shows what it captures.
+    // Starts the pipeline on `screen`, shows what it captures and starts looking for monsters on it.
     void observe(const Screen& screen);
     void stopObserving();
     // After a display mode change: observes the same screen again if it is still connected.
@@ -87,16 +92,20 @@ private:
     void drawFrame();
     void drawTopBar(float height);
     void drawSettings();
+    void drawShowFlags();
     void drawReviewSteps(float height);
     void drawCategoryChooser();
     void drawChooseScreen();
     void drawObservedScreen();
+    // The monsters found on the observed screen, over its image at `min` to `max`.
+    void drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max);
 
     // One recording, from Record to Stop.
     struct Recording {
         std::filesystem::path folder; // Named by the date and time it started.
         std::chrono::steady_clock::time_point started;
-        unsigned saved = 0; // Images saved by earlier Recorders, before a pipeline restart.
+        unsigned saved = 0;           // Images saved by earlier Recorders, before a pipeline restart,
+        std::uint64_t savedBytes = 0; // and the bytes their files take.
     };
 
     float dpiScale_ = 1.0f;
@@ -111,6 +120,8 @@ private:
     std::optional<Screen> observed_; // The screen being observed, if any.
     std::optional<Screen> chosen_;   // Picked this frame; observed from the start of the next one.
     std::string error_;              // Why the observed screen cannot be shown.
+    std::unique_ptr<Recognizer> recognizer_; // Looks for monsters on the observed screen, shown or not.
+    std::string recognizerError_;            // Why it could not start.
     Settings settings_;
     std::filesystem::path settingsFile_; // Empty in snapshot mode: settings are not saved.
     std::optional<Recording> recording_; // While recording.

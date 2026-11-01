@@ -17,6 +17,7 @@ class ImageChannel {
 public:
     // Creates the shared textures on the pipeline's device. Throws on failure.
     ImageChannel(ID3D11Device* device, unsigned width, unsigned height, DXGI_FORMAT format);
+    ~ImageChannel();
 
     ImageChannel(const ImageChannel&) = delete;
     ImageChannel& operator=(const ImageChannel&) = delete;
@@ -43,6 +44,7 @@ private:
 
     std::array<Slot, 3> slots_;
     TripleBuffer<std::uint64_t> handover_; // Slot index = texture index; the value is the image number.
+    HANDLE writtenEvent_ = nullptr;       // Set after each write, for ImageReader::waitForImage.
     std::uint64_t written_ = 0;
     UINT64 writeKey_ = kWriterKey; // Key the current write texture was last released with.
     unsigned width_;
@@ -62,6 +64,10 @@ public:
     // If a new image arrived, copies it into mip 0 of `target` (same size and format, on the reader's
     // device) and returns true. Never waits.
     bool copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* target);
+
+    // Waits up to `timeoutMs` for the pipeline to write an image. Returns true if one may have arrived since the
+    // last wait (call copyNewImage to take it). For a reader that wants every image the moment it comes.
+    bool waitForImage(unsigned timeoutMs) const;
 
     unsigned width() const { return channel_.width(); }
     unsigned height() const { return channel_.height(); }

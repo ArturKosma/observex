@@ -22,6 +22,14 @@ ImageChannel::ImageChannel(ID3D11Device* device, unsigned width, unsigned height
         check(slot.texture.As(&resource), "IDXGIResource (image channel)");
         check(resource->GetSharedHandle(&slot.sharedHandle), "GetSharedHandle (image channel)");
     }
+    writtenEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr); // Auto-reset: each wait takes one signal.
+    if (writtenEvent_ == nullptr) {
+        check(HRESULT_FROM_WIN32(GetLastError()), "CreateEvent (image channel)");
+    }
+}
+
+ImageChannel::~ImageChannel() {
+    CloseHandle(writtenEvent_);
 }
 
 void ImageChannel::write(ID3D11DeviceContext* context, ID3D11Texture2D* image) {
@@ -37,6 +45,7 @@ void ImageChannel::write(ID3D11DeviceContext* context, ID3D11Texture2D* image) {
     handover_.writeSlot() = ++written_;
     // A texture handed back unread is still released with kReaderKey; one the reader returned has kWriterKey.
     writeKey_ = handover_.publish() ? kReaderKey : kWriterKey;
+    SetEvent(writtenEvent_); // Never waits.
 }
 
 ImageReader::ImageReader(ID3D11Device* device, ImageChannel& channel) : channel_(channel) {
@@ -62,6 +71,10 @@ bool ImageReader::copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* ta
     context->CopySubresourceRegion(target, 0, 0, 0, 0, slot.texture.Get(), 0, nullptr);
     slot.mutex->ReleaseSync(ImageChannel::kWriterKey);
     return true;
+}
+
+bool ImageReader::waitForImage(unsigned timeoutMs) const {
+    return WaitForSingleObject(channel_.writtenEvent_, timeoutMs) == WAIT_OBJECT_0;
 }
 
 } // namespace observex

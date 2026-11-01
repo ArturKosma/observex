@@ -44,6 +44,8 @@ Settings Settings::load(const std::filesystem::path& file) {
         const std::string_view value(line.data() + equals + 1, line.size() - equals - 1);
         if (key == "recordings" && !value.empty()) {
             settings.recordingsFolder = fromUtf8(value);
+        } else if (key == "show-monsters") {
+            settings.showMonsters = value != "0";
         }
     }
     return settings;
@@ -52,6 +54,7 @@ Settings Settings::load(const std::filesystem::path& file) {
 bool Settings::save(const std::filesystem::path& file) const {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     out << "recordings=" << toUtf8(recordingsFolder) << "\r\n";
+    out << "show-monsters=" << (showMonsters ? 1 : 0) << "\r\n";
     return static_cast<bool>(out);
 }
 
@@ -66,6 +69,19 @@ std::filesystem::path appFolder() {
         path.resize(path.size() * 2); // Longer than MAX_PATH.
     }
     return std::filesystem::path(path).parent_path();
+}
+
+std::filesystem::path projectFolder() {
+    std::error_code error;
+    for (std::filesystem::path folder = appFolder(); !folder.empty(); folder = folder.parent_path()) {
+        if (std::filesystem::exists(folder / L"tools" / L"train" / L"guess.py", error)) {
+            return folder;
+        }
+        if (folder == folder.parent_path()) {
+            break;
+        }
+    }
+    return {};
 }
 
 std::filesystem::path defaultRecordingsFolder() {

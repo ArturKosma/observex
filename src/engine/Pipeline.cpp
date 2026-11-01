@@ -36,6 +36,8 @@ bool Pipeline::start(const Screen& screen) {
                                                   ScreenCapture::kImageFormat);
         recording_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                     ScreenCapture::kImageFormat);
+        recognition_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                                      ScreenCapture::kImageFormat);
     } catch (const std::exception& e) {
         stop();
         fail(std::string("Could not start screen capture: ") + e.what());
@@ -60,6 +62,7 @@ void Pipeline::stop() {
     }
     preview_.reset();
     recording_.reset();
+    recognition_.reset();
     capture_.reset();
     gpu_ = {};
     state_.store(State::Stopped, std::memory_order_release);
@@ -100,8 +103,11 @@ void Pipeline::run(std::stop_token stop) {
             merged += frame.updates > 1 ? frame.updates - 1 : 0;
             latency.add(static_cast<float>(static_cast<double>(now - frame.presentQpc) * msPerTick));
 
-            // Recognise and react will run here, on the image while it is still on the GPU.
-
+            // Recognition first: the newest image goes to the recogniser the moment it arrives (it takes it on its
+            // own thread and device). React will run here too.
+            if (recognitionEnabled_.load(std::memory_order_relaxed)) {
+                recognition_->write(gpu_.context.Get(), frame.texture);
+            }
             if (previewEnabled_.load(std::memory_order_relaxed)) {
                 preview_->write(gpu_.context.Get(), frame.texture);
             }
