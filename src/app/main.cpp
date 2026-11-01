@@ -27,7 +27,7 @@ ImGuiKey keyNamed(const std::wstring& name) {
 }
 
 // observex.exe [--snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --key NAME]... [--mouse X Y]
-//              [--review FOLDER] [--wait SECONDS]]
+//              [--recordings FOLDER] [--wait SECONDS]]
 // The snapshot options draw the UI in a hidden window and save it; see App::Snapshot.
 std::optional<observex::App::Snapshot> readSnapshotOptions() {
     int count = 0;
@@ -50,8 +50,8 @@ std::optional<observex::App::Snapshot> readSnapshotOptions() {
             i += 4;
         } else if (snapshot && arg == L"--key" && i + 1 < count) {
             snapshot->steps.push_back({ImVec2(), ImVec2(), keyNamed(args[++i])});
-        } else if (snapshot && arg == L"--review" && i + 1 < count) {
-            snapshot->reviewFolder = args[++i];
+        } else if (snapshot && arg == L"--recordings" && i + 1 < count) {
+            snapshot->recordingsFolder = args[++i];
         } else if (snapshot && arg == L"--mouse" && i + 2 < count) {
             snapshot->mouse = point(i + 1);
             i += 2;

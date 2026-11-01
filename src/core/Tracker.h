@@ -21,15 +21,22 @@ struct Tracked : Detection {
 // 99.6% of what the model saw; a new thing shows at most about 20 ms later (at 100 looks a second).
 //
 // - A new thing counts once it is found on kConfirmLooks looks in a row; one- and two-look flickers never show.
+// - It starts being followed only from a look where it is at least kStartSure sure; once followed, any box found
+//   for it counts (the recogniser hands over 30% and up). So something the model keeps half-believing (a carved
+//   ornament next to a Nightmare Weaver at 30-45%, 2026-11-01) never shows, while a real thing that dips stays.
 // - A thing that is not found is held where its speed takes it, for as long as it was seen, up to kHoldMs; so a
 //   one-look dip in a crowd does not blink, and a short false alarm is not stretched.
 // - Each look's things are matched to the followed ones by where those are heading, nearest first, so a fast
 //   camera turn (100 pixels between looks) keeps them. A box that lies inside a followed one is the same thing
-//   too, so a close monster cut by the screen edge keeps its identity.
+//   too, so a close character cut by the screen edge keeps its identity.
 // About 0.2 microseconds per look. Use it from one thread.
 class Tracker {
 public:
     static constexpr int kConfirmLooks = 3;
+    // Measured on five live logs (2026-11-01): the ornament shown 0.2 s instead of 5.6 s in 34 s, boxes appearing
+    // or vanishing 6.0 -> 3.0 a second on that log and fewer on the others, real things still covered as before;
+    // a thing first seen at 30-50% shows a little later (at most 54 ms instead of 21 on the fight log).
+    static constexpr float kStartSure = 0.5f;
     static constexpr double kHoldMs = 150.0;
     static constexpr double kSmoothSureMs = 60.0; // How quickly `sure` follows the model's.
     // A thing found farther than kMaxDistance from where a followed one is heading (in the larger side of the two
@@ -59,6 +66,7 @@ private:
         float distance;
         int track;
         int found;
+        bool weak; // The found box is less than kStartSure sure: paired after the sure ones.
     };
 
     std::vector<Track> tracks_;

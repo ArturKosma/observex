@@ -1,6 +1,6 @@
 # Training tool
 
-Teaches observex to find one category of things (for now: monsters) from the answers given in observex's review
+Teaches observex to find one category of things (for now: characters) from the answers given in observex's review
 screen, and writes the trained model's guesses back for the next review. Python, on the GPU. Step 4 of
 [the training loop](../../docs/training-loop.md).
 
@@ -27,9 +27,9 @@ tools/train/.venv/Scripts/python tools/train/train.py
 tools/train/.venv/Scripts/python tools/train/guess.py recordings/2026-11-01_12-00-00
 ```
 
-`train.py` trains on every recording that has `monster-answers.txt` (reviewed images only), keeps the last fifth of
-each recording aside, and prints the score on it: how many of those monsters it finds and how many false alarms it
-raises. The model goes to `models/monster/` next to observex.exe (`model.pth`, plus `model.json` with its settings,
+`train.py` trains on every recording that has `character-answers.txt` (reviewed images only), keeps the last fifth of
+each recording aside, and prints the score on it: how many of those characters it finds and how many false alarms it
+raises. The model goes to `models/character/` next to observex.exe (`model.pth`, plus `model.json` with its settings,
 numbers and score); its working files (`dataset/`, `training/`) stay there too and are rebuilt on each run.
 It prints the score at three cutoffs (marks at least 30%, 40% and 50% sure): a lower cutoff finds more and raises
 more false alarms. On the RTX 4090, 400 reviewed images take about 16 s per pass, so the default 40 passes
@@ -37,7 +37,7 @@ take about 12 minutes, using about 13 GB of GPU memory. Run it in the background
 trainings at once: they do not fit in 24 GB together, Windows then moves GPU memory into normal RAM, and both crawl
 or hang.
 
-The answers it learns from should follow one rule (body only, every visible monster, no box for a hidden one); see
+The answers it learns from should follow one rule (body only, every visible character: monsters, other players and NPCs, never your own; no box for a hidden one); see
 [the training loop](../../docs/training-loop.md), step 2.
 
 It starts from RF-DETR pretrained on everyday photos, replaces its list of 80 kinds of things with the one category,
@@ -53,16 +53,16 @@ detection and its review read (half-precision weights). observex prepares it for
 tools/train/.venv/Scripts/python tools/train/export.py
 ```
 
-`guess.py` runs the model over a recording and writes `monster-guesses.txt` into it, in half precision (about 24 ms
+`guess.py` runs the model over a recording and writes `character-guesses.txt` into it, in half precision (about 24 ms
 per image on the 4090 instead of 43, the same guesses, after about 2.5 s of setup). observex no longer needs it:
 its review runs `model.onnx` itself when you open a recording whose guesses are missing or older than the model
 (the same guesses, without starting Python). `guess.py` stays as the Python reference, to check observex against.
 
-Options: `--category` (default `monster`), and for `train.py` `--model nano|small|medium|large` (default `medium`),
-`--resolution` (default 1024: the image is squeezed to that many pixels square while training, so far-away monsters
+Options: `--category` (default `character`), and for `train.py` `--model nano|small|medium|large` (default `medium`),
+`--resolution` (default 1024: the image is squeezed to that many pixels square while training, so far-away characters
 stay a few pixels big; observex runs the model at 768, `LIVE_RESOLUTION` in train.py, a third faster with nearly the
 same answers: trained at 1024 and run at 768 beat trained at 768, 2026-11-01), `--epochs` (passes over the images, default 40), `--augment flip|color` (random changes to each
-training image, default `color`: mirror, plus small shifts of brightness, contrast, saturation and hue, so a monster
+training image, default `color`: mirror, plus small shifts of brightness, contrast, saturation and hue, so a character
 in a dark cave or in fog still looks like itself), `--held-out` (default 0.2) and `--batch` (images through the GPU
 at once, default 4; each learning step uses 16 either way). `guess.py --threshold` (default 0.3) leaves out guesses
 less sure than that.

@@ -35,7 +35,7 @@ struct RecognizerStats {
     float workMaxMs = 0.0f;
 };
 
-// Finds one category of things (e.g. monsters) on the observed screen with a trained model (see Detector), on every
+// Finds one category of things (e.g. characters) on the observed screen with a trained model (see Detector), on every
 // new image, as fast as the GPU allows, and follows them from image to image (see Tracker), so each keeps a steady
 // box and an identity. It works on its own thread with its own GPU device, so it never holds up capture: the
 // pipeline hands it the newest image through an ImageChannel the moment it arrives, and images that arrive while it

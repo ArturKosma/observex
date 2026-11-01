@@ -15,30 +15,33 @@
 
 namespace observex {
 
-// What a review looks for. Only monsters for now; party members, terrain, UI and more come later, each as one
-// more entry in kCategories.
+// What a review looks for. Only characters for now (any kind: telling monsters, players and NPCs apart comes later);
+// terrain, UI and more come later too, each as one more entry in kCategories.
 struct Category {
-    const char* id;          // In the review's file names, e.g. "monster" for monster-answers.txt.
-    const char* name;        // "Monsters".
-    const char* noun;        // One of them, in running text: "monster".
-    const char* nouns;       // Several, in running text: "monsters".
+    const char* id;          // In the review's file names, e.g. "character" for character-answers.txt.
+    const char* name;        // "Characters".
+    const char* noun;        // One of them, in running text: "character".
+    const char* nouns;       // Several, in running text: "characters".
     const char* description; // One line for the category chooser.
-    const char* yes;         // The label of a mark answered yes: "Monster".
-    const char* no;          // The label of a mark answered no: "Not a monster".
+    const char* yes;         // The label of a mark answered yes: "Character".
+    const char* no;          // The label of a mark answered no: "Not a character".
 };
 
 inline constexpr Category kCategories[] = {
-    {"monster", "Monsters", "monster", "monsters", "Creatures you can fight", "Monster", "Not a monster"},
+    {"character", "Characters", "character", "characters", "Monsters, NPCs and other players, not you", "Character",
+     "Not a character"},
 };
 
 // The review screen. Shows a recording's images one at a time with the things marked on them. The user answers
-// for each mark whether it belongs to the category (e.g. is a monster), and drags a box around anything it missed.
+// for each mark whether it belongs to the category (e.g. is a character), and drags a box around anything it missed.
 //
 // It reads and writes two files in the recording's folder, in the format of core/Marks.h (<id> is the category's):
 // - <id>-guesses.txt: the marks the finder made, with how sure it was. Read only.
-// - <id>-answers.txt: the user's answers. An image is in it once the user moved on from it with Next; it is then
-//   "reviewed": everything in the category on it is marked yes. Unanswered marks count as no when moving on.
-//   Saved on every change to a reviewed image.
+// - <id>-answers.txt: the user's answers. An image is in it once the user moved on from it with Next, which needs
+//   every mark on it answered (the user asked, 2026-11-01); it is then "reviewed": everything in the category on it
+//   is marked yes. Saved on every change to a reviewed image.
+// A click on a mark picks it; a drag draws a new mark wherever it starts, also over a bigger mark (a character behind
+// the user's own one, the user asked, 2026-11-01).
 // Answers carry forward: a mark on the next image that overlaps an answered one gets the same answer. Guesses the
 // finder is sure of (65% or more) then start as yes, so the user only answers the unsure ones and flips wrong ones.
 // If a trained model exists (models/<id>/model.onnx) and the recording's guesses are missing or older than it, the
@@ -47,6 +50,8 @@ class Review {
 public:
     // The image files of a recording (.jpg or .png), in name order. Empty if there are none.
     static std::vector<std::string> listImages(const std::filesystem::path& folder);
+    // How many of a recording's images are reviewed for `category`.
+    static std::size_t countReviewed(const std::filesystem::path& folder, const Category& category);
 
     // Opens the recording in `folder` at its first image not reviewed yet, and starts the finder if needed. Throws if
     // the folder holds no images.
@@ -63,10 +68,13 @@ public:
     std::size_t imageCount() const { return images_.size(); }
     std::size_t reviewedCount() const { return answers_.size(); }
 
+    // Marks on the image shown that are not answered yet. Moving on needs none.
+    int unansweredCount() const;
     bool canGoBack() const { return index_ > 0; }
-    bool canGoOn() const { return index_ + 1 < images_.size() || !reviewed_; }
+    bool canGoOn() const { return (index_ + 1 < images_.size() || !reviewed_) && unansweredCount() == 0; }
     void previous();
-    // Marks the image as reviewed (unanswered marks become no), saves, and shows the next one.
+    // Marks the image as reviewed, saves, and shows the next one. With marks still unanswered it picks the first of
+    // them instead.
     void next();
 
     // Follows the finder, and shows its guesses once it is done. Call on every pass of the main loop, outside an
@@ -103,6 +111,8 @@ private:
     ImVec2 toScreen(int x, int y) const;
     ImVec2 toImage(ImVec2 screen) const; // Clamped to the image.
     Box dragBox() const;
+    // Whether the mouse moved far enough while down to draw a mark, not just click.
+    bool drawing() const;
 
     ID3D11Device* device_;
     std::filesystem::path folder_;
@@ -124,7 +134,8 @@ private:
 
     int selected_ = -1; // The mark whose answer box is open.
     int hovered_ = -1;
-    bool dragging_ = false; // Drawing a new mark.
+    bool dragging_ = false; // The mouse is down on the image: a click (picks a mark) or a drag (draws one).
+    int pressedMark_ = -1;  // The mark under the mouse when it went down.
     ImVec2 dragStart_;      // In image pixels.
     ImVec2 imageMin_;       // Where the image is drawn on screen, and its size there relative to its pixels.
     float scale_ = 1.0f;

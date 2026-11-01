@@ -33,6 +33,18 @@ TEST_CASE("a new thing shows once it is found on three looks in a row") {
     CHECK_FALSE(shown[0].held);
 }
 
+TEST_CASE("a new thing starts only from a sure look, then is kept while less sure") {
+    Tracker tracker;
+    for (int i = 0; i < 5; ++i) { // Half-believed: never starts.
+        CHECK(look(tracker, i * kLookMs, {box(100, 100, 0.4f)}).empty());
+    }
+    CHECK(look(tracker, 5 * kLookMs, {box(100, 100, 0.6f)}).empty()); // Sure enough: starts.
+    CHECK(look(tracker, 6 * kLookMs, {box(100, 100, 0.4f)}).empty());
+    const std::vector<Tracked> shown = look(tracker, 7 * kLookMs, {box(100, 100, 0.4f)});
+    REQUIRE(shown.size() == 1); // Three looks in a row, the first of them sure.
+    CHECK(shown[0].sure < 0.6f);
+}
+
 TEST_CASE("one- and two-look flickers never show") {
     Tracker tracker;
     CHECK(look(tracker, 0 * kLookMs, {box(100, 100)}).empty());
@@ -181,7 +193,7 @@ TEST_CASE("with more things than fit, the surest are handed out") {
     Tracker tracker;
     std::vector<Detection> many;
     for (int i = 0; i < 20; ++i) {
-        many.push_back(box(100.0f * static_cast<float>(i), 100, 0.3f + 0.03f * static_cast<float>(i)));
+        many.push_back(box(100.0f * static_cast<float>(i), 100, 0.5f + 0.02f * static_cast<float>(i)));
     }
     std::vector<Tracked> shown;
     for (int i = 0; i < 3; ++i) {

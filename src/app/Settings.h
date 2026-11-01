@@ -10,8 +10,8 @@ namespace observex {
 // What the user can set, kept in observex.cfg next to observex.exe.
 struct Settings {
     std::filesystem::path recordingsFolder; // Each recording gets its own folder inside it.
-    bool showMonsters = true;               // Show flag: draw the monsters found on the observed screen.
-    bool liveLog = true; // Recordings also log what live recognition sees (monster-live.txt) and take marks.
+    bool showCharacters = true;             // Show flag: draw the characters found on the observed screen.
+    bool liveLog = true; // Recordings also log what live recognition sees (character-live.txt) and take marks.
 
     // Reads `file` (one "key=value" per line, UTF-8). A missing file or key keeps the default.
     static Settings load(const std::filesystem::path& file);
@@ -27,7 +27,7 @@ std::filesystem::path appFolder();
 // models are in its models/ folder.
 std::filesystem::path projectFolder();
 
-// Where the trained model for `category` (e.g. "monster") is: models/<category> in the project folder, or next to
+// Where the trained model for `category` (e.g. "character") is: models/<category> in the project folder, or next to
 // observex.exe if there is no project folder.
 std::filesystem::path modelFolder(const char* category);
 

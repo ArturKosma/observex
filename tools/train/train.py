@@ -1,6 +1,6 @@
-"""Trains observex's detector for one category (e.g. monsters) on the user's review answers.
+"""Trains observex's detector for one category (e.g. characters) on the user's review answers.
 
-    tools/train/.venv/Scripts/python tools/train/train.py [--category monster] [--model medium] [--resolution 1024]
+    tools/train/.venv/Scripts/python tools/train/train.py [--category character] [--model medium] [--resolution 1024]
 
 1. Collects every recording with a <category>-answers.txt in the recordings folder (observex.cfg, or "recordings"
    next to observex.exe). Only reviewed images count; on them, every "yes" mark is the thing and everything else
@@ -29,7 +29,7 @@ from marks import Mark, model_folder, overlap, read_marks, recordings_folder
 MODELS = {"nano": "RFDETRNano", "small": "RFDETRSmall", "medium": "RFDETRMedium", "large": "RFDETRLarge"}
 SCORE_CUTOFFS = (0.3, 0.4, 0.5)  # The score counts marks the model is at least this sure about, for each of these.
 # observex runs the model on images squeezed to this many pixels square: smaller than it trains at (--resolution),
-# so it costs about a quarter less live. Tested 2026-11-01 on 80 held-out images (238 monsters): trained at 1024 and
+# so it costs about a quarter less live. Tested 2026-11-01 on 80 held-out images (238 marked): trained at 1024 and
 # run at 768, it found 214 at 40% sure with 9 false alarms (run at 1024: 219 and 14; AP50 0.957 against 0.960);
 # trained at 768 it did worse (AP50 0.931, 17 false alarms). The score, guess.py and model.onnx all use it.
 LIVE_RESOLUTION = 768
@@ -37,9 +37,9 @@ LIVE_RESOLUTION = 768
 # all of them. Not batch_size="auto": it tries bigger batches until one does not fit, but on Windows the NVIDIA driver
 # then moves GPU memory into normal RAM instead of failing, so the search never ends (it ran 7 minutes, 15 GB RAM).
 IMAGES_PER_STEP = 16
-# Random changes to each training image, so the model learns monsters, not one recording's look. "flip" is
+# Random changes to each training image, so the model learns characters, not one recording's look. "flip" is
 # RF-DETR's own default (mirror only). "color" also shifts brightness, contrast, saturation and hue a little: the same
-# monster looks different in a dark cave, in fog or in daylight. Needs the rfdetr[augment] extra.
+# character looks different in a dark cave, in fog or in daylight. Needs the rfdetr[augment] extra.
 AUGMENTATIONS = {
     "flip": None,
     "color": {
@@ -181,7 +181,7 @@ def score(model, dataset: Path, cutoff: float) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--category", default="monster")
+    parser.add_argument("--category", default="character")
     parser.add_argument("--recordings", type=Path, default=None, help="default: the folder in observex.cfg")
     parser.add_argument("--model", choices=sorted(MODELS), default="medium")
     parser.add_argument("--resolution", type=int, default=1024,

@@ -29,9 +29,11 @@ else()
     target_compile_options(observex_warnings INTERFACE -Wall -Wextra -Wpedantic)
 endif()
 
-# Core: platform-free building blocks (lock-free hand-over, statistics, marks on images, the tracker). Unit tested.
+# Core: platform-free building blocks (lock-free hand-over, statistics, marks on images, recording files, the
+# tracker). Unit tested.
 add_library(observex_core STATIC
     src/core/Marks.cpp
+    src/core/Recordings.cpp
     src/core/Tracker.cpp)
 target_include_directories(observex_core PUBLIC src)
 target_link_libraries(observex_core PRIVATE observex_warnings)
@@ -92,6 +94,7 @@ if(OBSERVEX_BUILD_TESTS)
     enable_testing()
     add_executable(observex_tests
         tests/MarksTests.cpp
+        tests/RecordingsTests.cpp
         tests/StatWindowTests.cpp
         tests/TrackerTests.cpp
         tests/TripleBufferTests.cpp

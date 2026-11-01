@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <exception>
@@ -24,10 +25,13 @@ constexpr char kPickerPopup[] = "screens";
 constexpr char kSettingsPopup[] = "settings";
 constexpr char kShowPopup[] = "show";
 constexpr char kCategoryPopup[] = "What are we looking for?";
+constexpr char kRecordingsPopup[] = "recordings";
 constexpr char kChooseText[] = "Choose a screen to observe";
 constexpr char kHotkeyText[] = "Ctrl+Alt+R";
 constexpr int kRecordHotkey = 0; // MainWindow hotkey ids.
 constexpr int kMarkHotkey = 1;
+// What live recognition looks for: its model folder, live log, Show flag and box tags.
+constexpr const Category& kLive = kCategories[0];
 // Seconds between saved images while recording. Neighbouring images are near copies, so the user asked for one
 // every 3 s (2026-11-01) rather than more to review. Fixed, no setting.
 constexpr unsigned kRecordingInterval = 3;
@@ -78,6 +82,38 @@ std::string fileTime(const std::filesystem::path& file) {
     char text[24];
     std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u", time.wYear, time.wMonth, time.wDay, time.wHour,
                   time.wMinute);
+    return text;
+}
+
+// When a recording started, for the review's list: "Today, 12:56", "31 Oct, 23:59", or "31 Oct 2025, 23:59" in
+// another year. `started` is RecordingInfo::started ("2026-10-31 23:59:49"); shown as it is if it is not that.
+std::string describeWhen(const std::string& started) {
+    static constexpr const char* kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    const auto number = [&started](std::size_t at, std::size_t length) {
+        unsigned value = 0;
+        const char* begin = started.data() + at;
+        const auto [end, error] = std::from_chars(begin, begin + length, value);
+        return error == std::errc() && end == begin + length ? value : 0u;
+    };
+    if (started.size() < 16) {
+        return started;
+    }
+    const unsigned year = number(0, 4), month = number(5, 2), day = number(8, 2);
+    const unsigned hour = number(11, 2), minute = number(14, 2);
+    if (month < 1 || month > 12 || day == 0) {
+        return started;
+    }
+    SYSTEMTIME today;
+    GetLocalTime(&today);
+    char text[40];
+    if (year == today.wYear && month == today.wMonth && day == today.wDay) {
+        std::snprintf(text, sizeof(text), "Today, %02u:%02u", hour, minute);
+    } else if (year == today.wYear) {
+        std::snprintf(text, sizeof(text), "%u %s, %02u:%02u", day, kMonths[month - 1], hour, minute);
+    } else {
+        std::snprintf(text, sizeof(text), "%u %s %u, %02u:%02u", day, kMonths[month - 1], year, hour, minute);
+    }
     return text;
 }
 
@@ -189,7 +225,9 @@ void App::init() {
     dpiScale_ = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
 
     if (snapshot_) {
-        settings_.recordingsFolder = std::filesystem::path(snapshot_->path).parent_path() / L"recordings";
+        settings_.recordingsFolder = !snapshot_->recordingsFolder.empty()
+                                         ? snapshot_->recordingsFolder
+                                         : std::filesystem::path(snapshot_->path).parent_path() / L"recordings";
     } else {
         settingsFile_ = appFolder() / L"observex.cfg";
         settings_ = Settings::load(settingsFile_);
@@ -253,10 +291,10 @@ void App::observe(const Screen& screen) {
         return;
     }
 
-    // The monster model tools/train made.
+    // The model tools/train made.
     recognizerError_.clear();
     try {
-        recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(), modelFolder("monster"));
+        recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(), modelFolder(kLive.id));
     } catch (const std::exception& e) {
         recognizerError_ = e.what();
     }
@@ -326,12 +364,12 @@ void App::startRecording() {
     std::shared_ptr<LiveLog> log;
     if (settings_.liveLog) {
         try {
-            const std::filesystem::path model = modelFolder("monster") / L"model.onnx";
+            const std::filesystem::path model = modelFolder(kLive.id) / L"model.onnx";
             char about[600];
             std::snprintf(about, sizeof(about), "Model %s (written %s), screen %s (%s), %u x %u.",
                           toUtf8(model.c_str()).c_str(), fileTime(model).c_str(), observed_->monitor.c_str(),
                           observed_->name.c_str(), pipeline_.width(), pipeline_.height());
-            log = std::make_shared<LiveLog>(folder / L"monster-live.txt", about);
+            log = std::make_shared<LiveLog>(folder / (std::string(kLive.id) + "-live.txt"), about);
         } catch (const std::exception& e) {
             recordingError_ = std::string("Could not record: ") + e.what();
             return;
@@ -339,7 +377,20 @@ void App::startRecording() {
     }
     recording_ = Recording{folder, std::chrono::steady_clock::now()};
     recording_->log = std::move(log);
+    char started[24];
+    std::snprintf(started, sizeof(started), "%04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay,
+                  now.wHour, now.wMinute, now.wSecond);
+    RecordingInfo& info = recording_->info;
+    info.started = started;
+    info.screen = observed_->monitor;
+    info.width = pipeline_.width();
+    info.height = pipeline_.height();
+    info.every = kRecordingInterval;
     resumeRecording();
+    // The folder exists once the recorder runs. Without the file the review would not list this recording.
+    if (recording_ && !writeRecordingInfo(recording_->folder, recording_->info)) {
+        recordingError_ = "Could not write " + toUtf8((recording_->folder / kRecordingFile).c_str());
+    }
 }
 
 void App::resumeRecording() {
@@ -373,6 +424,16 @@ void App::pauseRecording() {
 
 void App::stopRecording() {
     pauseRecording();
+    if (recording_) {
+        RecordingInfo& info = recording_->info;
+        info.seconds = static_cast<unsigned>(
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - recording_->started)
+                .count());
+        info.images = recording_->saved;
+        if (!writeRecordingInfo(recording_->folder, info)) {
+            recordingError_ = "Could not write " + toUtf8((recording_->folder / kRecordingFile).c_str());
+        }
+    }
     recording_.reset();
 }
 
@@ -390,24 +451,21 @@ void App::saveSettings() {
     }
 }
 
-void App::chooseReviewFolder() {
-    std::optional<std::filesystem::path> folder;
-    if (!snapshot_) {
-        folder = pickFolder(window_->handle(), settings_.recordingsFolder, L"Choose a recording to review");
-    } else if (!snapshot_->reviewFolder.empty()) {
-        folder = snapshot_->reviewFolder; // Snapshot mode never shows a Windows dialog.
-    }
-    if (!folder) {
-        return;
+void App::openRecordings() {
+    // Read once per opening: a few small files per recording.
+    recordings_.clear();
+    for (RecordingEntry& entry : listRecordings(settings_.recordingsFolder)) {
+        RecordingRow row;
+        row.when = describeWhen(entry.info.started);
+        row.images = Review::listImages(entry.folder).size();
+        for (const Category& category : kCategories) {
+            row.reviewed.push_back(Review::countReviewed(entry.folder, category));
+        }
+        row.entry = std::move(entry);
+        recordings_.push_back(std::move(row));
     }
     reviewError_.clear();
-    reviewFolderImages_ = Review::listImages(*folder).size();
-    if (reviewFolderImages_ == 0) {
-        reviewError_ = "No recorded images in " + toUtf8(folder->c_str());
-        return;
-    }
-    reviewFolder_ = *folder;
-    ImGui::OpenPopup(kCategoryPopup);
+    ImGui::OpenPopup(kRecordingsPopup);
 }
 
 void App::startReview(const Category& category) {
@@ -572,7 +630,7 @@ void App::drawTopBar(float height) {
     } else {
         reviewButton.icon = Icon::Picture;
         reviewButton.text = "Review";
-        reviewButton.open = ImGui::IsPopupOpen(kCategoryPopup);
+        reviewButton.open = ImGui::IsPopupOpen(kRecordingsPopup) || ImGui::IsPopupOpen(kCategoryPopup);
     }
     x -= std::round(8.0f * dpiScale_) + reviewButton.width(fonts_);
     ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
@@ -580,11 +638,18 @@ void App::drawTopBar(float height) {
         if (review_) {
             closeReview_ = true;
         } else {
-            chooseReviewFolder();
+            openRecordings();
         }
     }
     if (ImGui::IsItemHovered() && !review_ && !reviewButton.open) {
         ImGui::SetTooltip("Open a recording and answer what observex found in it");
+    }
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap), ImGuiCond_Always,
+                            ImVec2(1.0f, 0.0f));
+    drawRecordings();
+    if (openCategory_) { // Here, not inside the list's popup, so the chooser's name means the same popup.
+        openCategory_ = false;
+        ImGui::OpenPopup(kCategoryPopup);
     }
     drawCategoryChooser();
     if (review_) {
@@ -705,10 +770,10 @@ void App::drawSettings() {
 }
 
 void App::drawShowFlags() {
-    // Each flag only says what is drawn: hiding monsters does not stop looking for them.
+    // Each flag only says what is drawn: hiding characters does not stop looking for them.
     ImGui::TextDisabled("Draw over the screen");
     ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
-    if (ImGui::Checkbox("Monsters", &settings_.showMonsters)) {
+    if (ImGui::Checkbox(kLive.name, &settings_.showCharacters)) {
         saveSettings();
     }
 
@@ -734,7 +799,7 @@ void App::drawShowFlags() {
         std::snprintf(text, sizeof(text), "%d found  \xC2\xB7  %.0f images a second  \xC2\xB7  %.1f ms each", found,
                       static_cast<double>(stats.imagesPerSecond), static_cast<double>(stats.workAvgMs));
     }
-    const float indent = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x; // Under "Monsters".
+    const float indent = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x; // Under the flag.
     ImGui::Indent(indent);
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
     ImGui::TextDisabled("%s", text);
@@ -786,12 +851,99 @@ void App::drawReviewSteps(float height) {
         review_->next();
     }
     if (ImGui::IsItemHovered() && forward.enabled) {
-        ImGui::SetTooltip("Next image (Right arrow). Marks you did not answer count as no.");
+        ImGui::SetTooltip("Next image (Right arrow)");
+    } else if (ImGui::IsItemHovered() && review_->unansweredCount() > 0) {
+        ImGui::SetTooltip("Answer every mark on this image first (%d left)", review_->unansweredCount());
     }
 }
 
+void App::drawRecordings() {
+    // The Review button's list: every recording in the recordings folder, newest first. Picking one asks what to
+    // look for in it next.
+    if (!ImGui::BeginPopup(kRecordingsPopup)) {
+        return;
+    }
+    const float dpi = dpiScale_;
+    const ImVec2 tileSize(std::round(400.0f * dpi), std::round(58.0f * dpi));
+    ImGui::PushFont(fonts_.medium, 18.0f);
+    ImGui::TextUnformatted("Review a recording");
+    ImGui::PopFont();
+    // Wrapped to the list, so a long folder path does not stretch the popup.
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + tileSize.x + ImGui::GetStyle().ScrollbarSize);
+    ImGui::TextDisabled("%s", toUtf8(settings_.recordingsFolder.c_str()).c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f * dpi));
+
+    if (recordings_.empty()) {
+        ImGui::TextUnformatted("No recordings yet.");
+        ImGui::TextDisabled("Observe a screen and press Record (%s).", kHotkeyText);
+        ImGui::EndPopup();
+        return;
+    }
+    const ImVec2 padding(std::round(14.0f * dpi), std::round(10.0f * dpi));
+    const float spacing = ImGui::GetStyle().ItemSpacing.y;
+    const float listHeight = std::min(static_cast<float>(recordings_.size()) * (tileSize.y + spacing) - spacing,
+                                      std::round(ImGui::GetMainViewport()->Size.y * 0.6f));
+    ImGui::BeginChild("##recordings", ImVec2(tileSize.x + ImGui::GetStyle().ScrollbarSize, listHeight));
+    for (std::size_t i = 0; i < recordings_.size(); ++i) {
+        const RecordingRow& row = recordings_[i];
+        const ImVec2 min = ImGui::GetCursorScreenPos();
+        ImGui::PushID(static_cast<int>(i));
+        const bool clicked = ImGui::InvisibleButton("##recording", tileSize);
+        ImGui::PopID();
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
+        const ImVec2 max = ImGui::GetItemRectMax();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        drawList->AddRectFilled(min, max, hovered ? theme::kSurfaceActive : theme::kSurfaceHover, 8.0f * dpi);
+        drawList->AddRect(min, max, hovered ? theme::kAccent : theme::kBorderHover, 8.0f * dpi, 0, 1.0f);
+        drawList->AddText(fonts_.medium, ImGui::GetFontSize(), ImVec2(min.x + padding.x, min.y + padding.y),
+                          theme::kText, row.when.c_str());
+
+        // How long, how many images, and how far each category's review got: "00:34 · 12 images · Characters 11
+        // of 12 reviewed".
+        std::string detail;
+        if (row.entry.info.seconds > 0) {
+            char duration[16];
+            formatDuration(duration, sizeof(duration), std::chrono::seconds(row.entry.info.seconds));
+            detail = std::string(duration) + "  \xC2\xB7  ";
+        }
+        detail += std::to_string(row.images) + (row.images == 1 ? " image" : " images");
+        bool reviewed = false;
+        for (std::size_t c = 0; c < row.reviewed.size(); ++c) {
+            if (row.reviewed[c] > 0) {
+                char text[96];
+                std::snprintf(text, sizeof(text), "  \xC2\xB7  %s %zu of %zu reviewed", kCategories[c].name,
+                              row.reviewed[c], row.images);
+                detail += text;
+                reviewed = true;
+            }
+        }
+        if (!reviewed) {
+            detail += "  \xC2\xB7  not reviewed yet";
+        }
+        drawList->AddText(ImVec2(min.x + padding.x, max.y - padding.y - ImGui::GetTextLineHeight()), theme::kTextMuted,
+                          detail.c_str());
+        if (clicked) {
+            if (row.images == 0) {
+                reviewError_ = "No images in the recording of " + row.when;
+            } else {
+                reviewFolder_ = row.entry.folder;
+                reviewWhen_ = row.when;
+                reviewFolderImages_ = row.images;
+                openCategory_ = true;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::EndPopup();
+}
+
 void App::drawCategoryChooser() {
-    // After the folder: what to look for. Only monsters for now; more categories are more tiles.
+    // After the recording: what to look for. Only characters for now; more categories are more tiles.
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
         ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + viewport->Size.y * 0.4f), ImGuiCond_Always,
@@ -806,8 +958,7 @@ void App::drawCategoryChooser() {
     ImGui::TextUnformatted(kCategoryPopup);
     ImGui::PopFont();
     char where[300];
-    std::snprintf(where, sizeof(where), "%s  \xC2\xB7  %zu images", toUtf8(reviewFolder_.filename().c_str()).c_str(),
-                  reviewFolderImages_);
+    std::snprintf(where, sizeof(where), "Recorded %s  \xC2\xB7  %zu images", reviewWhen_.c_str(), reviewFolderImages_);
     ImGui::TextDisabled("%s", where);
     ImGui::Dummy(ImVec2(0.0f, 6.0f * dpi));
 
@@ -895,7 +1046,7 @@ void App::drawObservedScreen() {
     observedImage_->draw(drawList, min, max, rounding, theme::kBackground);
     drawList->PathRect(ImVec2(min.x - 0.5f, min.y - 0.5f), ImVec2(max.x + 0.5f, max.y + 0.5f), rounding + 0.5f);
     drawList->PathStroke(theme::kBorder, ImDrawFlags_Closed, 1.0f);
-    if (settings_.showMonsters && recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+    if (settings_.showCharacters && recognizer_ && recognizer_->state() == Recognizer::State::Running) {
         drawFound(drawList, min, max);
     }
 
@@ -915,7 +1066,7 @@ void App::drawObservedScreen() {
         if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
             const RecognizerStats& found = recognizer_->stats();
             std::snprintf(detail, sizeof(detail),
-                          "Monsters: %.0f images/s  \xC2\xB7  %.2f ms each  \xC2\xB7  %.2f ms slowest",
+                          "%s: %.0f images/s  \xC2\xB7  %.2f ms each  \xC2\xB7  %.2f ms slowest", kLive.name,
                           static_cast<double>(found.imagesPerSecond), static_cast<double>(found.workAvgMs),
                           static_cast<double>(found.workMaxMs));
         }
@@ -936,7 +1087,7 @@ void App::drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
                             std::round(min.y + (thing.y + thing.height) * scale));
         theme::drawBox(drawList, boxMin, boxMax, theme::kAccent, thickness);
         char tag[32];
-        std::snprintf(tag, sizeof(tag), "Monster %.0f%%", static_cast<double>(thing.sure * 100.0f));
+        std::snprintf(tag, sizeof(tag), "%s %.0f%%", kLive.yes, static_cast<double>(thing.sure * 100.0f));
         theme::drawTag(drawList, fonts_.medium, boxMin, thickness, min, max, tag, theme::kAccent,
                        theme::kBackground);
     }

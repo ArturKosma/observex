@@ -84,7 +84,7 @@ TEST_CASE("carryAnswers copies the answer of the most overlapping answered mark"
         Mark{Box{500, 100, 40, 40}, Answer::None, 0.9f}, // Unanswered: gives nothing.
     };
     std::vector<Mark> marks = {
-        Mark{Box{104, 102, 40, 40}, Answer::None, 0.6f}, // Moved a little: same monster.
+        Mark{Box{104, 102, 40, 40}, Answer::None, 0.6f}, // Moved a little: same character.
         Mark{Box{302, 100, 40, 40}, Answer::None, 0.4f}, Mark{Box{500, 100, 40, 40}, Answer::None, 0.8f},
         Mark{Box{130, 100, 40, 40}, Answer::None, 0.3f}, // Overlaps the first by only a quarter.
         Mark{Box{100, 100, 40, 40}, Answer::No},         // Already answered: kept.

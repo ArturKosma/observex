@@ -18,15 +18,15 @@
 //
 // Record: --record saves images into FOLDER the way the app's Record button does, one every S seconds (default 3,
 // like the app), so its cost on capture shows in the numbers. The pulse is near-black, so most saved images show the screen
-// as it is. With --model too, it also writes the live log (e.g. monster-live.txt, see engine/LiveLog) like the app,
+// as it is. With --model too, it also writes the live log (e.g. character-live.txt, see engine/LiveLog) like the app,
 // and marks once halfway, as if Ctrl+Alt+M were pressed.
 //
-// Model: --model runs live recognition with the model in FOLDER (e.g. models/monster) the way the app does while
+// Model: --model runs live recognition with the model in FOLDER (e.g. models/character) the way the app does while
 // observing, and adds its numbers: images recognised per second, milliseconds per image, things found.
 // With --images it looks at the image files of a recording instead of the screen and writes what it found to FILE
 // in the marks format (like tools/train/guess.py's <category>-guesses.txt), to compare with the Python model.
 //
-// Track: --track follows the things of a live log (a recording's monster-live.txt) with the Tracker, look by look as
+// Track: --track follows the things of a live log (a recording's character-live.txt) with the Tracker, look by look as
 // the recogniser does, and prints how steady the boxes are with and without it, and what following costs. No GPU.
 
 #include "core/Marks.h"

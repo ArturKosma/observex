@@ -45,11 +45,11 @@ Fonts apply(float dpiScale);
 // top centre) of the label sits at `anchor`. An optional `detail` goes on a second line in a muted colour.
 void drawLabel(ImDrawList* drawList, ImVec2 anchor, ImVec2 pivot, const char* text, const char* detail = nullptr);
 
-// A box over a screen image, e.g. around a monster: a dark halo, then a `thickness` wide outline in `color`. The
+// A box over a screen image, e.g. around a character: a dark halo, then a `thickness` wide outline in `color`. The
 // halo fades with `color`'s opacity.
 void drawBox(ImDrawList* drawList, ImVec2 min, ImVec2 max, ImU32 color, float thickness);
 
-// The tag naming what a box is, e.g. "Monster 81%": `text` on a `fill` backing, just above the top left corner of
+// The tag naming what a box is, e.g. "Character 81%": `text` on a `fill` backing, just above the top left corner of
 // the box drawBox drew from `boxMin` with `thickness`, or just inside the box if there is no room above `area`'s
 // top. Kept inside `area` (the image) left to right.
 void drawTag(ImDrawList* drawList, ImFont* font, ImVec2 boxMin, float thickness, ImVec2 areaMin, ImVec2 areaMax,

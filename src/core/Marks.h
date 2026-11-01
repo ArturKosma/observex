@@ -24,11 +24,11 @@ float overlap(const Box& a, const Box& b);
 
 enum class Answer : std::uint8_t {
     None, // Not answered yet.
-    Yes,  // It belongs to the category, e.g. it is a monster.
+    Yes,  // It belongs to the category, e.g. it is a character.
     No,   // It does not.
 };
 
-// Something marked on an image for one category (e.g. a monster): a guess, the user's answer, or both.
+// Something marked on an image for one category (e.g. a character): a guess, the user's answer, or both.
 struct Mark {
     Box box;
     Answer answer = Answer::None;

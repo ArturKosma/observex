@@ -44,8 +44,8 @@ Settings Settings::load(const std::filesystem::path& file) {
         const std::string_view value(line.data() + equals + 1, line.size() - equals - 1);
         if (key == "recordings" && !value.empty()) {
             settings.recordingsFolder = fromUtf8(value);
-        } else if (key == "show-monsters") {
-            settings.showMonsters = value != "0";
+        } else if (key == "show-characters") {
+            settings.showCharacters = value != "0";
         } else if (key == "live-log") {
             settings.liveLog = value != "0";
         }
@@ -56,7 +56,7 @@ Settings Settings::load(const std::filesystem::path& file) {
 bool Settings::save(const std::filesystem::path& file) const {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     out << "recordings=" << toUtf8(recordingsFolder) << "\r\n";
-    out << "show-monsters=" << (showMonsters ? 1 : 0) << "\r\n";
+    out << "show-characters=" << (showCharacters ? 1 : 0) << "\r\n";
     out << "live-log=" << (liveLog ? 1 : 0) << "\r\n";
     return static_cast<bool>(out);
 }

@@ -25,11 +25,11 @@ constexpr ImGuiWindowFlags kAnswerBox = ImGuiWindowFlags_NoDecoration | ImGuiWin
                                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
 
 // Guesses at least this sure start answered yes; the user only flips the wrong ones. Run at 768 pixels (since
-// 2026-11-01) the model is less sure than at 1024: on 80 held-out images (238 monsters), 65% pre-answers 196 of them
+// 2026-11-01) the model is less sure than at 1024: on 80 held-out images (238 marked), 65% pre-answers 196 of them
 // with 3 wrong, as 75% did at 1024 (196, 1 wrong); 75% at 768 only 171.
 constexpr float kPresumeYes = 0.65f;
 // While a mark is selected, the others fade to this opacity, so it is clear which one the Yes / No box asks about
-// when monsters stand close together (the user could not tell, 2026-11-01).
+// when characters stand close together (the user could not tell, 2026-11-01).
 constexpr float kOtherMarks = 0.35f;
 
 std::string toUtf8(const std::filesystem::path& path) {
@@ -78,6 +78,10 @@ std::vector<std::string> Review::listImages(const std::filesystem::path& folder)
     }
     std::sort(images.begin(), images.end());
     return images;
+}
+
+std::size_t Review::countReviewed(const std::filesystem::path& folder, const Category& category) {
+    return parseMarks(readTextFile(marksFile(folder, category, "answers"))).size();
 }
 
 Review::Review(ID3D11Device* device, std::filesystem::path folder, const Category& category)
@@ -131,14 +135,18 @@ void Review::previous() {
     }
 }
 
+int Review::unansweredCount() const {
+    return static_cast<int>(std::count_if(marks_.begin(), marks_.end(),
+                                          [](const Mark& mark) { return mark.answer == Answer::None; }));
+}
+
 void Review::next() {
-    if (!canGoOn()) {
+    if (unansweredCount() > 0) {
+        selected_ = nextUnanswered(-1); // Shows its Yes / No: answer it first.
         return;
     }
-    for (Mark& mark : marks_) {
-        if (mark.answer == Answer::None) {
-            mark.answer = Answer::No;
-        }
+    if (!canGoOn()) {
+        return;
     }
     reviewed_ = true;
     drafts_.erase(images_[index_]);
@@ -151,6 +159,7 @@ void Review::next() {
 void Review::show(std::size_t index) {
     index_ = index;
     dragging_ = false;
+    pressedMark_ = -1;
     hovered_ = -1;
     loadMarks();
     loadImage();
@@ -306,6 +315,16 @@ Box Review::dragBox() const {
     return Box{left, top, right - left, bottom - top};
 }
 
+bool Review::drawing() const {
+    if (!dragging_) {
+        return false;
+    }
+    // On screen, so a click that wobbles a few pixels is still a click (and a far character's box can be small).
+    const float smallest = 6.0f * ImGui::GetStyle().FontScaleDpi;
+    const Box box = dragBox();
+    return static_cast<float>(box.width) * scale_ >= smallest && static_cast<float>(box.height) * scale_ >= smallest;
+}
+
 void Review::handleKeys() {
     if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) || ImGui::GetIO().WantTextInput) {
         return;
@@ -334,27 +353,25 @@ void Review::handleKeys() {
 }
 
 void Review::handleMouse() {
-    // The image is one invisible button: pressing on a mark selects it, pressing elsewhere starts a new mark.
+    // The image is one invisible button. A click picks the mark under it (the smallest there), or none; a drag draws
+    // a new mark wherever it starts, so a missed character can be drawn over a bigger mark.
     const ImVec2 pixel = toImage(ImGui::GetMousePos());
-    hovered_ = ImGui::IsItemHovered() && !dragging_ ? markAt(pixel) : -1;
+    hovered_ = ImGui::IsItemHovered() && !drawing() ? markAt(pixel) : -1;
     if (ImGui::IsItemActivated()) {
-        if (hovered_ >= 0) {
-            selected_ = hovered_;
-        } else {
-            dragging_ = true;
-            dragStart_ = pixel;
-            selected_ = -1;
-        }
+        dragging_ = true;
+        dragStart_ = pixel;
+        pressedMark_ = hovered_;
     }
     if (dragging_ && ImGui::IsItemDeactivated()) {
-        dragging_ = false;
-        const Box box = dragBox();
-        const float smallest = 4.0f * ImGui::GetStyle().FontScaleDpi; // On screen: a plain click is no mark.
-        if (static_cast<float>(box.width) * scale_ >= smallest && static_cast<float>(box.height) * scale_ >= smallest) {
-            marks_.push_back(Mark{box, Answer::Yes});
+        if (drawing()) {
+            marks_.push_back(Mark{dragBox(), Answer::Yes});
             selected_ = static_cast<int>(marks_.size()) - 1;
             changed();
+        } else {
+            selected_ = pressedMark_;
         }
+        dragging_ = false;
+        pressedMark_ = -1;
     }
     if (hovered_ >= 0) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -421,7 +438,7 @@ void Review::draw(const theme::Fonts& fonts) {
             std::snprintf(text, sizeof(text), "Nothing is marked: the finder has not looked at this recording yet.");
             std::snprintf(detail, sizeof(detail), "Drag a box around each %s it should learn.", category_.noun);
         }
-        if (text[0] != '\0' && !dragging_) {
+        if (text[0] != '\0' && !drawing()) {
             theme::drawLabel(drawList, ImVec2((imageMin_.x + imageMax.x) * 0.5f, imageMin_.y + 12.0f * dpi),
                              ImVec2(0.5f, 0.0f), text, detail);
         }
@@ -492,7 +509,7 @@ void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
         }
     }
 
-    if (dragging_) {
+    if (drawing()) {
         const Box box = dragBox();
         const ImVec2 min = toScreen(box.x, box.y);
         const ImVec2 max = toScreen(box.x + box.width, box.y + box.height);
@@ -501,7 +518,7 @@ void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
 }
 
 void Review::drawAnswerBox(const theme::Fonts& fonts, ImVec2 viewMin, ImVec2 viewMax) {
-    if (selected_ < 0 || dragging_) {
+    if (selected_ < 0 || drawing()) {
         return;
     }
     const float dpi = ImGui::GetStyle().FontScaleDpi;
@@ -509,7 +526,7 @@ void Review::drawAnswerBox(const theme::Fonts& fonts, ImVec2 viewMin, ImVec2 vie
     const ImVec2 min = toScreen(mark.box.x, mark.box.y);
     const ImVec2 max = toScreen(mark.box.x + mark.box.width, mark.box.y + mark.box.height);
 
-    // Just the buttons: the mark's tag already asks the question ("Monster? 81%").
+    // Just the buttons: the mark's tag already asks the question ("Character? 81%").
     BarButton yes;
     yes.text = "Yes";
     yes.detail = "Y";
@@ -578,14 +595,15 @@ void Review::drawStatus(ImDrawList* drawList, ImVec2 min, ImVec2 max) const {
                                marks_.size(), marks_.size() == 1 ? "mark" : "marks");
     if (unanswered > 0 && length > 0 && static_cast<std::size_t>(length) < sizeof(where)) {
         std::snprintf(where + length, sizeof(where) - static_cast<std::size_t>(length),
-                      ", %d unanswered (no, once you move on)", unanswered);
+                      ", %d to answer before moving on", unanswered);
     } else if (reviewed_ && length > 0 && static_cast<std::size_t>(length) < sizeof(where)) {
         std::snprintf(where + length, sizeof(where) - static_cast<std::size_t>(length), "  \xC2\xB7  reviewed");
     }
     drawList->AddText(ImVec2(min.x, textY), theme::kTextMuted, where);
 
     const char* keys = saveError_.empty()
-                           ? "Drag: mark a missed one     Y / N: answer     Tab: next mark     Left / Right: images"
+                           ? "Click: pick a mark     Drag: draw a missed one     Y / N: answer     Tab: next mark     "
+                             "Left / Right: images"
                            : saveError_.c_str();
     const float keysWidth = ImGui::CalcTextSize(keys).x;
     drawList->AddText(ImVec2(std::round(max.x - keysWidth), textY),

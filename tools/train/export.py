@@ -1,6 +1,6 @@
 """Writes a trained model in the form observex runs live: models/<category>/model.onnx.
 
-    tools/train/.venv/Scripts/python tools/train/export.py [--category monster]
+    tools/train/.venv/Scripts/python tools/train/export.py [--category character]
 
 train.py runs this by itself after training. ONNX is a plain description of the network and its numbers. observex
 turns it into a TensorRT engine for this GPU the first time it observes a screen after a new model (about a minute
@@ -40,7 +40,7 @@ def export_onnx(category: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--category", default="monster")
+    parser.add_argument("--category", default="character")
     args = parser.parse_args()
     utf8_output()
 

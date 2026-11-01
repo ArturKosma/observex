@@ -1,6 +1,6 @@
 """Runs the trained model over a recording and writes its guesses for observex's review.
 
-    tools/train/.venv/Scripts/python tools/train/guess.py RECORDING_FOLDER [--category monster] [--threshold 0.3]
+    tools/train/.venv/Scripts/python tools/train/guess.py RECORDING_FOLDER [--category character] [--threshold 0.3]
 
 Writes <category>-guesses.txt into the recording's folder: for every image, each thing the model found with how
 sure it is. The review then shows them as marks to answer yes or no. The threshold is low on purpose: unsure
@@ -23,7 +23,7 @@ from train import load_live, utf8_output
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("recording", type=Path)
-    parser.add_argument("--category", default="monster")
+    parser.add_argument("--category", default="character")
     parser.add_argument("--threshold", type=float, default=0.3, help="leave out guesses less sure than this (0 to 1)")
     args = parser.parse_args()
     utf8_output()

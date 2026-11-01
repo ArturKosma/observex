@@ -19,7 +19,8 @@ float centreY(const Detection& box) { return box.y + box.height * 0.5f; }
 int Tracker::update(double timeMs, const Detection* found, int count, Tracked* out, int max) {
     const int trackCount = static_cast<int>(tracks_.size());
 
-    // Pair each followed thing with what was found near where it is heading; nearest pairs first.
+    // Pair each followed thing with what was found near where it is heading: boxes at least kStartSure sure first
+    // (so a sure box is not taken by a weak one's neighbour), nearest pairs first.
     pairs_.clear();
     for (int t = 0; t < trackCount; ++t) {
         const Track& track = tracks_[static_cast<std::size_t>(t)];
@@ -36,18 +37,22 @@ int Tracker::update(double timeMs, const Detection* found, int count, Tracked* o
             const float boxArea = box.width * box.height;
             const float side = std::max({thing.width, thing.height, box.width, box.height});
             const float distance = std::hypot(centreX(box) - x, centreY(box) - y) / side;
+            const bool weak = box.sure < kStartSure;
             if (std::min(area, boxArea) >= kMinAreaRatio * std::max(area, boxArea) && distance < reach) {
-                pairs_.push_back({distance, t, f});
+                pairs_.push_back({distance, t, f, weak});
                 continue;
             }
             const float overlapX = std::min(left + thing.width, box.x + box.width) - std::max(left, box.x);
             const float overlapY = std::min(top + thing.height, box.y + box.height) - std::max(top, box.y);
             if (overlapX > 0.0f && overlapY > 0.0f && overlapX * overlapY >= kMinInside * std::min(area, boxArea)) {
-                pairs_.push_back({distance + 1.0f, t, f}); // After the near ones.
+                pairs_.push_back({distance + 1.0f, t, f, weak}); // After the near ones.
             }
         }
     }
     std::sort(pairs_.begin(), pairs_.end(), [](const Pair& a, const Pair& b) {
+        if (a.weak != b.weak) {
+            return b.weak;
+        }
         return a.distance != b.distance ? a.distance < b.distance
                                         : (a.track != b.track ? a.track < b.track : a.found < b.found);
     });
@@ -107,9 +112,9 @@ int Tracker::update(double timeMs, const Detection* found, int count, Tracked* o
     }
     tracks_.resize(kept);
 
-    // Start following what is new.
+    // Start following what is new and sure enough.
     for (int f = 0; f < count; ++f) {
-        if (matchedTo_[static_cast<std::size_t>(f)] >= 0) {
+        if (matchedTo_[static_cast<std::size_t>(f)] >= 0 || found[f].sure < kStartSure) {
             continue;
         }
         Track track;
