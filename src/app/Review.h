@@ -1,9 +1,9 @@
 #pragma once
 
-#include "app/Finder.h"
 #include "app/ScreenImage.h"
 #include "app/Theme.h"
 #include "core/Marks.h"
+#include "engine/Finder.h"
 
 #include <imgui.h>
 
@@ -40,8 +40,8 @@ inline constexpr Category kCategories[] = {
 //   "reviewed": everything in the category on it is marked yes. Unanswered marks count as no when moving on.
 //   Saved on every change to a reviewed image.
 // Answers carry forward: a mark on the next image that overlaps an answered one gets the same answer.
-// If a trained model exists and the recording's guesses are missing or older than it, the Finder writes them in the
-// background while the review is open; they show as soon as it is done.
+// If a trained model exists (models/<id>/model.onnx) and the recording's guesses are missing or older than it, the
+// Finder writes them in the background while the review is open; they show as soon as it is done.
 class Review {
 public:
     // The image files of a recording (.jpg or .png), in name order. Empty if there are none.

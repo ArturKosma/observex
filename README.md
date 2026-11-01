@@ -24,7 +24,7 @@ Screen capture, recording, reviewing, training and recognising monsters live wor
   (about 5 ms each on an RTX 4090, about 210 images a second), on its own thread, so capture never waits for it.
   **Show** (the eye, next to the screen button) holds flags like Unreal's view flags: **Monsters** draws a box with
   how sure the model is ("Monster 81%") around each monster it finds. Turning a flag off only hides the boxes;
-  recognition keeps running. The first time observex sees a new model, it prepares it for your GPU (about 35 s,
+  recognition keeps running. It pauses only while you review, so the review gets the GPU. The first time observex sees a new model, it prepares it for your GPU (about 35 s,
   with progress under the flag) and keeps the result for the next starts.
 - **Record**: saves the observed screen as numbered JPEG images, one per second, into a new folder per recording
   (`recordings/` next to observex.exe unless you pick another folder in Settings). Ctrl+Alt+R starts and stops it
@@ -35,9 +35,9 @@ Screen capture, recording, reviewing, training and recognising monsters live wor
   observex marked shows as a box with its guess ("Monster? 81%"); answer it with Yes / No (or the Y / N keys), and
   drag a box around anything it missed. Moving on with the Right arrow saves the image's answers, and answers carry
   over to the same thing on the next image. Answers are saved next to the images, in `monster-answers.txt`. Once a
-  model is trained, opening a new recording runs it in the background ("Looking for monsters with the trained
-  model", with progress), and its guesses appear when it is done. Before the first training there are no guesses,
-  so you draw the boxes yourself.
+  model is trained, opening a new recording runs it in the background, inside observex on the GPU ("Looking for
+  monsters with the trained model", with progress; about 1 s to start, then about 20 ms per image), and its guesses
+  appear when it is done. Before the first training there are no guesses, so you draw the boxes yourself.
 - **Train**: `tools/train/` (Python, on the GPU) learns from your answers, writes the model live recognition uses,
   and writes its guesses for the next recording, which the review then shows. See
   [tools/train/README.md](tools/train/README.md).

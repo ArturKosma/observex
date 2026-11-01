@@ -75,7 +75,10 @@ when the score is good enough.
   TensorRT download needs an account login. observex loads them at run time.
 - **Show flags, like Unreal's view flags** (the user asked, 2026-11-01). The Show dropdown says what is drawn over
   the observed screen (for now: Monsters). A flag only hides or shows; recognition goes on either way, also while
-  the window is minimized or a review covers the view.
+  the window is minimized. It pauses only while reviewing (the user asked, 2026-11-01), so the review's finder gets
+  the GPU.
+- **No Python inside observex** (2026-11-01). The review's finder runs the same TensorRT model as live recognition,
+  in observex, instead of starting `guess.py` (about 5 s just to start Python). Python stays for training only.
 - **Models:** RF-DETR or D-FINE (Apache 2.0, no strings attached). Ultralytics YOLO26 is as fast but AGPL, which
   requires observex to stay open source under the AGPL or a paid licence. Pick by measuring on the 4090.
 - **Two languages, one boundary.** observex stays C++ (capture, recording, review screen, live detection). Training
@@ -128,9 +131,9 @@ Each step can be tried on its own.
    everyday photos; its 80 kinds replaced by the one category) at 1024 x 1024 for 40 passes, with random colour
    changes on the training images, and saves
    `models/<category>/model.pth` and `model.json` (settings, counts, score). `guess.py RECORDING` writes the model's
-   guesses as `<category>-guesses.txt` for the review, down to 30% sure. The review runs it by itself in the
-   background (`app/Finder`) when a recording's guesses are missing or older than the model, and shows its progress
-   (the user asked, 2026-11-01; until step 5 lets observex run the model itself). Python stays in a private `.venv`
+   guesses as `<category>-guesses.txt` for the review, down to 30% sure. The review used to run it by itself; since
+   step 5 it runs the same model inside observex instead (`engine/Finder`: same guesses, about 1 s to start instead
+   of 5, about 20 ms per image), and `guess.py` stays as the Python reference. Python stays in a private `.venv`
    in `tools/train/`; packages pinned in `requirements.txt`.
    Learned on the way: RF-DETR's automatic batch size never finishes on Windows (the NVIDIA driver moves GPU memory
    into normal RAM instead of failing, so the "until it does not fit" search runs on); the batch is fixed at 4,
@@ -184,8 +187,13 @@ Each step can be tried on its own.
    - *Speed (RTX 4090, Release):* 4.7 to 5.0 ms per image from captured image to boxes (Python half precision:
      14 ms); about 210 of the 240 images a second; capture unchanged with it running (239.7 images a second, 0.05 ms
      latency; the hand-over costs 0.09 ms of pipeline work per image).
-   - *The GPU is busy:* at 210 images a second the model keeps the GPU nearly fully used. A game on the same GPU
-     will have to share it; if its frame rate drops, a limit on looks per second is the fix (not built yet).
+   - *The GPU is busy:* at 210 images a second the model keeps the GPU nearly fully used. Other GPU work slows: the
+     review's finder took 37 ms per image instead of 5 next to it, so recognition now pauses while reviewing (the
+     user asked). A game on the same GPU will have to share it too; if its frame rate drops, a limit on looks per
+     second is the fix (not built yet).
+   - *The review's finder* (`engine/Finder`) runs the same Detector over a recording, in observex, instead of
+     Python's `guess.py`: the same 40 guesses on a 30-image recording (sureness within 0.002 on average, boxes
+     within 2 pixels), about 1 s to start instead of 5.
    Not yet: the tracker; making it faster (well under the 4.2 ms of one 240 Hz frame: CUDA graphs, cropping the
    game's fixed UI panels, 768 pixels); the playing logic.
 6. **Learn while observing** (the user's idea, 2026-11-01; agreed order). The model already runs while the user

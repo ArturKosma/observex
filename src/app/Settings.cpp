@@ -84,6 +84,11 @@ std::filesystem::path projectFolder() {
     return {};
 }
 
+std::filesystem::path modelFolder(const char* category) {
+    const std::filesystem::path project = projectFolder();
+    return (project.empty() ? appFolder() : project) / L"models" / std::filesystem::path(category);
+}
+
 std::filesystem::path defaultRecordingsFolder() {
     return appFolder() / L"recordings";
 }

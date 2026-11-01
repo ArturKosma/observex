@@ -40,15 +40,18 @@ F3 shows the pipeline's and the recogniser's numbers over the view (hidden by de
 
 Live recognition (step 5 of the training loop): while a screen is observed, the recogniser runs the trained monster
 model (`models/monster/model.onnx`) on every new captured image, on its own thread, whatever is shown: also while
-minimized, reviewing, or with the flag off. **Show** (eye icon, right of the screen button, only while the screen
+minimized or with the flag off. While reviewing it pauses (the user asked, 2026-11-01): the pipeline hands it no
+images, so the review's finder gets the GPU; the model stays loaded and it picks up again when the review closes.
+**Show** (eye icon, right of the screen button, only while the screen
 is shown) is a dropdown of flags like Unreal's view flags: **Monsters** draws a violet box tagged "Monster 81%"
 around each monster found at least 30% sure (saved in observex.cfg as `show-monsters`). Under the flag: how
 recognition is doing ("3 found · 210 images a second · 4.7 ms each"), the progress of preparing a new model for the
 GPU (once per new model, 35 s on the 4090, saved as `model.engine` next to it; later starts load in 0.4 s), or why it
 cannot run (e.g. no model.onnx). Hiding a flag never stops recognition: later flags (and the reactor) rely on it.
 Measured on the 4090: 4.7 ms per image, about 210 images a second; capture unchanged (239.7 images a second, 0.05 ms
-latency). The GPU is then nearly fully used, so a game on it will feel it; a looks-per-second limit is the fix if
-needed (not built).
+latency). The GPU is then nearly fully used, so other GPU work feels it: the finder took 37 ms per image instead of
+5 next to it (hence the pause while reviewing), and a game will too; a looks-per-second limit is the fix if needed
+(not built).
 
 Recording (step 1 of the training loop): **Record** (or Ctrl+Alt+R, a system-wide hotkey that works while the game
 has focus or observex is minimized) saves the observed screen into a new folder named by date and time, e.g.
@@ -71,13 +74,17 @@ the answers are saved. Answers carry forward: a guess on the next image overlapp
 half (`carryAnswers`) gets its answer, tagged "copied". Review shows every image, in order.
 Files, in the recording's folder, in the text format of `core/Marks.h`: `<category>-guesses.txt` (from the finder,
 read only) and `<category>-answers.txt` (written by review; only reviewed images, rewritten through a temporary file
-on every change). The finder (`app/Finder`): when a review opens a recording with images not reviewed yet, and
-`models/<category>/model.pth` exists, and the guesses are missing or older than it, it runs `tools/train/guess.py`
-on the recording as a separate process (no window, in a Windows job object so closing the review or observex ends
-it and the Python it starts). The review opens at once with "Looking for monsters with the trained model / Image N
-of M" at the top (progress read from guess.py's output), and loads the guesses when it is done; the image shown gets
-them unless the user already answered or drew on it. About 5 s to start, then a few hundred images per minute or
-more. It finds the project folder by going up from observex.exe to the folder holding `tools/train/guess.py`.
+on every change). The finder (`engine/Finder`): when a review opens a recording with images not reviewed yet, and
+`models/<category>/model.onnx` exists, and the guesses are missing or older than it, it runs the model over the
+recording inside observex, on its own thread (below-normal priority) and GPU device, with the same `Detector` as
+live recognition: read each JPEG, upload it, detect, then write the guesses through a temporary file. No Python
+(the user asked, 2026-11-01: guess.py took about 5 s just to start). The review opens at once with "Looking for
+monsters with the trained model / Image N of M" at the top (or "Loading the model…", or the preparing progress for a
+new model), and loads the guesses when it is done; the image shown gets them unless the user already answered or
+drew on it. Same guesses as Python's guess.py (40 of 40 marks, sureness within 0.002 on average, boxes within 2
+pixels); about 1 s to start, then about 20 ms per image (JPEG reading included). Models are found by
+`modelFolder()` (`app/Settings`): `models/<category>` in the project folder, found by going up from observex.exe
+to the folder holding `tools/train/guess.py`, else next to observex.exe.
 With no trained model, the review starts empty and says so. While reviewing, the
 pipeline's preview is off and keyboard navigation of buttons is off (the review owns the arrows, Tab and letters).
 The Inter font has no arrow glyphs: write "Left / Right", not arrow characters. The Review button's icon is a
@@ -94,9 +101,9 @@ about 0.1 ms of CPU work per image.
 Training (step 4 of the training loop, `tools/train/`, Python): `train.py` fine-tunes RF-DETR Medium on every
 recording's `<category>-answers.txt` (last fifth of each recording held out for the score) and saves
 `models/<category>/model.pth` (gitignored), then `model.onnx` for live recognition (`export.py`, half-precision
-weights; run it again by hand to re-export a model); `guess.py RECORDING` writes `<category>-guesses.txt` for the
-review (the review runs it by itself, see the finder above; it runs the model in half precision). The review's finder
-still uses Python; live recognition does not.
+weights; run it again by hand to re-export a model). `guess.py RECORDING` writes `<category>-guesses.txt` with the
+Python model (half precision); observex no longer runs it (its own finder does the same, see above), but it stays as
+the Python reference to check observex's results against.
 Its own Python in `tools/train/.venv` (gitignored; setup in `tools/train/README.md`). Training runs on the GPU for
 about 6 minutes on 165 images: run it in the background, never in the foreground, and never two trainings at once
 (two filled the 24 GB, Windows spilled GPU memory into normal RAM, both slowed to half and one hung). Keep the batch
@@ -132,7 +139,10 @@ captures only the screens on that GPU):
   shader squeezes the image to the model's 1024 x 1024 into a buffer shared with CUDA, TensorRT runs the network,
   and only the candidate boxes come back. Hands `Found` (the boxes, surest first) and `RecognizerStats` to the UI.
   TensorRT is loaded at run time from `deps/` (no import libraries); the engine for this GPU is built once per new
-  model.onnx and cached as `model.engine`.
+  model.onnx and cached as `model.engine` (one Detector loads or builds at a time; a second waits, then loads it).
+  Paused while reviewing (the pipeline stops handing it images).
+- **Finder thread** (`engine/Finder`, below-normal priority, only while a review needs guesses): its own GPU device
+  and `Detector`; reads the recording's JPEGs and writes `<category>-guesses.txt`.
 - **Recorder thread** (`engine/Recorder`, below-normal priority, only while recording): its own GPU device reads the
   recording channel into a CPU-readable texture and writes numbered JPEGs (`engine/ImageFile`, WIC). Slow disks or
   encoding can never hold up capture; images that arrive while one is saving replace each other.
@@ -214,9 +224,10 @@ Configuring, building and running the tests and the bench here is fine. Do not l
 - `src/core/`: platform-free building blocks (`TripleBuffer`, `StatWindow`, `Marks`: boxes, answers, the marks file
   format, carrying answers forward). No Windows or GPU headers. Unit tested.
 - `src/engine/`: the real-time pipeline, the recorder and the recogniser (`Gpu`, `ScreenCapture`, `ImageChannel`,
-  `Pipeline`, `Recorder`, `ImageFile`, `Detector`, `Recognizer`). Windows, Direct3D 11, CUDA and TensorRT, no ImGui.
+  `Pipeline`, `Recorder`, `ImageFile`, `Detector`, `Recognizer`, `Finder`). Windows, Direct3D 11, CUDA and TensorRT,
+  no ImGui.
 - `src/app/`: the window and UI (`App`, `MainWindow`, `Theme`, `Widgets`, `ScreenPicker`, `ScreenImage`, `Settings`,
-  `Review`, `Finder`, `Snapshot`, `main`), plus
+  `Review`, `Snapshot`, `main`), plus
   `observex.rc.in` and `Resources.h` (icon, fonts and version info built into the exe).
 - `bench/`: `observex_bench`, the headless pipeline benchmark.
 - `assets/`: the logo (`logo.svg`, `logo.png`) and the app icon (`observex.ico`), all made by `tools/make_logo.py`.

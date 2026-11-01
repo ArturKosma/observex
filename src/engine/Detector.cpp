@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -216,6 +217,10 @@ private:
     std::vector<Phase> phases_;
 };
 
+// One Detector at a time loads or builds an engine: when the live recogniser and the review's finder start together
+// on a new model, the second waits, then loads the engine the first saved instead of building it again.
+std::timed_mutex engineMutex;
+
 std::vector<char> readFile(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -337,6 +342,12 @@ Detector::Detector(ID3D11Device* device, IDXGIAdapter* adapter, const fs::path& 
     if (!d.runtime) {
         throw std::runtime_error("TensorRT could not start: " + d.logger.lastError());
     }
+    std::unique_lock engineLock(engineMutex, std::defer_lock);
+    while (!engineLock.try_lock_for(std::chrono::milliseconds(50))) {
+        if (stop.stop_requested()) {
+            throw std::runtime_error("Stopped while waiting for the model");
+        }
+    }
     if (fs::exists(engineFile, error) && fs::last_write_time(engineFile, error) >= fs::last_write_time(onnxFile, error)) {
         const std::vector<char> saved = readFile(engineFile);
         d.engine.reset(d.runtime->deserializeCudaEngine(saved.data(), saved.size()));
@@ -349,6 +360,7 @@ Detector::Detector(ID3D11Device* device, IDXGIAdapter* adapter, const fs::path& 
             throw std::runtime_error("TensorRT could not load the model it built: " + d.logger.lastError());
         }
     }
+    engineLock.unlock();
     progress.store(1.0f, std::memory_order_relaxed);
 
     // What the model takes and gives: [1, 3, size, size] in, [1, N, 4] boxes and [1, N, C] scores out.

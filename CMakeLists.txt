@@ -35,10 +35,11 @@ add_library(observex_core STATIC
 target_include_directories(observex_core PUBLIC src)
 target_link_libraries(observex_core PRIVATE observex_warnings)
 
-# Engine: the real-time loop (screen capture on its own thread and GPU device), the recorder and the recogniser
-# (a trained model on the GPU through TensorRT). No UI code.
+# Engine: the real-time loop (screen capture on its own thread and GPU device), the recorder, the recogniser (a
+# trained model on the GPU through TensorRT) and the finder (the same model over a recording). No UI code.
 add_library(observex_engine STATIC
     src/engine/Detector.cpp
+    src/engine/Finder.cpp
     src/engine/Gpu.cpp
     src/engine/ImageChannel.cpp
     src/engine/ImageFile.cpp
@@ -56,7 +57,6 @@ set(OBSERVEX_SOURCE_DIR ${CMAKE_SOURCE_DIR})
 configure_file(src/app/observex.rc.in ${CMAKE_BINARY_DIR}/observex.rc @ONLY)
 add_executable(observex
     src/app/App.cpp
-    src/app/Finder.cpp
     src/app/MainWindow.cpp
     src/app/Review.cpp
     src/app/ScreenImage.cpp

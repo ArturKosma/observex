@@ -45,19 +45,18 @@ and fine-tunes it on the answers: everything else it learned (edges, shapes, wha
 hundred images can be enough to start.
 
 At the end, `train.py` also writes `model.onnx` (through `export.py`): the same model in the format observex's live
-detection reads (half-precision weights). observex prepares it for the GPU the first time it observes a screen
-with it (about 35 s on the 4090, once per new model) and saves that as `model.engine` next to it. To export an
-existing `model.pth` again by hand:
+detection and its review read (half-precision weights). observex prepares it for the GPU the first time it uses it
+(about 35 s on the 4090, once per new model) and saves that as `model.engine` next to it. To export an existing
+`model.pth` again by hand:
 
 ```bash
 tools/train/.venv/Scripts/python tools/train/export.py
 ```
 
 `guess.py` runs the model over a recording and writes `monster-guesses.txt` into it, in half precision (about 24 ms
-per image on the 4090 instead of 43, the same guesses, after about 2.5 s of setup). observex's review runs it by
-itself, in the background with no window, when you open a recording whose guesses are missing or older than the
-model, and shows its progress; the guesses then show as marks with how sure the model is, to answer yes or no.
-Running it by hand does the same.
+per image on the 4090 instead of 43, the same guesses, after about 2.5 s of setup). observex no longer needs it:
+its review runs `model.onnx` itself when you open a recording whose guesses are missing or older than the model
+(the same guesses, without starting Python). `guess.py` stays as the Python reference, to check observex against.
 
 Options: `--category` (default `monster`), and for `train.py` `--model nano|small|medium|large` (default `medium`),
 `--resolution` (default 1024: the image is squeezed to that many pixels square, so far-away monsters stay a few
@@ -81,6 +80,6 @@ Windows the NVIDIA driver then moves GPU memory into normal RAM instead of faili
 | --- | --- |
 | `marks.py` | Reads and writes observex's marks files (`src/core/Marks.h` is the same format in C++). |
 | `train.py` | Builds the dataset from the answers, trains RF-DETR, saves the model and its score. |
-| `guess.py` | Writes the model's guesses for a recording. |
+| `guess.py` | Writes the model's guesses for a recording (the Python reference; observex's review does this itself). |
 | `export.py` | Writes `model.onnx` for observex's live detection (`train.py` runs it too). |
 | `requirements.txt` | The pinned Python packages (the last four are for `export.py`). |

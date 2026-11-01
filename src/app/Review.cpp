@@ -1,5 +1,6 @@
 #include "app/Review.h"
 
+#include "app/Settings.h"
 #include "app/Widgets.h"
 #include "engine/ImageFile.h"
 
@@ -79,9 +80,10 @@ Review::Review(ID3D11Device* device, std::filesystem::path folder, const Categor
     }
     loadGuesses();
     answers_ = parseMarks(readTextFile(marksFile(folder_, category_, "answers")));
-    if (answers_.size() < images_.size() && Finder::needed(folder_, category_.id)) {
+    const std::filesystem::path model = modelFolder(category_.id);
+    if (answers_.size() < images_.size() && Finder::needed(folder_, category_.id, model)) {
         try {
-            finder_ = std::make_unique<Finder>(folder_, category_.id);
+            finder_ = std::make_unique<Finder>(folder_, images_, category_.id, model);
         } catch (const std::exception& e) {
             finderError_ = e.what();
         }
@@ -98,7 +100,7 @@ void Review::update() {
     if (!finder_) {
         return;
     }
-    switch (finder_->poll()) {
+    switch (finder_->state()) {
     case Finder::State::Running:
         return;
     case Finder::State::Done:
@@ -392,11 +394,15 @@ void Review::draw(const theme::Fonts& fonts) {
         char detail[200] = {};
         if (finder_) {
             std::snprintf(text, sizeof(text), "Looking for %s with the trained model", category_.nouns);
-            if (finder_->total() > 0) {
+            const float preparing = finder_->preparing();
+            if (finder_->done() > 0) {
                 std::snprintf(detail, sizeof(detail), "Image %d of %d. Its marks show here when it is done.",
                               finder_->done(), finder_->total());
+            } else if (preparing > 0.0f && preparing < 1.0f) {
+                std::snprintf(detail, sizeof(detail), "Preparing the model for this GPU: %.0f%% (once per new model)",
+                              static_cast<double>(preparing * 100.0f));
             } else {
-                std::snprintf(detail, sizeof(detail), "Starting it (a few seconds).");
+                std::snprintf(detail, sizeof(detail), "Loading the model\xE2\x80\xA6");
             }
         } else if (!finderError_.empty()) {
             std::snprintf(text, sizeof(text), "The trained model could not look at this recording.");

@@ -26,6 +26,10 @@ std::filesystem::path appFolder();
 // models are in its models/ folder.
 std::filesystem::path projectFolder();
 
+// Where the trained model for `category` (e.g. "monster") is: models/<category> in the project folder, or next to
+// observex.exe if there is no project folder.
+std::filesystem::path modelFolder(const char* category);
+
 // Where recordings go unless the user picks another folder: "recordings" next to observex.exe.
 std::filesystem::path defaultRecordingsFolder();
 

@@ -29,8 +29,9 @@ public:
 
     // Loads the model in `modelFolder` for images of `width` x `height` on `device`, which was made from `adapter`.
     // The first time after a new model.onnx, TensorRT builds an engine for this GPU and saves it next to it as
-    // model.engine: about a minute or two, during which `progress` goes from 0 to 1 and a stop request ends it.
-    // Later starts load the saved engine in a second or two. Throws on failure, saying why.
+    // model.engine: about 35 s on an RTX 4090, during which `progress` goes from 0 to 1 and a stop request ends it.
+    // Later starts load the saved engine in under a second. Detectors load or prepare one at a time: a second one
+    // waits (a stop request ends the wait). Throws on failure, saying why.
     Detector(ID3D11Device* device, IDXGIAdapter* adapter, const std::filesystem::path& modelFolder, unsigned width,
              unsigned height, std::stop_token stop, std::atomic<float>& progress);
     ~Detector();

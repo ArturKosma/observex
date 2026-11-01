@@ -108,8 +108,10 @@ int App::run() {
         } else if (pipeline_.state() == Pipeline::State::NeedsRestart) {
             observeAgain();
         }
-        // Recognition goes on whatever is shown, minimized too; only a recogniser that stopped needs no images.
-        pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed);
+        // Recognition goes on whatever is shown, minimized too, except while reviewing (the user asked, 2026-11-01):
+        // then the review's finder gets the GPU. With no images the recogniser waits, model loaded, and picks up again
+        // the moment the review closes.
+        pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed && !review_);
         if (!window_->prepareFrame()) {
             pipeline_.setPreviewEnabled(false); // Minimized: nobody sees it.
             picker_->close();
@@ -228,12 +230,10 @@ void App::observe(const Screen& screen) {
         return;
     }
 
-    // The monster model tools/train made: models/monster in the project folder (next to observex.exe if none).
+    // The monster model tools/train made.
     recognizerError_.clear();
-    const std::filesystem::path project = projectFolder();
     try {
-        recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(),
-                                                   (project.empty() ? appFolder() : project) / L"models" / L"monster");
+        recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(), modelFolder("monster"));
     } catch (const std::exception& e) {
         recognizerError_ = e.what();
     }
