@@ -126,7 +126,8 @@ void drawLabel(ImDrawList* drawList, ImVec2 anchor, ImVec2 pivot, const char* te
 
 void drawBox(ImDrawList* drawList, ImVec2 min, ImVec2 max, ImU32 color, float thickness) {
     const float dpi = ImGui::GetStyle().FontScaleDpi;
-    drawList->AddRect(min, max, kHalo, 0.0f, 0, thickness + 2.0f * dpi);
+    const float opacity = static_cast<float>(color >> IM_COL32_A_SHIFT) / 255.0f;
+    drawList->AddRect(min, max, faded(kHalo, opacity), 0.0f, 0, thickness + 2.0f * dpi);
     drawList->AddRect(min, max, color, 0.0f, 0, thickness);
 }
 

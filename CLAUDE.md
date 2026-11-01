@@ -68,7 +68,9 @@ Recording costs capture nothing measurable (bench: 238.7 and 239.3 images/s reco
 Review (step 2 of the training loop, `app/Review`): **Review** asks for a recording's folder (Windows folder picker),
 then "What are we looking for?" (categories in `kCategories`; only Monsters for now), then shows the recording's
 first image not reviewed yet, filling the view. The finder's guesses are drawn as marks with a tag ("Monster? 81%");
-the selected mark gets Yes / No buttons under it (Y / N keys; answering moves to the next unanswered mark). Dragging
+the selected mark gets Yes / No buttons under it (Y / N keys; answering moves to the next unanswered mark), a white
+ring around it, and the other marks fade to 35% (`kOtherMarks`; the user could not tell which of several close
+monsters was selected, 2026-11-01). Dragging
 on the image draws a missed one (yes; Remove / Del deletes it). The bar's middle shows back / "Image 5 of 340 · 11
 reviewed" / forward (Left / Right keys). Moving forward makes the image "reviewed": unanswered marks become no and
 the answers are saved. Answers carry forward: a guess on the next image overlapping an answered mark by at least

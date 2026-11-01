@@ -27,6 +27,9 @@ constexpr ImGuiWindowFlags kAnswerBox = ImGuiWindowFlags_NoDecoration | ImGuiWin
 // Guesses at least this sure start answered yes; the user only flips the wrong ones. On the user's first 64 reviewed
 // images of a new place (2026-11-01), 223 of 230 such guesses were monsters (97%); at 70% to 75% only 81% were.
 constexpr float kPresumeYes = 0.75f;
+// While a mark is selected, the others fade to this opacity, so it is clear which one the Yes / No box asks about
+// when monsters stand close together (the user could not tell, 2026-11-01).
+constexpr float kOtherMarks = 0.35f;
 
 std::string toUtf8(const std::filesystem::path& path) {
     const std::u8string text = path.u8string();
@@ -441,7 +444,8 @@ void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
             }
             const Mark& mark = marks_[i];
             const bool lit = selected || index == hovered_;
-            const ImU32 color = markColor(mark);
+            const float opacity = selected_ >= 0 && !lit ? kOtherMarks : 1.0f;
+            const ImU32 color = theme::faded(markColor(mark), opacity);
             const ImVec2 min = toScreen(mark.box.x, mark.box.y);
             const ImVec2 max = toScreen(mark.box.x + mark.box.width, mark.box.y + mark.box.height);
             const float thickness = (selected ? 3.0f : lit ? 2.5f : mark.answer == Answer::No ? 1.0f : 1.5f) * dpi;
@@ -449,6 +453,17 @@ void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
                 drawList->AddRectFilled(min, max, (color & 0x00FFFFFFu) | 0x22000000u);
             }
             theme::drawBox(drawList, min, max, color, thickness);
+            // The selected one also gets a white ring a little outside it, like keyboard focus; its tag sits on the
+            // ring.
+            ImVec2 tagBoxMin = min;
+            float tagBoxThickness = thickness;
+            if (selected) {
+                const float ring = 2.0f * dpi;
+                const float offset = std::round(thickness * 0.5f + 3.0f * dpi);
+                tagBoxMin = ImVec2(min.x - offset, min.y - offset);
+                tagBoxThickness = ring;
+                theme::drawBox(drawList, tagBoxMin, ImVec2(max.x + offset, max.y + offset), theme::kText, ring);
+            }
 
             // A tag above the box says what it is. Marks answered no only get one while pointed at.
             if (mark.answer == Answer::No && !lit) {
@@ -470,8 +485,9 @@ void Review::drawMarks(ImDrawList* drawList, const theme::Fonts& fonts) const {
                               mark.carried ? "  \xC2\xB7  copied" : "");
             }
             const bool dim = mark.answer == Answer::No;
-            theme::drawTag(drawList, fonts.medium, min, thickness, imageMin_, imageMax, text,
-                           dim ? theme::kSurfaceActive : color, dim ? theme::kText : theme::kBackground);
+            theme::drawTag(drawList, fonts.medium, tagBoxMin, tagBoxThickness, imageMin_, imageMax, text,
+                           dim ? theme::faded(theme::kSurfaceActive, opacity) : color,
+                           theme::faded(dim ? theme::kText : theme::kBackground, opacity));
         }
     }
 

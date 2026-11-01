@@ -21,6 +21,12 @@ inline constexpr ImU32 kYes = IM_COL32(74, 214, 130, 255);   // Review marks ans
 inline constexpr ImU32 kOverlay = IM_COL32(14, 14, 17, 210); // Labels drawn over screen images.
 inline constexpr ImU32 kHalo = IM_COL32(0, 0, 0, 140); // Behind box outlines, so they show on snow as well as rock.
 
+// `color` with its opacity multiplied by `alpha` (0 to 1), e.g. for things pushed into the background.
+constexpr ImU32 faded(ImU32 color, float alpha) {
+    const auto opacity = static_cast<ImU32>(static_cast<float>(color >> IM_COL32_A_SHIFT) * alpha + 0.5f);
+    return (color & ~IM_COL32_A_MASK) | (opacity << IM_COL32_A_SHIFT);
+}
+
 // Same colour as a Win32 COLORREF (0x00BBGGRR), for the window's title bar.
 constexpr unsigned long toColorRef(ImU32 color) {
     return color & 0x00FFFFFFu; // ImU32 is 0xAABBGGRR, so dropping alpha gives COLORREF.
@@ -39,7 +45,8 @@ Fonts apply(float dpiScale);
 // top centre) of the label sits at `anchor`. An optional `detail` goes on a second line in a muted colour.
 void drawLabel(ImDrawList* drawList, ImVec2 anchor, ImVec2 pivot, const char* text, const char* detail = nullptr);
 
-// A box over a screen image, e.g. around a monster: a dark halo, then a `thickness` wide outline in `color`.
+// A box over a screen image, e.g. around a monster: a dark halo, then a `thickness` wide outline in `color`. The
+// halo fades with `color`'s opacity.
 void drawBox(ImDrawList* drawList, ImVec2 min, ImVec2 max, ImU32 color, float thickness);
 
 // The tag naming what a box is, e.g. "Monster 81%": `text` on a `fill` backing, just above the top left corner of

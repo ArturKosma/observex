@@ -32,7 +32,8 @@ Screen capture, recording, reviewing, training and recognising monsters live wor
   While recording, the button shows the time, the number of images and how much disk space they take. Recording
   does not slow capture.
 - **Review**: open a recording, choose what to look for (Monsters for now), and step through its images. Each thing
-  observex marked shows as a box with its guess ("Monster? 81%"); answer it with Yes / No (or the Y / N keys), and
+  observex marked shows as a box with its guess ("Monster? 81%"); the one you are answering has a white ring and the
+  others fade back, so it is clear even among close monsters. Answer it with Yes / No (or the Y / N keys), and
   drag a box around anything it missed. What the model is at least 75% sure of starts as yes ("Monster 92%",
   green; it was right 97% of the time), so you only answer the unsure ones and flip the rare wrong one. Moving on
   with the Right arrow saves the image's answers, and answers carry over to the same thing on the next image.
