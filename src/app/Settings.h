@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/Recordings.h"
+
 #include <windows.h>
 
 #include <filesystem>
@@ -11,7 +13,9 @@ namespace observex {
 struct Settings {
     std::filesystem::path recordingsFolder; // Each recording gets its own folder inside it.
     bool showCharacters = true;             // Show flag: draw the characters found on the observed screen.
-    bool liveLog = true; // Recordings also log what live recognition sees (character-live.txt) and take marks.
+    bool showKinds = true; // Show flag: say which kind each one is (monster, player, ...), with a model that knows.
+    bool liveLog = true;       // Recordings also log what live recognition sees (character-live.txt) and take marks.
+    RecordKind recordKind = RecordKind::Every; // The kind Record last started; the hotkey starts it too.
 
     // Reads `file` (one "key=value" per line, UTF-8). A missing file or key keeps the default.
     static Settings load(const std::filesystem::path& file);

@@ -4,6 +4,7 @@
 
 #include <imgui_impl_dx11.h>
 
+#include <algorithm>
 #include <cstdint>
 
 namespace observex {
@@ -66,17 +67,19 @@ void ScreenImage::imageCopied() {
     hasImage_ = true;
 }
 
-void ScreenImage::draw(ImDrawList* drawList, ImVec2 min, ImVec2 max, float rounding, ImU32 background) const {
-    // The smallest version still at least as wide as the rectangle. Bilinear filtering handles the rest.
+void ScreenImage::draw(ImDrawList* drawList, ImVec2 min, ImVec2 max, float rounding, ImU32 background, ImVec2 uvMin,
+                       ImVec2 uvMax) const {
+    // The smallest version still at least as wide as the whole image drawn at this size. Bilinear filtering handles
+    // the rest.
     std::size_t level = 0;
-    const float drawWidth = max.x - min.x;
+    const float drawWidth = (max.x - min.x) / std::max(uvMax.x - uvMin.x, 1e-6f);
     while (level + 1 < levels_.size() && static_cast<float>(width_ >> (level + 1)) >= drawWidth) {
         ++level;
     }
     const auto texture = static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(levels_[level].Get()));
 
     drawList->AddCallback(setOpaqueBlend, opaque_.Get());
-    drawList->AddImage(texture, min, max);
+    drawList->AddImage(texture, min, max, uvMin, uvMax);
     drawList->AddCallback(ImGui::GetPlatformIO().DrawCallback_ResetRenderState, nullptr);
 
     // A band of background along the edges whose inner side is a rounded rectangle covers the corners.

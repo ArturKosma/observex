@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Question.h"
 #include "core/TripleBuffer.h"
 #include "engine/Gpu.h"
 
@@ -64,6 +65,13 @@ public:
     // While above zero, one image every that many seconds is also copied for recording (see Recorder).
     // Only images the screen actually updated are recorded. Zero (off) costs nothing.
     void setRecordingInterval(unsigned seconds) { recordingInterval_.store(seconds, std::memory_order_relaxed); }
+    // While on, when an image is due for recording the pipeline asks question() whether it is worth it (the
+    // recogniser answers, see Recognizer::kMirrorDisagrees): on yes it records the next new image, on no it waits
+    // for the next due time. Off: recorded when due. Either way the interval counts on from the recorded image (or
+    // the no), so images are at least that far apart.
+    void setRecordOnlyQuestions(bool on) { onlyQuestions_.store(on, std::memory_order_relaxed); }
+    // For the recogniser to answer; it must not outlive the pipeline.
+    Question& question() { return question_; }
     // While recording: also records the next new image, then the interval counts on from it. Costs nothing.
     void recordNow() { recordNow_.store(true, std::memory_order_relaxed); }
     ImageChannel* recording() const { return recording_.get(); }
@@ -93,6 +101,8 @@ private:
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
     std::atomic<unsigned> recordingInterval_{0};
+    std::atomic<bool> onlyQuestions_{false};
+    Question question_;
     std::atomic<bool> recordNow_{false};
     std::atomic<bool> recognitionEnabled_{false};
     std::string error_;

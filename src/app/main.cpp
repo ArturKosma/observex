@@ -26,8 +26,8 @@ ImGuiKey keyNamed(const std::wstring& name) {
     return ImGuiKey_None;
 }
 
-// observex.exe [--snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --key NAME]... [--mouse X Y]
-//              [--recordings FOLDER] [--wait SECONDS]]
+// observex.exe [--snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --right-drag X1 Y1 X2 Y2 |
+//              --scroll X Y TURNS | --key [Ctrl+]NAME]... [--mouse X Y] [--recordings FOLDER] [--wait SECONDS]]
 // The snapshot options draw the UI in a hidden window and save it; see App::Snapshot.
 std::optional<observex::App::Snapshot> readSnapshotOptions() {
     int count = 0;
@@ -48,8 +48,26 @@ std::optional<observex::App::Snapshot> readSnapshotOptions() {
         } else if (snapshot && arg == L"--drag" && i + 4 < count) {
             snapshot->steps.push_back({point(i + 1), point(i + 3)});
             i += 4;
+        } else if (snapshot && arg == L"--right-drag" && i + 4 < count) {
+            snapshot->steps.push_back({point(i + 1), point(i + 3)});
+            snapshot->steps.back().button = ImGuiMouseButton_Right;
+            i += 4;
+        } else if (snapshot && arg == L"--scroll" && i + 3 < count) {
+            snapshot->steps.push_back({point(i + 1), point(i + 1)});
+            snapshot->steps.back().wheel = std::wcstof(args[i + 3], nullptr);
+            i += 3;
         } else if (snapshot && arg == L"--key" && i + 1 < count) {
-            snapshot->steps.push_back({ImVec2(), ImVec2(), keyNamed(args[++i])});
+            std::wstring name = args[++i];
+            // A modifier held with it: "Ctrl+Z", "Shift+RightArrow".
+            ImGuiKey modifier = ImGuiMod_None;
+            if (name.size() > 5 && _wcsnicmp(name.c_str(), L"Ctrl+", 5) == 0) {
+                modifier = ImGuiMod_Ctrl;
+                name = name.substr(5);
+            } else if (name.size() > 6 && _wcsnicmp(name.c_str(), L"Shift+", 6) == 0) {
+                modifier = ImGuiMod_Shift;
+                name = name.substr(6);
+            }
+            snapshot->steps.push_back({ImVec2(), ImVec2(), keyNamed(name), modifier});
         } else if (snapshot && arg == L"--recordings" && i + 1 < count) {
             snapshot->recordingsFolder = args[++i];
         } else if (snapshot && arg == L"--mouse" && i + 2 < count) {

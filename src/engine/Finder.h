@@ -11,9 +11,11 @@
 namespace observex {
 
 // Runs a trained model over a recording and writes its guesses (<category>-guesses.txt in the recording's folder)
-// for the review: on each image, everything at least Recognizer::kMinSure sure. It uses the same Detector as live
-// recognition (TensorRT on the GPU), on its own thread and GPU device, so it starts in under a second once the
-// model is prepared for the GPU, and the UI never waits for it. Talks to the UI only through atomics.
+// for the review: on each image, everything at least Recognizer::kMinSure sure. With a model that gives features
+// (Detector::features), it also writes each guess's features, in the guesses' order, to <category>-features.bin
+// (core/Features), after the guesses: the review re-fits the kinds to the user's answers with them. It uses the same
+// Detector as live recognition (TensorRT on the GPU), on its own thread and GPU device, so it starts in under a
+// second once the model is prepared for the GPU, and the UI never waits for it. Talks to the UI only through atomics.
 class Finder {
 public:
     enum class State : std::uint8_t { Running, Done, Failed };

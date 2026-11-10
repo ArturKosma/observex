@@ -1,5 +1,6 @@
 #include "engine/Recognizer.h"
 
+#include "core/Mirror.h"
 #include "core/StatWindow.h"
 #include "engine/ImageChannel.h"
 #include "engine/LiveLog.h"
@@ -22,8 +23,10 @@ std::int64_t qpcNow() {
 
 } // namespace
 
-Recognizer::Recognizer(const Screen& screen, ImageChannel& channel, std::filesystem::path modelFolder)
-    : modelFolder_(std::move(modelFolder)), width_(channel.width()), height_(channel.height()) {
+Recognizer::Recognizer(const Screen& screen, ImageChannel& channel, std::filesystem::path modelFolder,
+                       Question* question)
+    : modelFolder_(std::move(modelFolder)), question_(question), width_(channel.width()),
+      height_(channel.height()) {
     const Screen own = findOnOwnAdapter(screen); // So this device cannot hold up the pipeline's.
     adapter_ = own.adapter;
     gpu_ = createGpuDevice(own.adapter.Get());
@@ -63,6 +66,8 @@ void Recognizer::run(std::stop_token stop) {
         }
         return;
     }
+    kinds_ = detector->kinds(); // Before Running, which makes it readable.
+    kindAnswers_.store(detector->kindUpdate().answers, std::memory_order_relaxed);
     state_.store(State::Running, std::memory_order_release);
 
     LARGE_INTEGER frequency;
@@ -73,16 +78,24 @@ void Recognizer::run(std::stop_token stop) {
     std::int64_t windowStart = qpcNow();
     Tracker tracker;
     std::array<Detection, Found::kMax> detections;
+    std::array<Detection, Found::kMax> mirrored;
     const std::int64_t timeOrigin = windowStart;
 
     ImageStamp stamp;
     while (!stop.stop_requested()) {
+        // A new kind update: read here, between looks.
+        if (reloadKinds_.exchange(false, std::memory_order_acq_rel)) {
+            const bool used = detector->setKindUpdate(loadKindUpdate(modelFolder_));
+            kindAnswers_.store(used ? detector->kindUpdate().answers : 0, std::memory_order_relaxed);
+        }
         if (reader_->waitForImage(kWaitMs) && reader_->copyNewImage(gpu_.context.Get(), detector->input(), &stamp)) {
             const std::int64_t start = qpcNow();
             const std::shared_ptr<LiveLog> log = log_.load(std::memory_order_acquire);
-            // While logging, also the things it is less sure of, for the log only.
-            const int count = detector->detect(gpu_.context.Get(), log ? LiveLog::kMinSure : kMinSure,
-                                               detections.data(), static_cast<int>(Found::kMax));
+            const bool asked = question_ != nullptr && question_->asked();
+            // While logging or asked, also the things it is less sure of, for the log and the mirror test only.
+            const float minSure = log || asked ? LiveLog::kMinSure : kMinSure;
+            const int count = detector->detect(gpu_.context.Get(), minSure, detections.data(),
+                                               static_cast<int>(Found::kMax));
             if (count < 0) {
                 fail("The GPU stopped running the model (it may have been reset)");
                 return;
@@ -98,11 +111,30 @@ void Recognizer::run(std::stop_token stop) {
             const std::int64_t shownQpc = stamp.shownQpc != 0 ? stamp.shownQpc : start;
             const double timeMs = static_cast<double>(shownQpc - timeOrigin) * msPerTick;
             Found& found = found_.writeSlot();
-            found.count = tracker.update(timeMs, detections.data(), sure, found.things.data(),
-                                         static_cast<int>(Found::kMax));
+            found.count =
+                tracker.update(timeMs, detections.data(), sure, found.things.data(), static_cast<int>(Found::kMax));
             found.image = ++images;
             found_.publish();
             work.add(static_cast<float>(static_cast<double>(qpcNow() - start) * msPerTick));
+
+            // The mirror test, after the UI has what is on the image, so it never holds that up.
+            if (asked) {
+                const int mirroredCount = detector->detect(gpu_.context.Get(), minSure, mirrored.data(),
+                                                           static_cast<int>(Found::kMax), true);
+                if (mirroredCount < 0) {
+                    fail("The GPU stopped running the model (it may have been reset)");
+                    return;
+                }
+                const std::span<const Detection> plain{detections.data(), static_cast<std::size_t>(count)};
+                const std::span<const Detection> turned{mirrored.data(), static_cast<std::size_t>(mirroredCount)};
+                const float disagreement = mirrorDisagreement(plain, turned, kMinSure);
+                // With kinds, also yes when either look is unsure which kind something is.
+                const float closest = closestKinds(plain, turned, kMinSure);
+                question_->answer(disagreement >= kMirrorDisagrees || unsureOfKind(closest));
+                if (log) {
+                    log->mirrored(stamp, disagreement, closest);
+                }
+            }
         }
 
         // Once a second, summarise and hand the numbers to the UI (lock-free).

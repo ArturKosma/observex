@@ -1,8 +1,10 @@
 // observex_bench: measures the capture pipeline from a console, without opening the app window.
 //
-//   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--every S]]
+//   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--every S] [--unsure]]
 //                  [--model FOLDER]
 //   observex_bench --model FOLDER --images FOLDER --out FILE
+//   observex_bench --model FOLDER --replay RECORDING
+//   observex_bench --model FOLDER --update-kinds RECORDINGS
 //   observex_bench --track LOG
 //
 // Lists the screens, runs the real Pipeline on one (the primary by default, or number N from the list)
@@ -17,29 +19,59 @@
 // the smaller versions), so the cost of showing the screen is included. --no-preview measures capture alone.
 //
 // Record: --record saves images into FOLDER the way the app's Record button does, one every S seconds (default 3,
-// like the app), so its cost on capture shows in the numbers. The pulse is near-black, so most saved images show the screen
-// as it is. With --model too, it also writes the live log (e.g. character-live.txt, see engine/LiveLog) like the app,
-// and marks once halfway, as if Ctrl+Alt+M were pressed.
+// like the app), so its cost on capture shows in the numbers. The pulse is near-black, so most saved images show the
+// screen as it is. With --model too, it also writes the live log (e.g. character-live.txt, see engine/LiveLog) like the
+// app, and marks once halfway, as if Ctrl+Alt+M were pressed. --unsure saves a due image only if the model sees it
+// differently mirrored, like Record's "Only unsure" (Pipeline::setRecordOnlyQuestions), and counts the answers.
 //
 // Model: --model runs live recognition with the model in FOLDER (e.g. models/character) the way the app does while
 // observing, and adds its numbers: images recognised per second, milliseconds per image, things found.
 // With --images it looks at the image files of a recording instead of the screen and writes what it found to FILE
 // in the marks format (like tools/train/guess.py's <category>-guesses.txt), to compare with the Python model.
 //
+// Replay: --replay walks a reviewed recording's images in order the way the review does, with its answers as the
+// user, and prints how many guesses each rule pre-fills right and wrong and how many it asks about: the model's own
+// (core/Marks' presumedKind of a guess) and the learning review's (core/KindLearner re-fit before each image to every
+// guess answered so far, then presumedKind), each also with the answers carried forward from the image before as the
+// review does (learning: onto the guesses nudged as below), and how long the fits took. Like the review, the re-fit
+// starts from the kind update when FOLDER holds
+// a valid one, else from model.json's classifier. The guesses and features are the review's finder's (open the
+// recording's review once with the model); its answers say which guess is which (core/Marks' matchAnswers: the yes
+// answer it overlaps most, at least half, or the user's tighter box around it, the surest guess first, else no). Then
+// the box nudge (core/BoxLearner, fitted before each image to the guesses matching a yes answer so far, as the review
+// does): of the guesses the user kept as the finder boxed them and of those they boxed otherwise, how many land within
+// 0.7 and 0.8 overlap of the user's box, as the finder boxed them and nudged, and how long the fits took. No GPU.
+//
+// Kind update: --update-kinds makes the guesses and features of the reviewed recordings in RECORDINGS fresh for the
+// model in FOLDER where they are not (engine/Refresher: the Finder, one recording at a time, as the app does while a
+// review is open), then makes the kind update as closing a review does (engine/KindUpdater), and prints what each did
+// and how long it took. It writes into both folders (guesses, features and FOLDER/kinds-update.json): only ever run it
+// on copies.
+//
 // Track: --track follows the things of a live log (a recording's character-live.txt) with the Tracker, look by look as
-// the recogniser does, and prints how steady the boxes are with and without it, and what following costs. No GPU.
+// the recogniser does, and prints how steady the boxes are with and without it, and what following costs; for a log
+// with kinds (since 2026-11-08), also how often a thing's kind changes. No GPU.
 
+#include "core/BoxLearner.h"
+#include "core/Features.h"
+#include "core/KindLearner.h"
+#include "core/LiveLines.h"
 #include "core/Marks.h"
+#include "core/Mirror.h"
+#include "core/ModelInfo.h"
+#include "core/Recordings.h"
 #include "core/StatWindow.h"
 #include "core/Tracker.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
 #include "engine/ImageFile.h"
+#include "engine/KindUpdater.h"
 #include "engine/LiveLog.h"
 #include "engine/Pipeline.h"
 #include "engine/Recognizer.h"
 #include "engine/Recorder.h"
+#include "engine/Refresher.h"
 #include "engine/ScreenCapture.h"
 
 #include <dwmapi.h>
@@ -55,10 +87,12 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -72,11 +106,14 @@ struct Options {
     bool pulse = true;
     bool preview = true;
     const char* recordFolder = nullptr;
-    unsigned recordEvery = 3; // Seconds between saved images, as the app records.
+    unsigned recordEvery = 3;  // Seconds between saved images, as the app records.
+    bool recordUnsure = false; // Only when the model is unsure, like Record's "Only unsure".
     const char* model = nullptr;
     const char* images = nullptr;
     const char* out = nullptr;
     const char* track = nullptr;
+    const char* replay = nullptr;
+    const char* updateKinds = nullptr;
 };
 
 bool parse(int argc, char** argv, Options& options) {
@@ -93,6 +130,8 @@ bool parse(int argc, char** argv, Options& options) {
             options.recordFolder = argv[++i];
         } else if (std::strcmp(argv[i], "--every") == 0 && i + 1 < argc) {
             options.recordEvery = static_cast<unsigned>(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--unsure") == 0) {
+            options.recordUnsure = true;
         } else if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             options.model = argv[++i];
         } else if (std::strcmp(argv[i], "--images") == 0 && i + 1 < argc) {
@@ -101,16 +140,34 @@ bool parse(int argc, char** argv, Options& options) {
             options.out = argv[++i];
         } else if (std::strcmp(argv[i], "--track") == 0 && i + 1 < argc) {
             options.track = argv[++i];
+        } else if (std::strcmp(argv[i], "--replay") == 0 && i + 1 < argc) {
+            options.replay = argv[++i];
+        } else if (std::strcmp(argv[i], "--update-kinds") == 0 && i + 1 < argc) {
+            options.updateKinds = argv[++i];
         } else {
             std::printf("usage: observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] "
-                        "[--record FOLDER [--every S]] [--model FOLDER]\n"
+                        "[--record FOLDER [--every S] [--unsure]] [--model FOLDER]\n"
                         "       observex_bench --model FOLDER --images FOLDER --out FILE\n"
+                        "       observex_bench --model FOLDER --replay RECORDING\n"
+                        "       observex_bench --model FOLDER --update-kinds RECORDINGS\n"
                         "       observex_bench --track LOG\n");
             return false;
         }
     }
     if (options.images != nullptr && (options.model == nullptr || options.out == nullptr)) {
         std::printf("--images needs --model and --out\n");
+        return false;
+    }
+    if (options.replay != nullptr && options.model == nullptr) {
+        std::printf("--replay needs --model\n");
+        return false;
+    }
+    if (options.updateKinds != nullptr && options.model == nullptr) {
+        std::printf("--update-kinds needs --model\n");
+        return false;
+    }
+    if (options.recordUnsure && (options.recordFolder == nullptr || options.model == nullptr)) {
+        std::printf("--unsure needs --record and --model\n");
         return false;
     }
     return options.seconds > 0 && options.recordEvery > 0;
@@ -204,7 +261,10 @@ private:
     ComPtr<ID3D11ShaderResourceView> view_;
 };
 
-// --images: runs the Detector on each image file of a recording and writes what it found as marks.
+// --images: runs the Detector on each image file of a recording and writes what it found as marks. Also looks at
+// each mirrored, as recording only unsure does, and writes how differently it saw it (core/Mirror) to
+// FILE.mirror.txt, one "IMAGE DISAGREEMENT" line each, to compare with Python; with kinds, each line also says how
+// close any thing's two surest kinds were (core/Detection's closestKinds over both looks).
 int detectImages(const Options& options) {
     namespace fs = std::filesystem;
     std::vector<fs::path> files;
@@ -234,6 +294,11 @@ int detectImages(const Options& options) {
     ImageMarks marks;
     double totalMs = 0.0;
     std::vector<Detection> found(Found::kMax);
+    std::vector<Detection> mirrored(Found::kMax);
+    std::ofstream mirrorOut(std::string(options.out) + ".mirror.txt", std::ios::binary);
+    std::vector<float> disagreements;
+    long long kindsUnsure = 0; // Images where a look was unsure which kind something is.
+    long long unsure = 0;      // Images recording only unsure would save, for either reason.
     for (const fs::path& file : files) {
         const ImageData image = readImageFile(file);
         if (image.width != first.width || image.height != first.height) {
@@ -242,33 +307,63 @@ int detectImages(const Options& options) {
         }
         gpu.context->UpdateSubresource(detector.input(), 0, nullptr, image.bgra.data(), image.width * 4, 0);
         const auto start = std::chrono::steady_clock::now();
-        const int count = detector.detect(gpu.context.Get(), Recognizer::kMinSure, found.data(), Found::kMax);
+        const int count = detector.detect(gpu.context.Get(), LiveLog::kMinSure, found.data(), Found::kMax);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        if (count < 0) {
+        const int mirroredCount =
+            detector.detect(gpu.context.Get(), LiveLog::kMinSure, mirrored.data(), Found::kMax, true);
+        if (count < 0 || mirroredCount < 0) {
             std::printf("The GPU failed on %s\n", file.filename().string().c_str());
             return 1;
         }
         if (file != files.front()) {
             totalMs += ms; // The first run includes TensorRT's warm-up.
         }
+        const std::span<const Detection> plain{found.data(), static_cast<std::size_t>(count)};
+        const std::span<const Detection> turned{mirrored.data(), static_cast<std::size_t>(mirroredCount)};
+        disagreements.push_back(mirrorDisagreement(plain, turned, Recognizer::kMinSure));
+        const float closest = closestKinds(plain, turned, Recognizer::kMinSure);
+        const bool closeKinds = unsureOfKind(closest);
+        kindsUnsure += closeKinds ? 1 : 0;
+        unsure += closeKinds || disagreements.back() >= Recognizer::kMirrorDisagrees ? 1 : 0;
+        mirrorOut << file.filename().string() << ' ' << disagreements.back();
+        if (closest >= 0.0f) {
+            mirrorOut << ' ' << closest;
+        }
+        mirrorOut << '\n';
         std::vector<Mark>& imageMarks = marks[file.filename().string()];
-        for (int i = 0; i < count; ++i) {
+        for (int i = 0; i < count && found[static_cast<std::size_t>(i)].sure >= Recognizer::kMinSure; ++i) {
             const Detection& d = found[static_cast<std::size_t>(i)];
             Mark mark;
             mark.box = {static_cast<int>(std::lround(d.x)), static_cast<int>(std::lround(d.y)),
                         std::max(1, static_cast<int>(std::lround(d.width))),
                         std::max(1, static_cast<int>(std::lround(d.height)))};
             mark.guess = d.sure;
+            mark.kind = d.kind;
+            mark.secondKind = d.secondKind;
+            mark.secondGuess = d.second;
+            mark.kindGuess = d.kindSure;
             imageMarks.push_back(mark);
         }
     }
-    std::ofstream(options.out, std::ios::binary) << formatMarks(marks, "observex_bench --images");
+    const std::vector<std::string_view> kinds(detector.kinds().begin(), detector.kinds().end());
+    std::ofstream(options.out, std::ios::binary) << formatMarks(marks, "observex_bench --images", kinds);
     std::printf("Looked at %zu images: %.2f ms per image (squeeze, model and boxes; after the first). Wrote %s\n",
                 files.size(), files.size() > 1 ? totalMs / static_cast<double>(files.size() - 1) : 0.0, options.out);
+    std::sort(disagreements.begin(), disagreements.end());
+    const auto saved = std::count_if(disagreements.begin(), disagreements.end(),
+                                     [](float d) { return d >= Recognizer::kMirrorDisagrees; });
+    std::printf("Mirror test: median %.3f; %lld of %zu at least %.2f (recording only unsure would save them)\n",
+                static_cast<double>(disagreements[disagreements.size() / 2]), static_cast<long long>(saved),
+                disagreements.size(), static_cast<double>(Recognizer::kMirrorDisagrees));
+    if (!detector.kinds().empty()) {
+        std::printf("Kinds: unsure which kind something is (two kinds under %.2f apart) on %lld; only unsure would "
+                    "save %lld of %zu\n",
+                    static_cast<double>(kKindsClose), kindsUnsure, unsure, disagreements.size());
+    }
     return 0;
 }
 
-// --track: follows the things of a live log with the Tracker and prints how steady the boxes are.
+// --track: follows the things of a live log with the Tracker and prints how steady the boxes are (and the kinds).
 int replayTrack(const Options& options) {
     std::ifstream in(options.track, std::ios::binary);
     if (!in) {
@@ -280,31 +375,34 @@ int replayTrack(const Options& options) {
         double lastMs;
     };
     Tracker tracker;
-    std::vector<Detection> found;
+    std::vector<Detection> looked; // All the last look line logged, with its kinds line's kinds.
+    std::vector<Detection> found;  // What of it the recogniser hands the tracker.
+    std::vector<Detection> before; // `found` of the look before.
     std::array<Tracked, Found::kMax> followed;
-    std::map<std::uint32_t, Life> lives; // Per identity: when it was first and last shown.
+    std::map<std::uint32_t, Life> lives;               // Per identity: when it was first and last shown,
+    std::map<std::uint32_t, std::uint8_t> kindShown;   // and the kind it was shown as last.
     StatWindow cost;
     int looks = 0;
+    bool kinds = false; // The log has kinds lines.
     double firstMs = 0.0;
     double lastMs = 0.0;
     long long previousFound = 0;
     long long previousFollowed = 0;
     long long foundChanges = 0; // Boxes appearing or vanishing between looks, as the model alone shows them.
     long long followedChanges = 0;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.rfind("look ", 0) != 0) {
-            continue;
-        }
-        std::istringstream words(line.substr(5));
-        unsigned long long image = 0;
-        double timeMs = 0.0;
-        words >> image >> timeMs;
+    long long foundKindChanges = 0;    // A thing found on two looks in a row (boxes overlapping half) as another kind.
+    long long followedKindChanges = 0; // A followed thing shown as another kind than on the look before.
+    unsigned long long image = 0;
+    double timeMs = 0.0;
+    const auto boxOf = [](const Detection& thing) {
+        return Box{static_cast<int>(thing.x), static_cast<int>(thing.y), static_cast<int>(thing.width),
+                   static_cast<int>(thing.height)};
+    };
+    const auto follow = [&] {
         found.clear();
-        Detection box;
-        while (words >> box.sure >> box.x >> box.y >> box.width >> box.height) {
-            if (box.sure >= Recognizer::kMinSure) {
-                found.push_back(box);
+        for (const Detection& thing : looked) {
+            if (thing.sure >= Recognizer::kMinSure) {
+                found.push_back(thing);
             }
         }
         const auto start = std::chrono::steady_clock::now();
@@ -321,12 +419,45 @@ int replayTrack(const Options& options) {
         previousFound = static_cast<long long>(found.size());
         previousFollowed = count;
         for (int i = 0; i < count; ++i) {
-            const auto [life, added] =
-                lives.try_emplace(followed[static_cast<std::size_t>(i)].id, Life{timeMs, timeMs});
+            const Tracked& thing = followed[static_cast<std::size_t>(i)];
+            const auto [life, added] = lives.try_emplace(thing.id, Life{timeMs, timeMs});
             life->second.lastMs = timeMs;
+            const auto [shown, first] = kindShown.try_emplace(thing.id, thing.kind);
+            if (!first && shown->second != thing.kind) {
+                ++followedKindChanges;
+                shown->second = thing.kind;
+            }
         }
+        for (const Detection& thing : found) {
+            const Detection* same = nullptr;
+            float most = 0.5f;
+            for (const Detection& old : before) {
+                const float shared = overlap(boxOf(thing), boxOf(old));
+                if (shared >= most) {
+                    most = shared;
+                    same = &old;
+                }
+            }
+            foundKindChanges += same != nullptr && same->kind != thing.kind ? 1 : 0;
+        }
+        before = found;
         lastMs = timeMs;
         ++looks;
+    };
+    std::string line;
+    bool pending = false; // A look read and not followed yet: its kinds line may come next.
+    while (std::getline(in, line)) {
+        if (line.rfind("look ", 0) == 0) {
+            if (pending) {
+                follow();
+            }
+            pending = readLook(line, image, timeMs, looked);
+        } else if (pending && readKinds(line, image, looked)) {
+            kinds = true;
+        }
+    }
+    if (pending) {
+        follow();
     }
     if (looks < 2 || lastMs <= firstMs) {
         std::printf("Not enough looks in %s\n", options.track);
@@ -342,9 +473,308 @@ int replayTrack(const Options& options) {
     std::printf("Boxes appearing or vanishing: %.1f a second from the model alone, %.1f followed\n",
                 static_cast<double>(foundChanges) / seconds, static_cast<double>(followedChanges) / seconds);
     std::printf("Things followed: %zu, of them shown under 50 ms: %d\n", lives.size(), brief);
+    if (kinds) {
+        std::printf("Kinds changing on a thing: %.2f a second from the model alone, %.2f followed\n",
+                    static_cast<double>(foundKindChanges) / seconds, static_cast<double>(followedKindChanges) / seconds);
+    }
     std::printf("Following: %.2f us per look on average, %.2f us at most\n", static_cast<double>(summary.average),
                 static_cast<double>(summary.max));
     return 0;
+}
+
+std::string readAll(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// The kinds the answers name, for a model of `modelKinds`: the review's (core/Marks' kCharacterKindIds) when the model
+// knows their first ones, e.g. a model trained before "can't tell" and "dead" came; else the model's. Read with the
+// model's kinds alone, an answer of a later kind would be left out, and its guess taken for no.
+std::vector<std::string> answerKindsOf(std::vector<std::string> modelKinds) {
+    if (kindsFit(modelKinds, kCharacterKindIds)) {
+        return {std::begin(kCharacterKindIds), std::end(kCharacterKindIds)};
+    }
+    return modelKinds;
+}
+
+// --replay: walks a reviewed recording as the review does, its answers as the user (see the top).
+int replayReview(const Options& options) {
+    namespace fs = std::filesystem;
+    const fs::path model(options.model);
+    const fs::path recording(options.replay);
+    const std::string category = model.filename().string(); // E.g. "character", as the review names its files.
+    const std::string info = readAll(model / L"model.json");
+    const std::vector<std::string> kindNames = parseModelKinds(info);
+    const std::vector<std::string_view> kinds(kindNames.begin(), kindNames.end());
+    KindHead head = kindHeadToUse(model); // The kind update when there is a valid one, as the review starts from.
+    if (kinds.empty() || head.kinds() != static_cast<int>(kinds.size())) {
+        std::printf("%s/model.json has no kinds or no kind head (export the model again)\n", options.model);
+        return 1;
+    }
+    const std::vector<std::string> answerKindNames = answerKindsOf(kindNames);
+    const std::vector<std::string_view> answerKinds(answerKindNames.begin(), answerKindNames.end());
+    const ImageMarks guesses = parseMarks(readAll(recording / (category + "-guesses.txt")), answerKinds);
+    const GuessFeatures features = parseFeatures(readAll(recording / (category + "-features.bin")));
+    const ImageMarks answers = parseMarks(readAll(recording / (category + "-answers.txt")), answerKinds);
+    if (!featuresMatch(features, guesses) || features.size != head.features()) {
+        std::printf("No features of these guesses in %s (open its review once with this model)\n", options.replay);
+        return 1;
+    }
+
+    struct Count {
+        int right = 0;
+        int wrong = 0;
+        int asked = 0;
+        // A pre-filled answer: `kind` for a yes, or KindLearner::kNo; -2 for none (asked).
+        void add(int filled, int truth) { ++(filled == -2 ? asked : filled == truth ? right : wrong); }
+    };
+    Count own;            // The model's own rule, as the review was before it learned.
+    Count learning;       // The learning review's rule.
+    Count ownCarried;     // Each with the answers of the image before carried forward first, as the review does.
+    Count learningCarried;
+    KindLearner learner(std::move(head));
+    std::vector<float> sampleFeatures; // Every guess on the images so far, with its answer.
+    std::vector<int> sampleAnswers;
+    const std::vector<Mark>* before = nullptr; // The answers of the image before, if it is reviewed.
+    double fitMs = 0.0;
+    double longestFitMs = 0.0;
+    int fits = 0;
+    std::size_t lastFit = 0; // Answers the last fit learned from.
+    float ownApart = 0.0f; // The model's own kind sureness from the features against the guesses file's.
+    int images = 0;
+    int changed = 0; // Guesses the learning rule pre-answered otherwise than the model alone.
+    std::size_t guessCount = 0;
+    std::vector<float> ownSure(kinds.size());
+    std::vector<float> learnedSure(kinds.size());
+
+    // The box nudge: per guess matching a yes answer, how close to the user's box it lands as boxed and nudged.
+    struct Close {
+        int count = 0;
+        int within7[2] = {}; // As the finder boxed it, nudged.
+        int within8[2] = {};
+        double overlap[2] = {};
+        void add(const Box& truth, const Box& guess, const Box& nudged) {
+            ++count;
+            const float amounts[2] = {observex::overlap(truth, guess), observex::overlap(truth, nudged)};
+            for (int i = 0; i < 2; ++i) {
+                within7[i] += amounts[i] >= 0.7f ? 1 : 0;
+                within8[i] += amounts[i] >= 0.8f ? 1 : 0;
+                overlap[i] += amounts[i];
+            }
+        }
+    };
+    Close kept;    // The user kept the finder's box.
+    Close redrawn; // The user boxed it otherwise.
+    std::vector<std::string> imageNames; // The recording's images with guesses, in name order, as the review's.
+    for (const auto& image : guesses) {
+        imageNames.push_back(image.first);
+    }
+    BoxLearner boxLearner;
+    BoxSamples boxSamples;
+    boxSamples.size = features.size;
+    double boxFitMs = 0.0;
+    double longestBoxFitMs = 0.0;
+    int boxFits = 0;
+    int place = -1;
+    for (const auto& [name, marks] : guesses) {
+        ++place;
+        const auto answered = answers.find(name);
+        if (answered == answers.end()) {
+            before = nullptr;
+            continue;
+        }
+        ++images;
+        guessCount += marks.size();
+
+        // Which guess is which, as the Python simulation matched them: surest guess first, the yes answer it
+        // overlaps most if at least half (or the user's tighter box around it), else no (KindLearner::kNo, -1).
+        const std::vector<int> truth = matchGuesses(marks, answered->second);
+
+        // The box nudge, fitted for this image to the guesses answered so far, as the review does.
+        {
+            const auto boxStart = std::chrono::steady_clock::now();
+            boxLearner.fit(boxSamples, place);
+            const double boxMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - boxStart).count();
+            if (boxSamples.count() > 0) {
+                boxFitMs += boxMs;
+                longestBoxFitMs = std::max(longestBoxFitMs, boxMs);
+                ++boxFits;
+            }
+            const std::vector<int> matched = matchAnswers(marks, answered->second);
+            for (std::size_t i = 0; i < marks.size(); ++i) {
+                if (matched[i] < 0) {
+                    continue;
+                }
+                const Box& truthBox = answered->second[static_cast<std::size_t>(matched[i])].box;
+                const Box nudgedBox = nudged(marks[i].box, boxLearner.nudge(features.of(name, i)));
+                (truthBox == marks[i].box ? kept : redrawn).add(truthBox, marks[i].box, nudgedBox);
+            }
+            ImageMarks one;
+            one.emplace(name, answered->second);
+            addAnsweredBoxes(guesses, features, one, imageNames, boxSamples);
+        }
+
+        // Re-fit to everything answered so far, as entering the image does.
+        const auto start = std::chrono::steady_clock::now();
+        learner.fit(sampleFeatures, sampleAnswers);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        if (!sampleAnswers.empty()) {
+            fitMs += ms;
+            longestFitMs = std::max(longestFitMs, ms);
+            ++fits;
+            lastFit = sampleAnswers.size();
+        }
+
+        std::vector<Mark> ownMarks = marks;     // As the review shows them without learning,
+        std::vector<Mark> learnedMarks = marks; // and with, their boxes nudged (before carrying, as the review).
+        for (std::size_t i = 0; i < learnedMarks.size(); ++i) {
+            learnedMarks[i].box = nudged(marks[i].box, boxLearner.nudge(features.of(name, i)));
+        }
+        std::vector<int> presumed;
+        for (std::size_t i = 0; i < marks.size(); ++i) {
+            learner.sure(features.of(name, i), ownSure, learnedSure);
+            ownApart = std::max(ownApart, std::abs(ownSure[marks[i].kind] - kindGuessOf(marks[i])));
+            showKinds(learnedMarks[i], learnedSure);
+            presumed.push_back(presumedKind(ownSure, learnedSure));
+        }
+        const auto filled = [](const Mark& mark) {
+            return mark.answer == Answer::Yes ? mark.kind : mark.answer == Answer::No ? KindLearner::kNo : -2;
+        };
+        std::vector<int> ownPresumed;
+        for (const Mark& mark : marks) {
+            ownPresumed.push_back(presumedKind(mark));
+        }
+        std::vector<Mark> plain = ownMarks;
+        presumeKinds(plain, ownPresumed);
+        for (std::size_t i = 0; i < marks.size(); ++i) {
+            own.add(filled(plain[i]), truth[i]);
+            learning.add(presumed[i] >= 0 ? presumed[i] : -2, truth[i]);
+            changed += filled(plain[i]) != (presumed[i] >= 0 ? presumed[i] : -2) ? 1 : 0;
+        }
+        if (before != nullptr) {
+            carryAnswers(*before, ownMarks, ownPresumed);
+            carryAnswers(*before, learnedMarks, presumed);
+        }
+        presumeKinds(ownMarks, ownPresumed);
+        presumeKinds(learnedMarks, presumed);
+        for (std::size_t i = 0; i < marks.size(); ++i) {
+            ownCarried.add(filled(ownMarks[i]), truth[i]);
+            learningCarried.add(filled(learnedMarks[i]), truth[i]);
+        }
+
+        // The user answered them all: the next fit learns from these too, but for a kind the model does not know yet
+        // (as core/KindLearner's addAnsweredGuesses).
+        for (std::size_t i = 0; i < marks.size(); ++i) {
+            if (truth[i] >= learner.kinds()) {
+                continue;
+            }
+            const std::span<const float> feature = features.of(name, i);
+            sampleFeatures.insert(sampleFeatures.end(), feature.begin(), feature.end());
+            sampleAnswers.push_back(truth[i]);
+        }
+        before = &answered->second;
+    }
+
+    std::printf("Replayed %d reviewed images of %s: %zu guesses\n", images, options.replay, guessCount);
+    std::printf("                                      pre-filled right  wrong  asked\n");
+    const auto line = [](const char* rule, const Count& count) {
+        std::printf("  %-36s %16d %6d %6d\n", rule, count.right, count.wrong, count.asked);
+    };
+    line("the model alone (before 2026-11-08)", own);
+    line("learning (the model and the re-fit)", learning);
+    std::printf("  with the answers of the image before carried forward first, as the review does:\n");
+    line("the model alone", ownCarried);
+    line("learning", learningCarried);
+    std::printf("Learning pre-answered %d guesses otherwise than the model alone\n", changed);
+    std::printf("Fits: %d, %.1f ms on average, %.1f ms at most (the last with %zu answers)\n", fits,
+                fits > 0 ? fitMs / fits : 0.0, longestFitMs, lastFit);
+    std::printf("The model's own kind sureness from the features is within %.4f of the guesses file's\n",
+                static_cast<double>(ownApart));
+    std::printf("Box nudge: guesses matching a yes answer, how many land within 0.7 / 0.8 overlap of the user's box\n");
+    const auto closeLine = [](const char* which, const Close& close) {
+        const double count = std::max(close.count, 1);
+        std::printf("  %-28s %4d: as boxed %3.0f%% / %3.0f%% (overlap %.2f), nudged %3.0f%% / %3.0f%% (overlap %.2f)\n",
+                    which, close.count, 100.0 * close.within7[0] / count, 100.0 * close.within8[0] / count,
+                    close.overlap[0] / count, 100.0 * close.within7[1] / count, 100.0 * close.within8[1] / count,
+                    close.overlap[1] / count);
+    };
+    closeLine("boxed otherwise by the user", redrawn);
+    closeLine("kept as the finder boxed", kept);
+    std::printf("Box fits: %d, %.1f ms on average, %.1f ms at most (the last with %zu guesses)\n", boxFits,
+                boxFits > 0 ? boxFitMs / boxFits : 0.0, longestBoxFitMs, boxSamples.count());
+    return 0;
+}
+
+// What --update-kinds learns: the only category so far (app/Review.h's kCategories), whatever FOLDER is called.
+constexpr char kKindsCategory[] = "character";
+
+// --update-kinds: makes the reviewed recordings' guesses fresh, then the kind update (see the top).
+int updateKinds(const Options& options) {
+    namespace fs = std::filesystem;
+    using Clock = std::chrono::steady_clock;
+    const fs::path model(options.model);
+    const fs::path recordings(options.updateKinds);
+    const std::vector<std::string> modelKinds = parseModelKinds(readAll(model / L"model.json"));
+    if (modelKinds.empty()) {
+        std::printf("%s/model.json names no kinds\n", options.model);
+        return 1;
+    }
+    const std::vector<std::string> kinds = answerKindsOf(modelKinds);
+    const auto seconds = [](Clock::time_point since) {
+        return std::chrono::duration<double>(Clock::now() - since).count();
+    };
+
+    // The reviewed recordings whose guesses are not from this model, and their images.
+    const std::vector<std::string_view> kindIds(kinds.begin(), kinds.end());
+    const std::vector<fs::path> stale = KindUpdater::stale(recordings, kKindsCategory, kindIds, model);
+    std::size_t images = 0;
+    for (const fs::path& folder : stale) {
+        images += listImages(folder).size();
+    }
+    std::printf("%zu reviewed recordings need fresh guesses (%zu images)\n", stale.size(), images);
+    const Clock::time_point refreshStart = Clock::now();
+    Refresher refresher(recordings, kKindsCategory, kinds, model);
+    int shown = 0;
+    while (!refresher.done()) {
+        if (refresher.refreshed() != shown) {
+            shown = refresher.refreshed();
+            std::printf("  %d of %d fresh (%.1f s)\n", shown, refresher.stale(), seconds(refreshStart));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const double refreshSeconds = seconds(refreshStart);
+    std::printf("Made %d of %d recordings' guesses fresh in %.1f s (%.1f ms per image)%s%s\n", refresher.refreshed(),
+                refresher.stale(), refreshSeconds,
+                images > 0 ? refreshSeconds * 1000.0 / static_cast<double>(images) : 0.0,
+                refresher.error().empty() ? "" : ": ", refresher.error().c_str());
+
+    const Clock::time_point updateStart = Clock::now();
+    KindUpdater updater(recordings, kKindsCategory, kinds, model);
+    while (updater.state() == KindUpdater::State::Running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    switch (updater.state()) {
+    case KindUpdater::State::Done:
+        std::printf("Kind update written to %s: %zu answers from %zu recordings, fit %.0f ms (%.2f s in all)\n",
+                    (model / kKindUpdateFile).string().c_str(), updater.answers(), updater.recordings(),
+                    updater.fitMs(), seconds(updateStart));
+        return 0;
+    case KindUpdater::State::NothingNew:
+        std::printf("Nothing new: no answers newer than the model, or than the kind update there (%.2f s)\n",
+                    seconds(updateStart));
+        return 0;
+    case KindUpdater::State::NeedsGuesses:
+        std::printf("Not made: %zu reviewed recordings' guesses are not from this model:\n",
+                    updater.staleRecordings().size());
+        for (const fs::path& folder : updater.staleRecordings()) {
+            std::printf("  %s\n", folder.string().c_str());
+        }
+        return 1;
+    default:
+        std::printf("Not made: %s\n", updater.error().c_str());
+        return 1;
+    }
 }
 
 } // namespace
@@ -356,6 +786,17 @@ int main(int argc, char** argv) {
     }
     if (options.track != nullptr) {
         return replayTrack(options);
+    }
+    if (options.replay != nullptr) {
+        return replayReview(options);
+    }
+    if (options.updateKinds != nullptr) {
+        try {
+            return updateKinds(options);
+        } catch (const std::exception& e) {
+            std::printf("%s\n", e.what());
+            return 1;
+        }
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); // Required by DuplicateOutput1.
     if (options.images != nullptr) {
@@ -400,7 +841,8 @@ int main(int argc, char** argv) {
             }
             std::unique_ptr<Recognizer> recognizer;
             if (options.model != nullptr) {
-                recognizer = std::make_unique<Recognizer>(screen, *pipeline.recognition(), options.model);
+                recognizer = std::make_unique<Recognizer>(screen, *pipeline.recognition(), options.model,
+                                                          &pipeline.question());
                 pipeline.setRecognitionEnabled(true);
                 std::printf("Loading the model");
                 while (recognizer->state() == Recognizer::State::Starting) {
@@ -432,6 +874,7 @@ int main(int argc, char** argv) {
                     recognizer->setLog(log);
                 }
                 recorder = std::make_unique<Recorder>(screen, *pipeline.recording(), options.recordFolder, 1, log);
+                pipeline.setRecordOnlyQuestions(options.recordUnsure);
                 pipeline.setRecordingInterval(options.recordEvery);
             }
             bool marked = false;
@@ -442,7 +885,11 @@ int main(int argc, char** argv) {
 
             std::printf("\nObserving %s (%s) for %d s (pulse %s, preview %s, recording %s, recognition %s)\n",
                         screen.monitor.c_str(), screen.name.c_str(), options.seconds, options.pulse ? "on" : "off",
-                        options.preview ? "on" : "off", recorder ? "on" : "off", recognizer ? "on" : "off");
+                        options.preview ? "on" : "off",
+                        !recorder              ? "off"
+                        : options.recordUnsure ? "only unsure"
+                                               : "on",
+                        recognizer ? "on" : "off");
             std::printf("  images/s  merged/s  latency avg / max ms  work avg / max ms%s\n",
                         recognizer ? "  recognised/s  recognise avg / max ms  found" : "");
 

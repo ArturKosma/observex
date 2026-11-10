@@ -14,6 +14,8 @@ constexpr float kSpeedFollow = 0.3f;
 float centreX(const Detection& box) { return box.x + box.width * 0.5f; }
 float centreY(const Detection& box) { return box.y + box.height * 0.5f; }
 
+std::size_t kindOf(const Detection& box) { return std::min<std::size_t>(box.kind, kMaxKinds - 1); }
+
 } // namespace
 
 int Tracker::update(double timeMs, const Detection* found, int count, Tracked* out, int max) {
@@ -88,6 +90,12 @@ int Tracker::update(double timeMs, const Detection* found, int count, Tracked* o
                 thing.speedY = speedY;
             }
             thing.sure += static_cast<float>(1.0 - std::exp(-elapsed / kSmoothSureMs)) * (box.sure - thing.sure);
+            const float follow = static_cast<float>(1.0 - std::exp(-elapsed / kSmoothKindMs));
+            for (std::size_t k = 0; k < track.kinds.size(); ++k) {
+                track.kinds[k] += follow * ((k == kindOf(box) ? kindSureOf(box) : 0.0f) - track.kinds[k]);
+            }
+            thing.kind = static_cast<std::uint8_t>(std::max_element(track.kinds.begin(), track.kinds.end()) -
+                                                   track.kinds.begin());
         }
         thing.x = box.x;
         thing.y = box.y;
@@ -119,6 +127,7 @@ int Tracker::update(double timeMs, const Detection* found, int count, Tracked* o
         }
         Track track;
         static_cast<Detection&>(track.thing) = found[f];
+        track.kinds[kindOf(found[f])] = kindSureOf(found[f]);
         track.thing.id = nextId_++;
         track.firstMs = timeMs;
         track.lastMs = timeMs;

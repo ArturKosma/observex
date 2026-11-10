@@ -131,22 +131,49 @@ void drawBox(ImDrawList* drawList, ImVec2 min, ImVec2 max, ImU32 color, float th
     drawList->AddRect(min, max, color, 0.0f, 0, thickness);
 }
 
-void drawTag(ImDrawList* drawList, ImFont* font, ImVec2 boxMin, float thickness, ImVec2 areaMin, ImVec2 areaMax,
-             const char* text, ImU32 fill, ImU32 textColor) {
+namespace {
+
+// A tag's text size, and its padding around the text.
+float tagTextSize() {
+    return std::round(ImGui::GetFontSize() * 0.87f);
+}
+
+ImVec2 tagPadding() {
     const float dpi = ImGui::GetStyle().FontScaleDpi;
-    const float size = std::round(ImGui::GetFontSize() * 0.87f);
-    const ImVec2 padding(std::round(5.0f * dpi), std::round(2.0f * dpi));
-    const ImVec2 textSize = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+    return ImVec2(std::round(5.0f * dpi), std::round(2.0f * dpi));
+}
+
+} // namespace
+
+Area drawTag(ImDrawList* drawList, ImFont* font, ImVec2 boxMin, ImVec2 boxMax, float thickness, ImVec2 areaMin,
+             ImVec2 areaMax, const char* text, ImU32 fill, ImU32 textColor) {
+    const Area tag = placeTag(font, boxMin, boxMax, thickness, areaMin, areaMax, text);
+    drawTagAt(drawList, font, tag, text, fill, textColor);
+    return tag;
+}
+
+void drawTagAt(ImDrawList* drawList, ImFont* font, Area tag, const char* text, ImU32 fill, ImU32 textColor) {
+    const ImVec2 padding = tagPadding();
+    drawList->AddRectFilled(tag.min, tag.max, fill, 3.0f * ImGui::GetStyle().FontScaleDpi);
+    drawList->AddText(font, tagTextSize(), ImVec2(tag.min.x + padding.x, tag.min.y + padding.y), textColor, text);
+}
+
+Area placeTag(ImFont* font, ImVec2 boxMin, ImVec2 boxMax, float thickness, ImVec2 areaMin, ImVec2 areaMax,
+              const char* text) {
+    const ImVec2 padding = tagPadding();
+    const ImVec2 textSize = font->CalcTextSizeA(tagTextSize(), FLT_MAX, 0.0f, text);
     const ImVec2 tagSize(textSize.x + padding.x * 2.0f, textSize.y + padding.y * 2.0f);
     const float half = thickness * 0.5f;
     ImVec2 min(boxMin.x - half, boxMin.y - half - tagSize.y);
     if (min.y < areaMin.y) {
-        min.y = boxMin.y + half; // No room above: inside the box.
+        min.y = boxMax.y + half; // No room above: below the box.
+        if (min.y + tagSize.y > areaMax.y) {
+            min.y = boxMin.y + half; // Nor below: inside it.
+        }
     }
     min.x = std::max(std::min(min.x, areaMax.x - tagSize.x), areaMin.x);
     min = ImVec2(std::round(min.x), std::round(min.y));
-    drawList->AddRectFilled(min, ImVec2(min.x + tagSize.x, min.y + tagSize.y), fill, 3.0f * dpi);
-    drawList->AddText(font, size, ImVec2(min.x + padding.x, min.y + padding.y), textColor, text);
+    return {min, ImVec2(min.x + tagSize.x, min.y + tagSize.y)};
 }
 
 void drawLogo(ImDrawList* drawList, ImVec2 centre, float size) {

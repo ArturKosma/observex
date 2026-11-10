@@ -33,8 +33,13 @@ public:
     LiveLog(const LiveLog&) = delete;
     LiveLog& operator=(const LiveLog&) = delete;
 
-    // The recogniser looked at image `stamp` and found `count` things in `found`.
+    // The recogniser looked at image `stamp` and found `count` things in `found` (core/LiveLines: with their kinds, for
+    // a model with kinds).
     void looked(const ImageStamp& stamp, const Detection* found, int count);
+    // Asked whether image `stamp` is worth recording, the recogniser looked at it again mirrored and saw it
+    // `disagreement` differently (core/Mirror); `closestKinds` is core/Detection's closestKinds over both looks, -1
+    // (not written) for a model without kinds.
+    void mirrored(const ImageStamp& stamp, float disagreement, float closestKinds = -1.0f);
     // The recorder saved image `stamp` as `name`.
     void saved(const ImageStamp& stamp, const char* name);
     // The user marked this moment; `number` counts the marks from 1. Also writes everything so far to the disk.

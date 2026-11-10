@@ -2,12 +2,14 @@
 
 #include "core/Detection.h"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
 namespace observex {
 
-// A thing the tracker follows. Its box is where it is now; `sure` is smoothed over the last few looks.
+// A thing the tracker follows. Its box is where it is now; `sure` is smoothed over the last few looks, and `kind` is
+// the one the model has been surest of lately.
 struct Tracked : Detection {
     std::uint32_t id = 0; // The same while it is followed; never given to another thing.
     float speedX = 0.0f;  // How fast it moves on the screen, in pixels per millisecond.
@@ -26,6 +28,8 @@ struct Tracked : Detection {
 //   ornament next to a Nightmare Weaver at 30-45%, 2026-11-01) never shows, while a real thing that dips stays.
 // - A thing that is not found is held where its speed takes it, for as long as it was seen, up to kHoldMs; so a
 //   one-look dip in a crowd does not blink, and a short false alarm is not stretched.
+// - Its kind is the one it was found as most, weighted by sureness, over about the last kSmoothKindMs, so a thing
+//   the model is torn about does not flicker between kinds.
 // - Each look's things are matched to the followed ones by where those are heading, nearest first, so a fast
 //   camera turn (100 pixels between looks) keeps them. A box that lies inside a followed one is the same thing
 //   too, so a close character cut by the screen edge keeps its identity.
@@ -36,9 +40,16 @@ public:
     // Measured on five live logs (2026-11-01): the ornament shown 0.2 s instead of 5.6 s in 34 s, boxes appearing
     // or vanishing 6.0 -> 3.0 a second on that log and fewer on the others, real things still covered as before;
     // a thing first seen at 30-50% shows a little later (at most 54 ms instead of 21 on the fight log).
-    static constexpr float kStartSure = 0.5f;
+    // 0.5 -> 0.6 on 2026-11-08 (the user asked for steadier live boxes): replaying the tenth model's three live logs
+    // of 2026-11-07, boxes appearing or vanishing 2.14 -> 1.36 a second, at the 220 answered images 993 -> 983 of
+    // 1051 characters shown and 107 -> 89 boxes on nothing marked; on six older logs 6.47 -> 5.31 a second, 3736 ->
+    // 3691 of 4459 shown, 872 -> 774 on nothing. kConfirmLooks 2 found more but was jumpier on the older logs.
+    static constexpr float kStartSure = 0.6f;
     static constexpr double kHoldMs = 150.0;
     static constexpr double kSmoothSureMs = 60.0; // How quickly `sure` follows the model's.
+    // How quickly the kind follows the model's: slower than sureness. A first guess (2026-11-02), before any model
+    // with kinds; live logs record kinds since 2026-11-08, so observex_bench --track can measure it on the next ones.
+    static constexpr double kSmoothKindMs = 300.0;
     // A thing found farther than kMaxDistance from where a followed one is heading (in the larger side of the two
     // boxes), or much bigger or smaller (kMinAreaRatio), is another thing. One held through a gap may be
     // kReachPerMs farther for each millisecond it was not seen.
@@ -57,7 +68,8 @@ public:
 
 private:
     struct Track {
-        Tracked thing;       // As last found (box), plus speed and smoothed sureness.
+        Tracked thing;       // As last found (box), plus speed, smoothed sureness and kind.
+        std::array<float, kMaxKinds> kinds{}; // Per kind: how sure the model has been lately that it is that kind.
         double firstMs = 0.0; // When it was first found, and last found.
         double lastMs = 0.0;
         int looks = 0; // Looks it was found on.

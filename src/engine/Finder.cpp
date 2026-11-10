@@ -1,5 +1,6 @@
 #include "engine/Finder.h"
 
+#include "core/Features.h"
 #include "core/Marks.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
@@ -33,6 +34,27 @@ fs::path fromUtf8(const std::string& text) {
 std::string toUtf8(const fs::path& path) {
     const std::u8string text = path.u8string();
     return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+}
+
+// A found thing's box in whole image pixels, as the guesses file has it.
+Box boxOf(const Detection& thing) {
+    return {static_cast<int>(std::lround(thing.x)), static_cast<int>(std::lround(thing.y)),
+            std::max(1, static_cast<int>(std::lround(thing.width))),
+            std::max(1, static_cast<int>(std::lround(thing.height)))};
+}
+
+// Writes `bytes` to `file` through a temporary file, so the review never reads half of it.
+void save(const fs::path& file, const std::string& bytes) {
+    fs::path temporary = file;
+    temporary += L".tmp";
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        out << bytes;
+        if (!out) {
+            throw std::runtime_error("Could not save " + toUtf8(file));
+        }
+    }
+    fs::rename(temporary, file);
 }
 
 } // namespace
@@ -78,6 +100,7 @@ void Finder::run(std::stop_token stop) {
         unsigned height = 0;
         std::array<Detection, Detector::kMaxCandidates> found;
         ImageMarks guesses;
+        GuessFeatures features; // Of each guess, for a model that gives them.
         for (const std::string& name : images_) {
             if (stop.stop_requested()) {
                 return;
@@ -96,37 +119,57 @@ void Finder::run(std::stop_token stop) {
             if (count < 0) {
                 throw std::runtime_error("The GPU stopped running the model (it may have been reset).");
             }
+            // Reading order, so Tab in the review goes top to bottom. The features follow the same order.
+            const auto end = found.begin() + count;
+            std::sort(found.begin(), end, [](const Detection& a, const Detection& b) {
+                const Box first = boxOf(a);
+                const Box second = boxOf(b);
+                return first.y != second.y ? first.y < second.y : first.x < second.x;
+            });
             std::vector<Mark>& marks = guesses[name];
-            for (int i = 0; i < count; ++i) {
-                const Detection& thing = found[static_cast<std::size_t>(i)];
+            for (auto thing = found.begin(); thing != end; ++thing) {
                 Mark mark;
-                mark.box = {static_cast<int>(std::lround(thing.x)), static_cast<int>(std::lround(thing.y)),
-                            std::max(1, static_cast<int>(std::lround(thing.width))),
-                            std::max(1, static_cast<int>(std::lround(thing.height)))};
-                mark.guess = thing.sure;
+                mark.box = boxOf(*thing);
+                mark.guess = thing->sure;
+                mark.kind = thing->kind; // With kinds, the surest and the next, so the review can tell when it is unsure.
+                mark.secondKind = thing->secondKind;
+                mark.secondGuess = thing->second;
+                mark.kindGuess = thing->kindSure;
                 marks.push_back(mark);
             }
-            // Reading order, so Tab in the review goes top to bottom.
-            std::sort(marks.begin(), marks.end(), [](const Mark& a, const Mark& b) {
-                return a.box.y != b.box.y ? a.box.y < b.box.y : a.box.x < b.box.x;
-            });
+            features.size = detector->featureSize();
+            if (features.size > 0) {
+                std::vector<float>& numbers = features.images[name];
+                numbers.resize(marks.size() * static_cast<std::size_t>(features.size));
+                if (!detector->features({found.data(), marks.size()}, numbers.data())) {
+                    throw std::runtime_error("The GPU stopped running the model (it may have been reset).");
+                }
+            }
             done_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // Through a temporary file, so the review never reads half of it.
-        const fs::path file = guessesFile(folder_, category_);
-        fs::path temporary = file;
-        temporary += L".tmp";
-        {
-            std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-            out << formatMarks(guesses, "observex guesses, category: " + category_ + ", by models/" + category_ +
-                                            "/model.onnx.\nEach mark: how sure the model is (0 to 1), then x, y, "
-                                            "width and height in image pixels.");
-            if (!out) {
-                throw std::runtime_error("Could not save " + toUtf8(file));
+        // The model's kinds, by the words the review knows them by (empty for a model of one category).
+        std::vector<std::string_view> kinds;
+        if (detector) {
+            for (const std::string& kind : detector->kinds()) {
+                kinds.push_back(kind);
             }
         }
-        fs::rename(temporary, file);
+        save(guessesFile(folder_, category_),
+             formatMarks(guesses,
+                         "observex guesses, category: " + category_ + ", by models/" + category_ +
+                             "/model.onnx.\nEach mark: how sure the model is (0 to 1), " +
+                             (kinds.empty() ? std::string() : "the kind it is surest of, the next with how sure, ") +
+                             "then x, y, width and height in image pixels.",
+                         kinds));
+        // After the guesses, so features newer than the guesses are theirs (the review checks).
+        const fs::path featuresFile = folder_ / (category_ + "-features.bin");
+        if (features.size > 0) {
+            save(featuresFile, formatFeatures(features));
+        } else {
+            std::error_code error;
+            fs::remove(featuresFile, error); // An older model's: not of these guesses.
+        }
         state_.store(State::Done, std::memory_order_release);
     } catch (const std::exception& e) {
         if (!stop.stop_requested()) {

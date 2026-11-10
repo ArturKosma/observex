@@ -4,6 +4,7 @@
 
 #include <wincodec.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -81,7 +82,7 @@ void writeImageFile(const std::filesystem::path& path, ImageFormat format, const
     check(encoder->Commit(), "IWICBitmapEncoder::Commit");
 }
 
-ImageData readImageFile(const std::filesystem::path& path) {
+ImageData readImageFile(const std::filesystem::path& path, unsigned fitWidth) {
     const ComScope com;
     ComPtr<IWICImagingFactory> factory;
     check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)),
@@ -92,9 +93,25 @@ ImageData readImageFile(const std::filesystem::path& path) {
           "Open the image file");
     ComPtr<IWICBitmapFrameDecode> frame;
     check(decoder->GetFrame(0, &frame), "IWICBitmapDecoder::GetFrame");
+    ComPtr<IWICBitmapSource> source = frame;
+
+    // Shrunk while reading: the JPEG decoder skips most of the work for 1/2, 1/4 and 1/8 sizes, the scaler does the
+    // rest.
+    UINT width = 0;
+    UINT height = 0;
+    check(frame->GetSize(&width, &height), "IWICBitmapFrameDecode::GetSize");
+    ComPtr<IWICBitmapScaler> scaler;
+    if (fitWidth > 0 && width > fitWidth) {
+        const UINT fitHeight =
+            std::max(1u, static_cast<UINT>((static_cast<std::uint64_t>(height) * fitWidth + width / 2) / width));
+        check(factory->CreateBitmapScaler(&scaler), "IWICImagingFactory::CreateBitmapScaler");
+        check(scaler->Initialize(frame.Get(), fitWidth, fitHeight, WICBitmapInterpolationModeFant), "Shrink the image");
+        source = scaler;
+    }
+
     ComPtr<IWICFormatConverter> converter;
     check(factory->CreateFormatConverter(&converter), "IWICImagingFactory::CreateFormatConverter");
-    check(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
+    check(converter->Initialize(source.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
                                 WICBitmapPaletteTypeCustom),
           "Convert the image to BGRA");
 

@@ -8,6 +8,7 @@
 #include <imgui_impl_win32.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <charconv>
 #include <cmath>
@@ -25,6 +26,7 @@ constexpr char kPickerPopup[] = "screens";
 constexpr char kSettingsPopup[] = "settings";
 constexpr char kShowPopup[] = "show";
 constexpr char kCategoryPopup[] = "What are we looking for?";
+constexpr char kRecordPopup[] = "What do we record?";
 constexpr char kRecordingsPopup[] = "recordings";
 constexpr char kChooseText[] = "Choose a screen to observe";
 constexpr char kHotkeyText[] = "Ctrl+Alt+R";
@@ -32,10 +34,28 @@ constexpr int kRecordHotkey = 0; // MainWindow hotkey ids.
 constexpr int kMarkHotkey = 1;
 // What live recognition looks for: its model folder, live log, Show flag and box tags.
 constexpr const Category& kLive = kCategories[0];
-// Seconds between saved images while recording. Neighbouring images are near copies, so the user asked for one
-// every 3 s (2026-11-01) rather than more to review. Fixed, no setting.
+// Seconds between saved images while recording (at least, recording only unsure). Neighbouring images are near
+// copies, so the user asked for one every 3 s (2026-11-01) rather than more to review. Fixed, no setting.
 constexpr unsigned kRecordingInterval = 3;
 constexpr int kSnapshotStepFrames = 36; // Snapshot frames are 16 ms apart, so each step gets about 0.6 s.
+
+// The category's kinds by the words its answers files use ("monster", ...), in order.
+std::vector<std::string> kindIdsOf(const Category& category) {
+    std::vector<std::string> ids;
+    for (const Kind& kind : category.kinds) {
+        ids.emplace_back(kind.id);
+    }
+    return ids;
+}
+
+// "10,234": a count with its thousands apart.
+std::string formatCount(std::size_t count) {
+    std::string digits = std::to_string(count);
+    for (std::size_t at = digits.size(); at > 3; at -= 3) {
+        digits.insert(at - 3, 1, ',');
+    }
+    return digits;
+}
 
 void centredText(const char* text, ImU32 color, float y) {
     const float width = ImGui::CalcTextSize(text).x;
@@ -70,6 +90,32 @@ void formatBytes(char* text, std::size_t size, std::uint64_t bytes) {
     }
 }
 
+// One choice in a chooser popup, as a tile: its name and, under it, what it means. Drawn at the cursor; returns true
+// when clicked. A disabled one is dimmed and cannot be clicked.
+bool choiceTile(const char* id, const char* name, const char* description, ImVec2 size, const theme::Fonts& fonts,
+                float dpi, bool enabled = true) {
+    const ImVec2 padding(std::round(14.0f * dpi), std::round(11.0f * dpi));
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    ImGui::PushID(id);
+    ImGui::BeginDisabled(!enabled);
+    const bool clicked = ImGui::InvisibleButton("##choice", size);
+    ImGui::EndDisabled();
+    ImGui::PopID();
+    const bool hovered = enabled && ImGui::IsItemHovered();
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    const ImVec2 max = ImGui::GetItemRectMax();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddRectFilled(min, max, hovered ? theme::kSurfaceActive : theme::kSurfaceHover, 8.0f * dpi);
+    drawList->AddRect(min, max, hovered ? theme::kAccent : theme::kBorderHover, 8.0f * dpi, 0, 1.0f);
+    drawList->AddText(fonts.medium, ImGui::GetFontSize(), ImVec2(min.x + padding.x, min.y + padding.y),
+                      enabled ? theme::kText : theme::kTextMuted, name);
+    drawList->AddText(ImVec2(min.x + padding.x, max.y - padding.y - ImGui::GetTextLineHeight()), theme::kTextMuted,
+                      description);
+    return clicked;
+}
+
 // When `file` was last written, in local time: "2026-11-01 09:44". "missing" if there is no such file.
 std::string fileTime(const std::filesystem::path& file) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -85,8 +131,9 @@ std::string fileTime(const std::filesystem::path& file) {
     return text;
 }
 
-// When a recording started, for the review's list: "Today, 12:56", "31 Oct, 23:59", or "31 Oct 2025, 23:59" in
-// another year. `started` is RecordingInfo::started ("2026-10-31 23:59:49"); shown as it is if it is not that.
+// When a recording started or was last reviewed, for the review's list: "Today, 12:56", "Yesterday, 22:05",
+// "31 Oct, 23:59", or "31 Oct 2025, 23:59" in another year. `started` is local time as in RecordingInfo::started
+// ("2026-10-31 23:59:49"); shown as it is if it is not that.
 std::string describeWhen(const std::string& started) {
     static constexpr const char* kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
@@ -104,12 +151,18 @@ std::string describeWhen(const std::string& started) {
     if (month < 1 || month > 12 || day == 0) {
         return started;
     }
-    SYSTEMTIME today;
-    GetLocalTime(&today);
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    namespace chrono = std::chrono;
+    const chrono::year_month_day date{chrono::year(static_cast<int>(year)), chrono::month(month), chrono::day(day)};
+    const chrono::year_month_day today{chrono::year(now.wYear), chrono::month(now.wMonth), chrono::day(now.wDay)};
+    const chrono::year_month_day yesterday{chrono::sys_days(today) - chrono::days(1)};
     char text[40];
-    if (year == today.wYear && month == today.wMonth && day == today.wDay) {
+    if (date == today) {
         std::snprintf(text, sizeof(text), "Today, %02u:%02u", hour, minute);
-    } else if (year == today.wYear) {
+    } else if (date == yesterday) {
+        std::snprintf(text, sizeof(text), "Yesterday, %02u:%02u", hour, minute);
+    } else if (year == now.wYear) {
         std::snprintf(text, sizeof(text), "%u %s, %02u:%02u", day, kMonths[month - 1], hour, minute);
     } else {
         std::snprintf(text, sizeof(text), "%u %s %u, %02u:%02u", day, kMonths[month - 1], year, hour, minute);
@@ -148,17 +201,37 @@ int App::run() {
             recordingError_ = "Recording stopped. " + recorder_->error();
             stopRecording();
         }
+        if (recording_ && recorder_) {
+            const unsigned saved = recording_->saved + recorder_->saved();
+            if (recordingDone(saved)) {
+                stopRecording();
+                recordingError_ = "Recording done: " + std::to_string(saved) + " images. Record again in a new place.";
+            }
+        }
 
         // Starting and stopping happen here, outside an ImGui frame, so no draw data points at freed images.
         if (closeReview_) {
-            review_.reset();
+            closeReview();
             closeReview_ = false;
         }
         if (review_) {
             review_->update(); // The finder's progress, also while minimized.
+            // Then the GPU is free for the other reviewed recordings' guesses, until the review closes.
+            if (!review_->finding() && !refresher_) {
+                const Category& category = review_->category();
+                refresher_ = std::make_unique<Refresher>(settings_.recordingsFolder, category.id, kindIdsOf(category),
+                                                         modelFolder(category.id), review_->folder());
+            }
+        }
+        // A new kind update: live recognition picks kinds with it from its next look.
+        if (kindUpdater_ && kindUpdater_->state() != KindUpdater::State::Running) {
+            if (kindUpdater_->state() == KindUpdater::State::Done && recognizer_) {
+                recognizer_->reloadKinds();
+            }
+            kindUpdater_.reset();
         }
         if (chosen_) {
-            review_.reset();  // Picking a screen is asking to see it.
+            closeReview();    // Picking a screen is asking to see it.
             stopRecording();  // A recording is of one screen.
             picker_->close(); // Its capture of the chosen screen goes first; the pipeline takes over.
             observe(*chosen_);
@@ -168,7 +241,7 @@ int App::run() {
         }
         // Recognition goes on whatever is shown, minimized too, except while reviewing (the user asked, 2026-11-01):
         // then the review's finder gets the GPU. With no images the recogniser waits, model loaded, and picks up again
-        // the moment the review closes.
+        // the moment the review closes. Recording only unsure saves nothing meanwhile: nobody answers its questions.
         pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed && !review_);
         if (!window_->prepareFrame()) {
             pipeline_.setPreviewEnabled(false); // Minimized: nobody sees it.
@@ -241,6 +314,7 @@ void App::init() {
         markHotkeyRegistered_ = window_->registerHotkey(kMarkHotkey, MOD_CONTROL | MOD_ALT, 'M');
     }
     picker_ = std::make_unique<ScreenPicker>(gpu_.device.Get(), gpuAdapter_.Get());
+    thumbnails_ = std::make_unique<Thumbnails>(gpu_.device.Get());
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -258,10 +332,13 @@ void App::init() {
 }
 
 void App::shutdown() {
-    review_.reset();
+    refresher_.reset(); // Its finder writes nothing.
+    review_.reset();    // Closing observex while reviewing makes no kind update.
+    kindUpdater_.reset(); // One still at work writes nothing.
     stopRecording();
     stopObserving();
     picker_.reset();
+    thumbnails_.reset();
     if (imguiReady_) {
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();
@@ -294,16 +371,18 @@ void App::observe(const Screen& screen) {
     // The model tools/train made.
     recognizerError_.clear();
     try {
-        recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(), modelFolder(kLive.id));
+        // It answers recording only unsure's questions.
+        recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(), modelFolder(kLive.id),
+                                                   &pipeline_.question());
     } catch (const std::exception& e) {
         recognizerError_ = e.what();
     }
 }
 
 void App::stopObserving() {
-    pauseRecording();     // The recorder reads from the pipeline's channel; it goes first.
-    recognizer_.reset();  // So does the recogniser.
-    preview_.reset();     // Before the pipeline frees the channel it reads from.
+    pauseRecording();    // The recorder reads from the pipeline's channel; it goes first.
+    recognizer_.reset(); // So does the recogniser.
+    preview_.reset();    // Before the pipeline frees the channel it reads from.
     observedImage_.reset();
     pipeline_.setRecognitionEnabled(false);
     pipeline_.stop();
@@ -335,15 +414,20 @@ bool App::canRecord() const {
     return observed_ && pipeline_.recording() != nullptr && pipeline_.state() != Pipeline::State::Failed;
 }
 
+bool App::canRecordUnsure() const {
+    return recognizer_ && recognizer_->state() != Recognizer::State::Failed;
+}
+
 void App::toggleRecording() {
     if (recording_) {
         stopRecording();
     } else {
-        startRecording();
+        const RecordKind kind = settings_.recordKind; // The kind picked last.
+        startRecording(kind == RecordKind::Every || canRecordUnsure() ? kind : RecordKind::Every);
     }
 }
 
-void App::startRecording() {
+void App::startRecording(RecordKind kind) {
     if (recording_ || !canRecord()) {
         return;
     }
@@ -378,14 +462,15 @@ void App::startRecording() {
     recording_ = Recording{folder, std::chrono::steady_clock::now()};
     recording_->log = std::move(log);
     char started[24];
-    std::snprintf(started, sizeof(started), "%04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay,
-                  now.wHour, now.wMinute, now.wSecond);
+    std::snprintf(started, sizeof(started), "%04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay, now.wHour,
+                  now.wMinute, now.wSecond);
     RecordingInfo& info = recording_->info;
     info.started = started;
     info.screen = observed_->monitor;
     info.width = pipeline_.width();
     info.height = pipeline_.height();
     info.every = kRecordingInterval;
+    info.kind = kind;
     resumeRecording();
     // The folder exists once the recorder runs. Without the file the review would not list this recording.
     if (recording_ && !writeRecordingInfo(recording_->folder, recording_->info)) {
@@ -397,6 +482,7 @@ void App::resumeRecording() {
     try {
         recorder_ = std::make_unique<Recorder>(*observed_, *pipeline_.recording(), recording_->folder,
                                                recording_->saved + 1, recording_->log);
+        pipeline_.setRecordOnlyQuestions(recording_->info.kind == RecordKind::Unsure);
         pipeline_.setRecordingInterval(kRecordingInterval);
         if (recognizer_) {
             recognizer_->setLog(recording_->log);
@@ -430,6 +516,7 @@ void App::stopRecording() {
             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - recording_->started)
                 .count());
         info.images = recording_->saved;
+        info.reviewed = readRecordingInfo(recording_->folder).reviewed; // If it was reviewed while it ran.
         if (!writeRecordingInfo(recording_->folder, info)) {
             recordingError_ = "Could not write " + toUtf8((recording_->folder / kRecordingFile).c_str());
         }
@@ -457,9 +544,24 @@ void App::openRecordings() {
     for (RecordingEntry& entry : listRecordings(settings_.recordingsFolder)) {
         RecordingRow row;
         row.when = describeWhen(entry.info.started);
-        row.images = Review::listImages(entry.folder).size();
+        const std::vector<std::string> images = listImages(entry.folder);
+        row.images = images.size();
+        if (!images.empty()) {
+            const std::string& first = images.front(); // UTF-8.
+            row.firstImage = entry.folder / std::u8string(reinterpret_cast<const char8_t*>(first.data()), first.size());
+        }
         for (const Category& category : kCategories) {
             row.reviewed.push_back(Review::countReviewed(entry.folder, category));
+        }
+        // The latest of its categories' (the times sort as text).
+        std::string reviewed;
+        for (const auto& [category, time] : entry.info.reviewed) {
+            reviewed = std::max(reviewed, time);
+        }
+        if (!reviewed.empty()) {
+            std::string when = describeWhen(reviewed);
+            when[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(when[0]))); // "today"; a date: "6 Nov".
+            row.lastReviewed = "Last reviewed " + when;
         }
         row.entry = std::move(entry);
         recordings_.push_back(std::move(row));
@@ -473,6 +575,21 @@ void App::startReview(const Category& category) {
         review_ = std::make_unique<Review>(gpu_.device.Get(), reviewFolder_, category);
     } catch (const std::exception& e) {
         reviewError_ = std::string("Could not open the recording: ") + e.what();
+    }
+}
+
+void App::closeReview() {
+    if (!review_) {
+        return;
+    }
+    const Category& category = review_->category();
+    refresher_.reset(); // Its finder writes nothing.
+    review_.reset();    // Saves when, if it changed the answers.
+    // Not in snapshot mode: it would write into models/, which tests must leave alone.
+    if (!snapshot_) {
+        kindUpdater_.reset(); // One still at work stops first: the new one learns from everything it would.
+        kindUpdater_ = std::make_unique<KindUpdater>(settings_.recordingsFolder, category.id, kindIdsOf(category),
+                                                     modelFolder(category.id));
     }
 }
 
@@ -490,7 +607,22 @@ bool App::playSnapshot() {
         const Snapshot::Step& input = snapshot_->steps[static_cast<std::size_t>(step)];
         if (input.key != ImGuiKey_None) {
             if (frame == 1 || frame == 2) {
-                io.AddKeyEvent(input.key, frame == 1);
+                const bool down = frame == 1;
+                if (input.modifier != ImGuiMod_None && down) {
+                    io.AddKeyEvent(input.modifier, true);
+                }
+                io.AddKeyEvent(input.key, down);
+                if (input.modifier != ImGuiMod_None && !down) {
+                    io.AddKeyEvent(input.modifier, false);
+                }
+            }
+            return false;
+        }
+        if (input.wheel != 0.0f) {
+            if (frame == 0) {
+                io.AddMousePosEvent(input.from.x, input.from.y);
+            } else if (frame == 1) {
+                io.AddMouseWheelEvent(0.0f, input.wheel);
             }
             return false;
         }
@@ -500,13 +632,13 @@ bool App::playSnapshot() {
         if (frame == 0) {
             io.AddMousePosEvent(input.from.x, input.from.y);
         } else if (frame == 1) {
-            io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+            io.AddMouseButtonEvent(input.button, true);
         } else if (frame <= 1 + moveFrames) {
             const float t = static_cast<float>(frame - 1) / static_cast<float>(moveFrames);
             io.AddMousePosEvent(input.from.x + (input.to.x - input.from.x) * t,
                                 input.from.y + (input.to.y - input.from.y) * t);
         } else if (frame == 2 + moveFrames) {
-            io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+            io.AddMouseButtonEvent(input.button, false);
         }
         return false;
     }
@@ -582,16 +714,25 @@ void App::drawTopBar(float height) {
     const ImVec2 settingsCorner(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap);
 
     BarButton recordButton;
-    char detail[96];
+    char detail[128];
     if (recording_) {
+        // How far it is and how long is left, so the user knows how much more to walk around (the user asked,
+        // 2026-11-02 and 03): "02:15 · 38 of 110 images · about 4 min left".
         const unsigned saved = recording_->saved + (recorder_ ? recorder_->saved() : 0);
-        const std::uint64_t savedBytes = recording_->savedBytes + (recorder_ ? recorder_->savedBytes() : 0);
+        const auto elapsed = std::chrono::steady_clock::now() - recording_->started;
         char duration[16];
-        formatDuration(duration, sizeof(duration), std::chrono::steady_clock::now() - recording_->started);
-        char bytes[16];
-        formatBytes(bytes, sizeof(bytes), savedBytes);
-        const int length = std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u %s  \xC2\xB7  %s", duration, saved,
-                                         saved == 1 ? "image" : "images", bytes);
+        formatDuration(duration, sizeof(duration), elapsed);
+        const double secondsLeft = recordingSecondsLeft(recording_->info.kind, kRecordingInterval, saved,
+                                                        std::chrono::duration<double>(elapsed).count());
+        char left[32];
+        if (secondsLeft < 60.0) {
+            std::snprintf(left, sizeof(left), "under a minute left");
+        } else {
+            std::snprintf(left, sizeof(left), "about %.0f min left", secondsLeft / 60.0);
+        }
+        const int length = std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u of %u images  \xC2\xB7  %s",
+                                         duration, saved, kRecordImages, left);
+        recordButton.progress = static_cast<float>(saved) / static_cast<float>(kRecordImages);
         if (recording_->marks > 0 && length > 0) {
             std::snprintf(detail + length, sizeof(detail) - static_cast<std::size_t>(length), "  \xC2\xB7  %u %s",
                           recording_->marks, recording_->marks == 1 ? "mark" : "marks");
@@ -606,20 +747,44 @@ void App::drawTopBar(float height) {
         recordButton.text = "Record";
         recordButton.detail = hotkeyRegistered_ || snapshot_ ? kHotkeyText : nullptr;
         recordButton.enabled = canRecord();
+        recordButton.open = ImGui::IsPopupOpen(kRecordPopup);
     }
     x -= std::round(8.0f * dpiScale_) + recordButton.width(fonts_);
     ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
     if (recordButton.draw("##record", fonts_)) {
-        toggleRecording();
+        if (recording_) {
+            stopRecording();
+        } else {
+            ImGui::OpenPopup(kRecordPopup); // Which kind, then it starts.
+        }
     }
     if (ImGui::IsItemHovered() && !recordButton.enabled) {
         ImGui::SetTooltip("Choose a screen to record it");
-    } else if (ImGui::IsItemHovered() && recording_ && recording_->log) {
-        ImGui::SetTooltip("Saving an image every %u s, and what the model sees on every image it looks at.\n"
-                          "Ctrl+Alt+M marks a moment to talk about later (it saves the image shown then too).",
-                          kRecordingInterval);
     } else if (ImGui::IsItemHovered() && recording_) {
-        ImGui::SetTooltip("Saving an image every %u s.", kRecordingInterval);
+        char bytes[16];
+        formatBytes(bytes, sizeof(bytes), recording_->savedBytes + (recorder_ ? recorder_->savedBytes() : 0));
+        char saving[200];
+        if (recording_->info.kind == RecordKind::Unsure) {
+            std::snprintf(saving, sizeof(saving),
+                          "Saving an image where the model is unsure, at most one every %u s, until %u (%s so far)",
+                          kRecordingInterval, kRecordImages, bytes);
+        } else {
+            std::snprintf(saving, sizeof(saving), "Saving an image every %u s, until %u (%s so far)",
+                          kRecordingInterval, kRecordImages, bytes);
+        }
+        if (recording_->log) {
+            ImGui::SetTooltip("%s.\nThe log keeps what the model sees on every image it looks at.\n"
+                              "Ctrl+Alt+M marks a moment to talk about later (it saves the image shown then too).",
+                              saving);
+        } else {
+            ImGui::SetTooltip("%s.", saving);
+        }
+    }
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap), ImGuiCond_Always,
+                            ImVec2(1.0f, 0.0f));
+    if (ImGui::BeginPopup(kRecordPopup)) {
+        drawRecordChooser();
+        ImGui::EndPopup();
     }
 
     // Review, left of Record: opens a recording to answer what observex found in it, or closes the review.
@@ -769,6 +934,49 @@ void App::drawSettings() {
                             : "Ctrl+Alt+M is taken by another app, so moments cannot be marked.");
 }
 
+void App::drawRecordChooser() {
+    // The Record button asks what to save (the user asked, 2026-11-02): images at a steady pace, or only those the
+    // model is unsure about. Both stop after kRecordImages. The pick is kept for the hotkey.
+    const float dpi = dpiScale_;
+    ImGui::PushFont(fonts_.medium, 18.0f);
+    ImGui::TextUnformatted(kRecordPopup);
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f * dpi));
+
+    const ImVec2 tileSize(std::round(400.0f * dpi), std::round(60.0f * dpi));
+    char name[32];
+    std::snprintf(name, sizeof(name), "Every %u s", kRecordingInterval);
+    char description[96];
+    const bool canUnsure = canRecordUnsure();
+    constexpr char kNeedsModel[] = "Needs the model, and it is not running";
+    std::optional<RecordKind> picked;
+    std::snprintf(description, sizeof(description), "%u images, one every %u seconds, whatever is on the screen",
+                  kRecordImages, kRecordingInterval);
+    if (choiceTile("every", name, description, tileSize, fonts_, dpi)) {
+        picked = RecordKind::Every;
+    }
+    std::snprintf(description, sizeof(description), "%u images the model is unsure about", kRecordImages);
+    if (choiceTile("unsure", "Only unsure", canUnsure ? description : kNeedsModel, tileSize, fonts_, dpi, canUnsure)) {
+        picked = RecordKind::Unsure;
+    }
+    ImGui::Dummy(ImVec2(0.0f, 2.0f * dpi));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + tileSize.x);
+    ImGui::TextDisabled("Both stop by themselves after %u images, or when you stop them. Unsure: when an image is due "
+                        "(every %u s), the model looks at it again mirrored, and it is saved if the model sees it "
+                        "differently, about two times in three in a new place. That finds its mistakes, also the ones "
+                        "it is sure of. %s starts the kind picked last.",
+                        kRecordImages, kRecordingInterval, kHotkeyText);
+    ImGui::PopTextWrapPos();
+    if (picked) {
+        ImGui::CloseCurrentPopup();
+        if (settings_.recordKind != *picked) {
+            settings_.recordKind = *picked;
+            saveSettings();
+        }
+        startRecording(*picked);
+    }
+}
+
 void App::drawShowFlags() {
     // Each flag only says what is drawn: hiding characters does not stop looking for them.
     ImGui::TextDisabled("Draw over the screen");
@@ -781,8 +989,7 @@ void App::drawShowFlags() {
     char text[256];
     if (!recognizer_) {
         std::snprintf(text, sizeof(text), "%s",
-                      recognizerError_.empty() ? "Not looking: the screen is not captured."
-                                               : recognizerError_.c_str());
+                      recognizerError_.empty() ? "Not looking: the screen is not captured." : recognizerError_.c_str());
     } else if (recognizer_->state() == Recognizer::State::Starting) {
         const float preparing = recognizer_->preparing();
         if (preparing > 0.0f) {
@@ -805,6 +1012,32 @@ void App::drawShowFlags() {
     ImGui::TextDisabled("%s", text);
     ImGui::PopTextWrapPos();
     ImGui::Unindent(indent);
+
+    // Kinds (the user asked, 2026-11-02): which kind each character is, once the model has learnt them.
+    const bool knowsKinds =
+        recognizer_ && recognizer_->state() == Recognizer::State::Running && !recognizer_->kinds().empty();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f * dpiScale_));
+    ImGui::BeginDisabled(!knowsKinds || !settings_.showCharacters);
+    if (ImGui::Checkbox("Kinds", &settings_.showKinds)) {
+        saveSettings();
+    }
+    ImGui::EndDisabled();
+    ImGui::Indent(indent);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
+    if (knowsKinds) {
+        ImGui::TextDisabled("Monster, player, NPC, you or dead, each in its own colour, as in the review. "
+                            "\"Character?\" in silver: a character it cannot tell the kind of, e.g. far off.");
+        // With a kind update (engine/KindUpdater): it picks kinds with what it learned from the answers since.
+        if (const std::size_t answers = recognizer_->kindAnswers(); answers > 0) {
+            ImGui::TextDisabled("Kinds also learned from %s of your answers", formatCount(answers).c_str());
+        }
+    } else if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+        ImGui::TextDisabled("Needs a model trained with kinds: check them in the review, then train with --kinds.");
+    } else {
+        ImGui::TextDisabled("Monster, player, NPC, you or dead, once the model is running and has learnt them.");
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::Unindent(indent);
 }
 
 void App::drawReviewSteps(float height) {
@@ -821,7 +1054,12 @@ void App::drawReviewSteps(float height) {
     char position[64];
     std::snprintf(position, sizeof(position), "Image %zu of %zu", review_->index() + 1, review_->imageCount());
     char reviewed[64];
-    std::snprintf(reviewed, sizeof(reviewed), "%zu reviewed", review_->reviewedCount());
+    if (const std::size_t toCheck = review_->toCheckCount(); toCheck > 0) {
+        std::snprintf(reviewed, sizeof(reviewed), "%zu reviewed  \xC2\xB7  %zu to check", review_->reviewedCount(),
+                      toCheck);
+    } else {
+        std::snprintf(reviewed, sizeof(reviewed), "%zu reviewed", review_->reviewedCount());
+    }
     const float fontSize = ImGui::GetFontSize();
     const float positionWidth = fonts_.medium->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, position).x;
     const float reviewedWidth = ImGui::CalcTextSize(reviewed).x;
@@ -850,21 +1088,27 @@ void App::drawReviewSteps(float height) {
     if (forward.draw("##forward", fonts_)) {
         review_->next();
     }
-    if (ImGui::IsItemHovered() && forward.enabled) {
-        ImGui::SetTooltip("Next image (Right arrow)");
+    // Shift+Right: on to the next image with something to check, while there is one.
+    const char* skip = review_->toCheckCount() > 0 ? "\nShift+Right: next image to check" : "";
+    if (ImGui::IsItemHovered() && forward.enabled && review_->kindsToCheck()) {
+        ImGui::SetTooltip("The kinds here are right: next image (Right arrow)%s", skip);
+    } else if (ImGui::IsItemHovered() && forward.enabled) {
+        ImGui::SetTooltip("Next image (Right arrow)%s", skip);
     } else if (ImGui::IsItemHovered() && review_->unansweredCount() > 0) {
         ImGui::SetTooltip("Answer every mark on this image first (%d left)", review_->unansweredCount());
     }
 }
 
 void App::drawRecordings() {
-    // The Review button's list: every recording in the recordings folder, newest first. Picking one asks what to
-    // look for in it next.
+    // The Review button's list: every recording in the recordings folder, newest first, each with a picture of its
+    // first image (the user asked, 2026-11-02). Picking one asks what to look for in it next.
     if (!ImGui::BeginPopup(kRecordingsPopup)) {
         return;
     }
     const float dpi = dpiScale_;
-    const ImVec2 tileSize(std::round(400.0f * dpi), std::round(58.0f * dpi));
+    const ImVec2 tileSize(std::round(520.0f * dpi), std::round(88.0f * dpi));
+    const float inset = std::round(8.0f * dpi); // Around the picture.
+    const ImVec2 pictureSize(std::round((tileSize.y - inset * 2.0f) * 16.0f / 9.0f), tileSize.y - inset * 2.0f);
     ImGui::PushFont(fonts_.medium, 18.0f);
     ImGui::TextUnformatted("Review a recording");
     ImGui::PopFont();
@@ -880,7 +1124,8 @@ void App::drawRecordings() {
         ImGui::EndPopup();
         return;
     }
-    const ImVec2 padding(std::round(14.0f * dpi), std::round(10.0f * dpi));
+    const float textGap = std::round(14.0f * dpi); // Between the picture and the text, and after the text.
+    const float lineGap = std::round(6.0f * dpi);
     const float spacing = ImGui::GetStyle().ItemSpacing.y;
     const float listHeight = std::min(static_cast<float>(recordings_.size()) * (tileSize.y + spacing) - spacing,
                                       std::round(ImGui::GetMainViewport()->Size.y * 0.6f));
@@ -897,10 +1142,35 @@ void App::drawRecordings() {
         }
         const ImVec2 max = ImGui::GetItemRectMax();
         ImDrawList* drawList = ImGui::GetWindowDrawList();
-        drawList->AddRectFilled(min, max, hovered ? theme::kSurfaceActive : theme::kSurfaceHover, 8.0f * dpi);
+        const ImU32 tileColor = hovered ? theme::kSurfaceActive : theme::kSurfaceHover;
+        drawList->AddRectFilled(min, max, tileColor, 8.0f * dpi);
         drawList->AddRect(min, max, hovered ? theme::kAccent : theme::kBorderHover, 8.0f * dpi, 0, 1.0f);
-        drawList->AddText(fonts_.medium, ImGui::GetFontSize(), ImVec2(min.x + padding.x, min.y + padding.y),
-                          theme::kText, row.when.c_str());
+
+        // The picture on the left: an empty frame until it is read (only rows in view are read), or if it cannot
+        // be. Fitted into the frame, keeping its shape.
+        const ImVec2 frameMin(min.x + inset, min.y + inset);
+        const ImVec2 frameMax(frameMin.x + pictureSize.x, frameMin.y + pictureSize.y);
+        const float pictureRounding = 5.0f * dpi;
+        drawList->AddRectFilled(frameMin, frameMax, theme::kBackground, pictureRounding);
+        const ScreenImage* picture = ImGui::IsItemVisible() ? thumbnails_->get(row.firstImage) : nullptr;
+        if (picture) {
+            const float scale = std::min(pictureSize.x / static_cast<float>(picture->width()),
+                                         pictureSize.y / static_cast<float>(picture->height()));
+            const ImVec2 size(std::round(static_cast<float>(picture->width()) * scale),
+                              std::round(static_cast<float>(picture->height()) * scale));
+            const ImVec2 pictureMin(std::round(frameMin.x + (pictureSize.x - size.x) * 0.5f),
+                                    std::round(frameMin.y + (pictureSize.y - size.y) * 0.5f));
+            picture->draw(drawList, pictureMin, ImVec2(pictureMin.x + size.x, pictureMin.y + size.y), pictureRounding,
+                          tileColor);
+        }
+
+        // Right of it, in the middle of the row: when, then the details, then when the user last changed answers
+        // in a review of it, if ever (the user asked, 2026-11-07).
+        const float textX = frameMax.x + textGap;
+        const float lines = row.lastReviewed.empty() ? 1.0f : 2.0f; // Under the first.
+        const float textTop = std::round(
+            min.y + (tileSize.y - ImGui::GetFontSize() - (lineGap + ImGui::GetTextLineHeight()) * lines) * 0.5f);
+        drawList->AddText(fonts_.medium, ImGui::GetFontSize(), ImVec2(textX, textTop), theme::kText, row.when.c_str());
 
         // How long, how many images, and how far each category's review got: "00:34 · 12 images · Characters 11
         // of 12 reviewed".
@@ -911,12 +1181,27 @@ void App::drawRecordings() {
             detail = std::string(duration) + "  \xC2\xB7  ";
         }
         detail += std::to_string(row.images) + (row.images == 1 ? " image" : " images");
+        if (row.entry.info.kind == RecordKind::Unsure) {
+            detail += "  \xC2\xB7  only unsure";
+        }
         bool reviewed = false;
         for (std::size_t c = 0; c < row.reviewed.size(); ++c) {
-            if (row.reviewed[c] > 0) {
-                char text[96];
+            const ReviewCount& count = row.reviewed[c];
+            // Images answered before kinds, or holding a guess added since: "Characters: 30 to check", or
+            // "Characters: 1 to check, 109 of 110 reviewed" once some are checked (what waits first: a long line
+            // is cut at the tile's edge).
+            char text[160] = {};
+            if (count.reviewed > 0 && count.toCheck > 0) {
+                std::snprintf(text, sizeof(text), "  \xC2\xB7  %s: %zu to check, %zu of %zu reviewed",
+                              kCategories[c].name, count.toCheck, count.reviewed, row.images);
+            } else if (count.toCheck > 0) {
+                std::snprintf(text, sizeof(text), "  \xC2\xB7  %s: %zu to check", kCategories[c].name,
+                              count.toCheck);
+            } else if (count.reviewed > 0) {
                 std::snprintf(text, sizeof(text), "  \xC2\xB7  %s %zu of %zu reviewed", kCategories[c].name,
-                              row.reviewed[c], row.images);
+                              count.reviewed, row.images);
+            }
+            if (text[0] != '\0') {
                 detail += text;
                 reviewed = true;
             }
@@ -924,8 +1209,14 @@ void App::drawRecordings() {
         if (!reviewed) {
             detail += "  \xC2\xB7  not reviewed yet";
         }
-        drawList->AddText(ImVec2(min.x + padding.x, max.y - padding.y - ImGui::GetTextLineHeight()), theme::kTextMuted,
-                          detail.c_str());
+        drawList->PushClipRect(ImVec2(textX, min.y), ImVec2(max.x - textGap, max.y), true);
+        drawList->AddText(ImVec2(textX, textTop + ImGui::GetFontSize() + lineGap), theme::kTextMuted, detail.c_str());
+        if (!row.lastReviewed.empty()) {
+            drawList->AddText(
+                ImVec2(textX, textTop + ImGui::GetFontSize() + (lineGap + ImGui::GetTextLineHeight()) + lineGap),
+                theme::kTextMuted, row.lastReviewed.c_str());
+        }
+        drawList->PopClipRect();
         if (clicked) {
             if (row.images == 0) {
                 reviewError_ = "No images in the recording of " + row.when;
@@ -963,31 +1254,14 @@ void App::drawCategoryChooser() {
     ImGui::Dummy(ImVec2(0.0f, 6.0f * dpi));
 
     const ImVec2 tileSize(std::round(340.0f * dpi), std::round(60.0f * dpi));
-    const ImVec2 padding(std::round(14.0f * dpi), std::round(11.0f * dpi));
     for (const Category& category : kCategories) {
-        const ImVec2 min = ImGui::GetCursorScreenPos();
-        ImGui::PushID(category.id);
-        const bool clicked = ImGui::InvisibleButton("##category", tileSize);
-        ImGui::PopID();
-        const bool hovered = ImGui::IsItemHovered();
-        if (hovered) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        }
-        const ImVec2 max = ImGui::GetItemRectMax();
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-        drawList->AddRectFilled(min, max, hovered ? theme::kSurfaceActive : theme::kSurfaceHover, 8.0f * dpi);
-        drawList->AddRect(min, max, hovered ? theme::kAccent : theme::kBorderHover, 8.0f * dpi, 0, 1.0f);
-        drawList->AddText(fonts_.medium, ImGui::GetFontSize(), ImVec2(min.x + padding.x, min.y + padding.y),
-                          theme::kText, category.name);
-        drawList->AddText(ImVec2(min.x + padding.x, max.y - padding.y - ImGui::GetTextLineHeight()), theme::kTextMuted,
-                          category.description);
-        if (clicked) {
+        if (choiceTile(category.id, category.name, category.description, tileSize, fonts_, dpi)) {
             ImGui::CloseCurrentPopup();
             startReview(category);
         }
     }
     ImGui::Dummy(ImVec2(0.0f, 2.0f * dpi));
-    ImGui::TextDisabled("More kinds later: party members, terrain, the game's UI.");
+    ImGui::TextDisabled("More to look for later: terrain, the game's UI.");
     ImGui::Dummy(ImVec2(0.0f, 4.0f * dpi));
     if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         ImGui::CloseCurrentPopup();
@@ -1077,6 +1351,11 @@ void App::drawObservedScreen() {
 
 void App::drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
     const Found& found = recognizer_->found();
+    const std::vector<std::string>& kinds = recognizer_->kinds();
+    const bool showKinds = settings_.showKinds && !kinds.empty();
+    // The "can't tell" kind, for a model that learnt it from the review's answers.
+    const auto unknown = std::find(kinds.begin(), kinds.end(), kUnknownKind);
+    const int unknownKind = unknown != kinds.end() ? static_cast<int>(unknown - kinds.begin()) : -1;
     const float scale = (max.x - min.x) / static_cast<float>(pipeline_.width());
     const float thickness = 1.5f * dpiScale_;
     drawList->PushClipRect(min, max, true);
@@ -1085,11 +1364,28 @@ void App::drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
         const ImVec2 boxMin(std::round(min.x + thing.x * scale), std::round(min.y + thing.y * scale));
         const ImVec2 boxMax(std::round(min.x + (thing.x + thing.width) * scale),
                             std::round(min.y + (thing.y + thing.height) * scale));
-        theme::drawBox(drawList, boxMin, boxMax, theme::kAccent, thickness);
-        char tag[32];
-        std::snprintf(tag, sizeof(tag), "%s %.0f%%", kLive.yes, static_cast<double>(thing.sure * 100.0f));
-        theme::drawTag(drawList, fonts_.medium, boxMin, thickness, min, max, tag, theme::kAccent,
-                       theme::kBackground);
+        // With kinds: the kind's name and colour as the review shows them ("Monster", green); one the review does
+        // not know by its word in model.json. One the model cannot tell the kind of (e.g. far off): "Character?",
+        // silver.
+        const char* name = kLive.yes;
+        const char* unsure = "";
+        ImU32 color = theme::kAccent;
+        if (showKinds && cantTellKind(thing, unknownKind)) {
+            unsure = "?";
+            color = theme::kUnknown;
+        } else if (showKinds && thing.kind < kinds.size()) {
+            name = kinds[thing.kind].c_str();
+            for (const Kind& kind : kLive.kinds) {
+                if (kind.id == kinds[thing.kind]) {
+                    name = kind.name;
+                    color = kind.color;
+                }
+            }
+        }
+        theme::drawBox(drawList, boxMin, boxMax, color, thickness);
+        char tag[48];
+        std::snprintf(tag, sizeof(tag), "%s%s %.0f%%", name, unsure, static_cast<double>(thing.sure * 100.0f));
+        theme::drawTag(drawList, fonts_.medium, boxMin, boxMax, thickness, min, max, tag, color, theme::kBackground);
     }
     drawList->PopClipRect();
 }

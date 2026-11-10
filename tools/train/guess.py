@@ -4,7 +4,9 @@
 
 Writes <category>-guesses.txt into the recording's folder: for every image, each thing the model found with how
 sure it is. The review then shows them as marks to answer yes or no. The threshold is low on purpose: unsure
-guesses are the ones worth asking about, and answering no to a wrong one teaches the model too.
+guesses are the ones worth asking about, and answering no to a wrong one teaches the model too. A model trained with
+kinds is read as observex's Detector reads it: each candidate once, with its two surest kinds, how sure of each, and
+how sure it is of one of them (src/core/Detection.h's eitherKind).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from pathlib import Path
 import torch
 
 from marks import Mark, image_files, model_folder, write_guesses
-from train import load_live, utf8_output
+from train import keep_kind_scores, kinds_guesses, load_live, utf8_output
 
 
 def main() -> None:
@@ -37,6 +39,9 @@ def main() -> None:
     # with the same guesses (boxes at most a pixel apart).
     model.inference(dtype=torch.float16)
 
+    kinds = info.get("kinds") or []
+    kept = keep_kind_scores(model, kinds) if kinds else None
+
     images = image_files(args.recording)
     if not images:
         raise SystemExit(f"No images in {args.recording}.")
@@ -45,9 +50,12 @@ def main() -> None:
     for index, path in enumerate(images, start=1):
         detections = model.predict(str(path), threshold=args.threshold, include_source_image=False)
         marks = []
-        for (left, top, right, bottom), confidence in zip(detections.xyxy, detections.confidence):
-            marks.append(Mark(round(float(left)), round(float(top)), max(1, round(float(right - left))),
-                              max(1, round(float(bottom - top))), guess=float(confidence)))
+        if kinds:
+            marks = kinds_guesses(kept, kinds, args.threshold)
+        else:
+            for (left, top, right, bottom), confidence in zip(detections.xyxy, detections.confidence):
+                marks.append(Mark(round(float(left)), round(float(top)), max(1, round(float(right - left))),
+                                  max(1, round(float(bottom - top))), guess=float(confidence)))
         guesses[path.name] = sorted(marks, key=lambda mark: (mark.y, mark.x))  # Reading order.
         print(f"{index} of {len(images)} images", flush=True)  # observex's review shows this progress.
 
@@ -55,7 +63,9 @@ def main() -> None:
     write_guesses(target, guesses,
                   f"observex guesses, category: {args.category}, by models/{args.category}/model.pth "
                   f"(trained {info['trained']}).\n"
-                  "Each mark: how sure the model is (0 to 1), then x, y, width and height in image pixels.")
+                  "Each mark: how sure the model is (0 to 1), "
+                  + ("then its two surest kinds with how sure of each, " if kinds else "")
+                  + "then x, y, width and height in image pixels.")
     count = sum(len(marks) for marks in guesses.values())
     seconds = time.time() - started
     print(f"Wrote {count} guesses for {len(images)} images to {target} in {seconds:.0f} s "

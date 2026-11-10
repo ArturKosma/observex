@@ -35,6 +35,7 @@ struct BarButton {
     bool open = false;                // Drawn highlighted, e.g. while its popup is open or while recording.
     bool enabled = true;              // Disabled buttons are dimmed and cannot be clicked.
     ImU32 highlight = theme::kAccent; // Border colour while `open`.
+    float progress = -1.0f;           // 0 to 1: a bar that far along its bottom edge, in `highlight`; below 0: none.
 
     float width(const theme::Fonts& fonts) const;
 

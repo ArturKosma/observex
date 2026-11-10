@@ -6,13 +6,16 @@
 #include "app/ScreenPicker.h"
 #include "app/Settings.h"
 #include "app/Theme.h"
+#include "app/Thumbnails.h"
 #include "core/Recordings.h"
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
+#include "engine/KindUpdater.h"
 #include "engine/LiveLog.h"
 #include "engine/Pipeline.h"
 #include "engine/Recognizer.h"
 #include "engine/Recorder.h"
+#include "engine/Refresher.h"
 
 #include <chrono>
 #include <cstdint>
@@ -40,11 +43,15 @@ public:
     // go to `recordingsFolder` (by default a "recordings" folder next to the PNG; the Review button lists the
     // recordings in it), and no Windows dialog is shown.
     struct Snapshot {
-        // A click (from == to), a drag (from somewhere to somewhere else), or a key press. Window pixels.
+        // A click (from == to), a drag (from somewhere to somewhere else), a turn of the mouse wheel at `from`, or a
+        // key press. Window pixels.
         struct Step {
             ImVec2 from;
             ImVec2 to;
             ImGuiKey key = ImGuiKey_None;
+            ImGuiKey modifier = ImGuiMod_None; // Held with the key: ImGuiMod_Ctrl (Ctrl+Z) or ImGuiMod_Shift.
+            ImGuiMouseButton button = ImGuiMouseButton_Left; // Of the click or drag.
+            float wheel = 0.0f;                              // Wheel turns (away from the user: positive).
         };
         std::wstring path;
         std::vector<Step> steps;
@@ -72,11 +79,13 @@ private:
     // After a display mode change: observes the same screen again if it is still connected.
     void observeAgain();
 
-    // Recording. Start and stop are the user's (Record button or hotkey). A recording outlives pipeline
-    // restarts: pause before the pipeline stops, resume once it runs again, into the same folder.
+    // Recording. The user starts it, and stops it or it stops by itself after kRecordImages: the Record button asks
+    // which kind (RecordKind), the hotkey starts the kind picked last. A recording outlives pipeline restarts: pause
+    // before the pipeline stops, resume once it runs again, into the same folder.
     bool canRecord() const;
+    bool canRecordUnsure() const; // The model is loading or running, so it can say what it is unsure of.
     void toggleRecording();
-    void startRecording();
+    void startRecording(RecordKind kind);
     void stopRecording();
     void pauseRecording();
     void resumeRecording();
@@ -87,6 +96,9 @@ private:
     // look for in it (the category popup), then review it.
     void openRecordings();
     void startReview(const Category& category);
+    // Closes the review (Close review, or picking a screen; closing observex just ends it) and starts the kind update
+    // (KindUpdater), which learns the kinds from every reviewed answer, this review's too.
+    void closeReview();
 
     // Writes the settings to observex.cfg (not in snapshot mode).
     void saveSettings();
@@ -97,6 +109,7 @@ private:
     void drawFrame();
     void drawTopBar(float height);
     void drawSettings();
+    void drawRecordChooser();
     void drawShowFlags();
     void drawReviewSteps(float height);
     void drawRecordings();
@@ -121,7 +134,9 @@ private:
         RecordingEntry entry;
         std::string when;                  // "Today, 12:56" or "31 Oct, 23:59".
         std::size_t images = 0;            // Image files in its folder.
-        std::vector<std::size_t> reviewed; // Images reviewed, per entry of kCategories.
+        std::filesystem::path firstImage;  // Its picture in the list; empty if there are no images.
+        std::vector<ReviewCount> reviewed; // How far each entry of kCategories got.
+        std::string lastReviewed;          // "Last reviewed today, 10:48"; empty if no review changed answers.
     };
 
     float dpiScale_ = 1.0f;
@@ -133,27 +148,32 @@ private:
     Pipeline pipeline_;
     std::unique_ptr<ImageReader> preview_;
     std::unique_ptr<ScreenImage> observedImage_;
-    std::optional<Screen> observed_; // The screen being observed, if any.
-    std::optional<Screen> chosen_;   // Picked this frame; observed from the start of the next one.
-    std::string error_;              // Why the observed screen cannot be shown.
+    std::optional<Screen> observed_;         // The screen being observed, if any.
+    std::optional<Screen> chosen_;           // Picked this frame; observed from the start of the next one.
+    std::string error_;                      // Why the observed screen cannot be shown.
     std::unique_ptr<Recognizer> recognizer_; // Looks for characters on the observed screen, shown or not.
     std::string recognizerError_;            // Why it could not start.
     Settings settings_;
-    std::filesystem::path settingsFile_; // Empty in snapshot mode: settings are not saved.
-    std::optional<Recording> recording_; // While recording.
-    std::unique_ptr<Recorder> recorder_; // Saves the recording while the pipeline runs.
-    std::string recordingError_;         // Why the last recording stopped or could not start.
-    std::unique_ptr<Review> review_;       // While reviewing; shown instead of the observed screen.
-    std::vector<RecordingRow> recordings_; // The Review button's list, read when it opens.
-    bool openCategory_ = false;            // A recording was picked in the list: ask for the category next.
-    std::filesystem::path reviewFolder_;   // Picked for review, waiting for the category.
-    std::string reviewWhen_;               // When it was recorded, for the category chooser.
+    std::filesystem::path settingsFile_;     // Empty in snapshot mode: settings are not saved.
+    std::optional<Recording> recording_;     // While recording.
+    std::unique_ptr<Recorder> recorder_;     // Saves the recording while the pipeline runs.
+    std::string recordingError_;             // Why the last recording stopped or could not start.
+    std::unique_ptr<Review> review_;         // While reviewing; shown instead of the observed screen.
+    // While reviewing, once the review's own finder is done (the GPU is free): makes the other reviewed recordings'
+    // guesses fresh for the kind update after a new model.
+    std::unique_ptr<Refresher> refresher_;
+    std::unique_ptr<KindUpdater> kindUpdater_; // After a review closes, until it is done.
+    std::vector<RecordingRow> recordings_;   // The Review button's list, read when it opens.
+    std::unique_ptr<Thumbnails> thumbnails_; // The list's pictures, kept between openings.
+    bool openCategory_ = false;              // A recording was picked in the list: ask for the category next.
+    std::filesystem::path reviewFolder_;     // Picked for review, waiting for the category.
+    std::string reviewWhen_;                 // When it was recorded, for the category chooser.
     std::size_t reviewFolderImages_ = 0;
-    bool closeReview_ = false;      // Close was clicked; closed between frames.
-    std::string reviewError_;       // Why the last review could not start.
+    bool closeReview_ = false;          // Close was clicked; closed between frames.
+    std::string reviewError_;           // Why the last review could not start.
     bool hotkeyRegistered_ = false;     // Ctrl+Alt+R toggles recording.
     bool markHotkeyRegistered_ = false; // Ctrl+Alt+M marks a moment while recording.
-    bool showStats_ = false;        // Toggled with F3.
+    bool showStats_ = false;            // Toggled with F3.
     bool imguiReady_ = false;
     std::optional<Snapshot> snapshot_;
     int snapshotFrame_ = 0;

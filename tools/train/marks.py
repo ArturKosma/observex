@@ -1,10 +1,15 @@
 """Reads and writes observex's marks files: the text format of src/core/Marks.h.
 
-Each image starts with an "image <file name>" line, and its marks follow, one per line: "yes", "no" or a guess
-(how sure the finder is, 0 to 1), then x, y, width and height in image pixels. Lines starting with '#' are comments.
+Each image starts with an "image <file name>" line, and its marks follow, one per line: what it is, then x, y, width
+and height in image pixels. What it is: a kind of the category (a yes; for characters "monster", "player", "npc",
+"own", "unknown" = can't tell which, or "dead"), "yes" (answered before the category had kinds: its kind is not
+checked yet, maybe with a suggested kind after it, e.g. "yes own 1260 708 51 57"), "no", or a guess (how sure the finder is, 0 to 1). A guess of a model
+trained with kinds then names the kind it is surest of and the next, each with how sure of it: "0.820 monster 0.700
+player 0.400 1012 540 80 120" (82% sure it is one of the two: src/core/Detection.h's eitherKind). Lines starting
+with '#' are comments.
 
-    <category>-answers.txt  written by observex's review: only reviewed images, marks answered yes or no.
-    <category>-guesses.txt  written by guess.py: the trained model's marks, with how sure it is.
+    <category>-answers.txt  written by observex's review: only reviewed images, marks answered with a kind or no.
+    <category>-guesses.txt  written by observex's review (or guess.py): the model's marks, with how sure it is.
 """
 
 from __future__ import annotations
@@ -21,8 +26,15 @@ class Mark:
     y: int
     width: int
     height: int
-    answer: str | None = None  # "yes", "no", or None if unanswered.
+    answer: str | None = None  # "yes" (of any kind), "no", or None if unanswered.
     guess: float | None = None  # How sure the model was, 0 to 1; None if it did not make this mark.
+    kind: str | None = None  # For a yes: its kind ("monster"), or the suggested one while unchecked; None if no kind.
+    kind_checked: bool = True  # False for a yes answered before kinds whose kind the user has not checked yet.
+    # For a guess of a model with kinds: `kind` is the one it was surest of, kind_guess how sure of it, and these the
+    # next and how sure (0 to 1).
+    second_kind: str | None = None
+    second_guess: float | None = None
+    kind_guess: float | None = None
 
 
 def read_marks(path: Path) -> dict[str, list[Mark]]:
@@ -38,7 +50,26 @@ def read_marks(path: Path) -> dict[str, list[Mark]]:
             name = line[len("image"):].strip()
             image = marks.setdefault(name, []) if name else None
             continue
-        if image is None or len(words) != 5:
+        if image is None:
+            continue
+        what = words[0]
+        suggested = None
+        second_kind = None
+        second_guess = None
+        kind_guess = None
+        if what == "yes" and len(words) == 6 and words[1].isalpha():  # "yes own 1260 708 51 57"
+            suggested = words[1]
+            words = [what] + words[2:]
+        elif what[:1].isdigit() and len(words) in (7, 9) and words[1].isalpha():  # A guess with kinds.
+            suggested = words[1]
+            try:
+                kind_guess = float(words[2])
+                if len(words) == 9 and words[3].isalpha():  # "0.820 monster 0.700 player 0.400 1012 540 80 120"
+                    second_kind, second_guess = words[3], float(words[4])
+            except ValueError:
+                continue
+            words = [what] + words[-4:]
+        if len(words) != 5:
             continue
         try:
             x, y, width, height = (int(word) for word in words[1:])
@@ -46,15 +77,20 @@ def read_marks(path: Path) -> dict[str, list[Mark]]:
             continue
         if width <= 0 or height <= 0:
             continue
-        if words[0] in ("yes", "no"):
-            image.append(Mark(x, y, width, height, answer=words[0]))
-            continue
-        try:
-            guess = float(words[0])
-        except ValueError:
-            continue
-        if 0.0 <= guess <= 1.0:
-            image.append(Mark(x, y, width, height, guess=guess))
+        if what == "yes":
+            image.append(Mark(x, y, width, height, answer="yes", kind=suggested, kind_checked=False))
+        elif what == "no":
+            image.append(Mark(x, y, width, height, answer="no"))
+        elif what.isalpha():  # A kind: "monster 1012 540 80 120".
+            image.append(Mark(x, y, width, height, answer="yes", kind=what))
+        else:
+            try:
+                guess = float(what)
+            except ValueError:
+                continue
+            if 0.0 <= guess <= 1.0:
+                image.append(Mark(x, y, width, height, guess=guess, kind=suggested, second_kind=second_kind,
+                                  second_guess=second_guess, kind_guess=kind_guess))
     return marks
 
 
@@ -64,7 +100,12 @@ def write_guesses(path: Path, guesses: dict[str, list[Mark]], comment: str) -> N
     for name in sorted(guesses):
         lines.append(f"image {name}")
         for mark in guesses[name]:
-            lines.append(f"{mark.guess:.3f} {mark.x} {mark.y} {mark.width} {mark.height}")
+            kinds = ""  # With kinds: the surest and how sure of it, and the next if known.
+            if mark.kind:
+                kinds = f"{mark.kind} {mark.guess if mark.kind_guess is None else mark.kind_guess:.3f} "
+                if mark.second_kind and mark.second_guess is not None:
+                    kinds += f"{mark.second_kind} {mark.second_guess:.3f} "
+            lines.append(f"{mark.guess:.3f} {kinds}{mark.x} {mark.y} {mark.width} {mark.height}")
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
     temporary.replace(path)

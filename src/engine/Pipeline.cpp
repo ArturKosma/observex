@@ -113,15 +113,25 @@ void Pipeline::run(std::stop_token stop) {
                 preview_->write(gpu_.context.Get(), frame.texture, stamp);
             }
             const unsigned recordingInterval = recordingInterval_.load(std::memory_order_relaxed);
-            if (recordingInterval != 0 && recordNow_.exchange(false, std::memory_order_relaxed)) {
-                nextRecording = now; // Asked for this image (a mark); the interval counts on from it.
-            }
-            if (recordingInterval != 0 && now >= nextRecording) {
-                recording_->write(gpu_.context.Get(), frame.texture, stamp);
-                const std::int64_t period = frequency.QuadPart * recordingInterval;
-                nextRecording += period;
-                if (nextRecording <= now) {
-                    nextRecording = now + period; // Starting, or the screen was still: count from now.
+            if (recordingInterval != 0) {
+                bool record = recordNow_.exchange(false, std::memory_order_relaxed); // Asked for this image (a mark).
+                if (!record && now >= nextRecording) {
+                    if (!onlyQuestions_.load(std::memory_order_relaxed)) {
+                        record = true;
+                    } else {
+                        // Asked when due, answered after the recogniser's next look, a few images later.
+                        switch (question_.take()) {
+                        case Question::State::None: question_.ask(); break;
+                        case Question::State::Asked: break;
+                        case Question::State::Yes: record = true; break;
+                        case Question::State::No: nextRecording = now + frequency.QuadPart * recordingInterval; break;
+                        }
+                    }
+                }
+                if (record) {
+                    recording_->write(gpu_.context.Get(), frame.texture, stamp);
+                    nextRecording = now + frequency.QuadPart * recordingInterval;
+                    question_.drop(); // A mark may come while asked; the next due time asks afresh.
                 }
             }
             work.add(static_cast<float>(static_cast<double>(qpcNow() - now) * msPerTick));

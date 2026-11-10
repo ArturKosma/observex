@@ -37,7 +37,7 @@ take about 12 minutes, using about 13 GB of GPU memory. Run it in the background
 trainings at once: they do not fit in 24 GB together, Windows then moves GPU memory into normal RAM, and both crawl
 or hang.
 
-The answers it learns from should follow one rule (body only, every visible character: monsters, other players and NPCs, never your own; no box for a hidden one); see
+The answers it learns from should follow one rule (body only, every visible character: monsters, other players, NPCs and your own; no box for a hidden one); see
 [the training loop](../../docs/training-loop.md), step 2.
 
 It starts from RF-DETR pretrained on everyday photos, replaces its list of 80 kinds of things with the one category,
@@ -46,8 +46,15 @@ hundred images can be enough to start.
 
 At the end, `train.py` also writes `model.onnx` (through `export.py`): the same model in the format observex's live
 detection and its review read (half-precision weights). observex prepares it for the GPU the first time it uses it
-(about 35 s on the 4090, once per new model) and saves that as `model.engine` next to it. To export an existing
-`model.pth` again by hand:
+(about 35 s on the 4090, once per new model) and saves that as `model.engine` next to it.
+
+Since 2026-11-08 (the user asked for better auto-guesses with each picture in a review) the export also gives each
+candidate's features: the 256 numbers the model's kind classifier reads, as a third ONNX output named `features`
+(next to the boxes and scores, which are unchanged). It also writes that classifier into `model.json` as `kind_head`
+(its biases and weights, rounded to half precision like the ONNX). observex's review re-fits that classifier to your
+answers as you go. Older models without them still work; their review just does not learn.
+
+To export an existing `model.pth` again by hand:
 
 ```bash
 tools/train/.venv/Scripts/python tools/train/export.py
@@ -60,12 +67,19 @@ its review runs `model.onnx` itself when you open a recording whose guesses are 
 
 Options: `--category` (default `character`), and for `train.py` `--model nano|small|medium|large` (default `medium`),
 `--resolution` (default 1024: the image is squeezed to that many pixels square while training, so far-away characters
-stay a few pixels big; observex runs the model at 768, `LIVE_RESOLUTION` in train.py, a third faster with nearly the
-same answers: trained at 1024 and run at 768 beat trained at 768, 2026-11-01), `--epochs` (passes over the images, default 40), `--augment flip|color` (random changes to each
+stay a few pixels big; observex runs the model at 1024 too, `LIVE_RESOLUTION` in train.py; from 2026-11-01 to 2026-11-03
+it ran at 768, a third faster, until with more images 1024 scored clearly better; training at 768 was worse,
+2026-11-01), `--epochs` (passes over the images, default 40), `--augment flip|color` (random changes to each
 training image, default `color`: mirror, plus small shifts of brightness, contrast, saturation and hue, so a character
 in a dark cave or in fog still looks like itself), `--held-out` (default 0.2) and `--batch` (images through the GPU
 at once, default 4; each learning step uses 16 either way). `guess.py --threshold` (default 0.3) leaves out guesses
 less sure than that.
+
+`train.py --kinds` learns the category's kinds (monster, player, NPC, your own) as classes instead of the one
+category, from the images whose kinds are all checked. Such a model is read the way observex reads it, in the score
+and in `guess.py`: each thing once, named by the kind it is surest of and the next, and how sure it is of a character
+is how sure it is of one of the two (`1 - (1 - first) (1 - second)`; RF-DETR's own `predict` lists a thing once per
+kind, and its surest kind alone loses things it cannot tell apart).
 
 Why these defaults (tested 2026-11-01 on 5 recordings, each place scored by a model that never saw it): Medium beat
 Small and Large; colour changes beat mirror only; 1024 beat 1280 and tied 768; the best pass always came before 35, so 80 passes gained nothing. Details in
@@ -81,5 +95,5 @@ Windows the NVIDIA driver then moves GPU memory into normal RAM instead of faili
 | `marks.py` | Reads and writes observex's marks files (`src/core/Marks.h` is the same format in C++). |
 | `train.py` | Builds the dataset from the answers, trains RF-DETR, saves the model and its score. |
 | `guess.py` | Writes the model's guesses for a recording (the Python reference; observex's review does this itself). |
-| `export.py` | Writes `model.onnx` for observex's live detection (`train.py` runs it too). |
+| `export.py` | Writes `model.onnx` for observex's live detection and review, and the kind classifier into `model.json` (`train.py` runs it too). |
 | `requirements.txt` | The pinned Python packages (the last four are for `export.py`). |

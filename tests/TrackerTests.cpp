@@ -13,6 +13,12 @@ constexpr double kLookMs = 10.0; // About 100 looks a second, as with a game on 
 
 Detection box(float x, float y, float sure = 0.8f, float size = 60.0f) { return {x, y, size, size * 1.5f, sure}; }
 
+Detection ofKind(std::uint8_t kind, float sure = 0.8f) {
+    Detection found = box(100, 100, sure);
+    found.kind = kind;
+    return found;
+}
+
 // Feeds one look and returns what the tracker shows.
 std::vector<Tracked> look(Tracker& tracker, double timeMs, std::vector<Detection> found) {
     std::array<Tracked, 16> out{};
@@ -193,7 +199,7 @@ TEST_CASE("with more things than fit, the surest are handed out") {
     Tracker tracker;
     std::vector<Detection> many;
     for (int i = 0; i < 20; ++i) {
-        many.push_back(box(100.0f * static_cast<float>(i), 100, 0.5f + 0.02f * static_cast<float>(i)));
+        many.push_back(box(100.0f * static_cast<float>(i), 100, 0.61f + 0.02f * static_cast<float>(i)));
     }
     std::vector<Tracked> shown;
     for (int i = 0; i < 3; ++i) {
@@ -202,4 +208,34 @@ TEST_CASE("with more things than fit, the surest are handed out") {
     REQUIRE(shown.size() == 16);
     CHECK(shown.front().x == 1900.0f);
     CHECK(shown.back().x == 400.0f);
+}
+
+TEST_CASE("a thing keeps the kind it was found as lately, through a few looks of another") {
+    Tracker tracker;
+    std::vector<Tracked> shown;
+    for (int i = 0; i < 50; ++i) { // Half a second as kind 1.
+        shown = look(tracker, i * kLookMs, {ofKind(1)});
+    }
+    REQUIRE(shown.size() == 1);
+    CHECK(shown[0].kind == 1);
+    for (int i = 50; i < 55; ++i) { // 50 ms as kind 2, a bit surer: still kind 1.
+        shown = look(tracker, i * kLookMs, {ofKind(2, 0.9f)});
+    }
+    REQUIRE(shown.size() == 1);
+    CHECK(shown[0].kind == 1);
+    for (int i = 55; i < 100; ++i) { // Half a second more as kind 2: now it is kind 2, the same thing.
+        shown = look(tracker, i * kLookMs, {ofKind(2, 0.9f)});
+    }
+    REQUIRE(shown.size() == 1);
+    CHECK(shown[0].kind == 2);
+}
+
+TEST_CASE("a new thing starts as the kind it was first found as") {
+    Tracker tracker;
+    std::vector<Tracked> shown;
+    for (int i = 0; i < 3; ++i) {
+        shown = look(tracker, i * kLookMs, {ofKind(3)});
+    }
+    REQUIRE(shown.size() == 1);
+    CHECK(shown[0].kind == 3);
 }

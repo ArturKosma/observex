@@ -34,8 +34,10 @@ public:
     bool hasImage() const { return hasImage_; }
 
     // Draws the image into the rectangle from `min` to `max`, with corners rounded by `rounding` pixels.
-    // `background` must be the colour behind the image: the corners are rounded by painting over them.
-    void draw(ImDrawList* drawList, ImVec2 min, ImVec2 max, float rounding, ImU32 background) const;
+    // `background` must be the colour behind the image: the corners are rounded by painting over them. Only the
+    // part from `uvMin` to `uvMax` (0 to 1 across and down the image) if given: the review zoomed in.
+    void draw(ImDrawList* drawList, ImVec2 min, ImVec2 max, float rounding, ImU32 background,
+              ImVec2 uvMin = ImVec2(0.0f, 0.0f), ImVec2 uvMax = ImVec2(1.0f, 1.0f)) const;
 
     unsigned width() const { return width_; }
     unsigned height() const { return height_; }

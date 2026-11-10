@@ -1,5 +1,6 @@
 #include "app/Widgets.h"
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 
@@ -177,6 +178,14 @@ bool BarButton::draw(const char* id, const theme::Fonts& fonts) const {
     const ImU32 border = open ? highlight : hovered ? theme::kBorderHover : theme::kBorder;
     drawList->AddRectFilled(min, max, fill, rounding);
     drawList->AddRect(min, max, border, rounding, 0, 1.0f);
+    if (progress >= 0.0f) {
+        const float left = min.x + rounding;
+        const float bottom = max.y - std::round(4.0f * l.dpi);
+        const float thickness = std::round(3.0f * l.dpi);
+        drawList->AddRectFilled(ImVec2(left, bottom - thickness), ImVec2(max.x - rounding, bottom), theme::kBorderHover);
+        drawList->AddRectFilled(ImVec2(left, bottom - thickness),
+                                ImVec2(left + (max.x - rounding - left) * std::min(progress, 1.0f), bottom), highlight);
+    }
 
     const float middle = std::round((min.y + max.y) * 0.5f);
     const ImU32 textColor = enabled ? theme::kText : theme::kTextMuted;
