@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdio>
 #include <cwctype>
 #include <fstream>
 #include <iterator>
@@ -172,6 +173,83 @@ std::vector<RecordingEntry> listRecordings(const std::filesystem::path& root) {
         return a.info.started != b.info.started ? a.info.started > b.info.started : a.folder > b.folder;
     });
     return recordings;
+}
+
+std::string formatClipInfo(const ClipInfo& info) {
+    std::string text = "# observex clip: the last seconds of a screen, saved on request (see clip.txt).\n";
+    char seconds[32];
+    std::snprintf(seconds, sizeof(seconds), "%.2f", info.seconds);
+    text += "saved=" + info.saved + "\n";
+    text += std::string("seconds=") + seconds + "\n";
+    text += "frames=" + std::to_string(info.frames) + "\n";
+    text += "looks=" + std::to_string(info.looks) + "\n";
+    text += "screen=" + info.screen + "\n";
+    text += "size=" + std::to_string(info.width) + "x" + std::to_string(info.height) + "\n";
+    text += "model=" + info.model + "\n";
+    return text;
+}
+
+ClipInfo parseClipInfo(std::string_view text) {
+    ClipInfo info;
+    while (!text.empty()) {
+        const std::size_t end = text.find('\n');
+        std::string_view line = text.substr(0, end);
+        text = end == std::string_view::npos ? std::string_view() : text.substr(end + 1);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        const std::size_t equals = line.find('=');
+        if (line.empty() || line.front() == '#' || equals == std::string_view::npos) {
+            continue;
+        }
+        const std::string_view key = line.substr(0, equals);
+        const std::string_view value = line.substr(equals + 1);
+        if (key == "saved") {
+            info.saved = value;
+        } else if (key == "seconds") {
+            std::from_chars(value.data(), value.data() + value.size(), info.seconds);
+        } else if (key == "frames") {
+            info.frames = toUnsigned(value);
+        } else if (key == "looks") {
+            info.looks = toUnsigned(value);
+        } else if (key == "screen") {
+            info.screen = value;
+        } else if (key == "size") {
+            const std::size_t x = value.find('x');
+            if (x != std::string_view::npos) {
+                info.width = toUnsigned(value.substr(0, x));
+                info.height = toUnsigned(value.substr(x + 1));
+            }
+        } else if (key == "model") {
+            info.model = value;
+        }
+    }
+    return info;
+}
+
+bool writeClipInfo(const std::filesystem::path& folder, const ClipInfo& info) {
+    return writeFileInOneStep(folder / kClipFile, formatClipInfo(info));
+}
+
+ClipInfo readClipInfo(const std::filesystem::path& folder) {
+    return parseClipInfo(readFile(folder / kClipFile));
+}
+
+std::vector<ClipEntry> listClips(const std::filesystem::path& clipsFolder) {
+    std::vector<ClipEntry> clips;
+    std::error_code error;
+    for (std::filesystem::directory_iterator it(clipsFolder, error), end; !error && it != end; it.increment(error)) {
+        const std::filesystem::path file = it->path() / kClipFile;
+        std::error_code missing;
+        if (!it->is_directory(missing) || !std::filesystem::is_regular_file(file, missing)) {
+            continue;
+        }
+        clips.push_back({it->path(), parseClipInfo(readFile(file))});
+    }
+    std::sort(clips.begin(), clips.end(), [](const ClipEntry& a, const ClipEntry& b) {
+        return a.info.saved != b.info.saved ? a.info.saved > b.info.saved : a.folder > b.folder;
+    });
+    return clips;
 }
 
 std::vector<std::string> listImages(const std::filesystem::path& folder) {

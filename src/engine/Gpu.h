@@ -45,7 +45,13 @@ struct GpuDevice {
     ComPtr<ID3D11DeviceContext> context;
 };
 
-// Creates a Direct3D 11 device on `adapter`. Debug builds use the D3D debug layer when it is installed.
-GpuDevice createGpuDevice(IDXGIAdapter* adapter);
+// The same GPU as `gpu`, through a new DXGI factory: an adapter object of its own, for a device that must not hold up
+// others (see findOnOwnAdapter), when there is no screen to find it by. Throws if the GPU is gone.
+ComPtr<IDXGIAdapter1> findOwnAdapter(IDXGIAdapter1* gpu);
+
+// Creates a Direct3D 11 device on `adapter`. Debug builds use the D3D debug layer when it is installed. With `video`,
+// the device also works with the GPU's video decoder (Media Foundation; D3D11_CREATE_DEVICE_VIDEO_SUPPORT) and is
+// safe to use from Media Foundation's threads too (multithread protected).
+GpuDevice createGpuDevice(IDXGIAdapter* adapter, bool video = false);
 
 } // namespace observex

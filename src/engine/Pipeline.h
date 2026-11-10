@@ -52,7 +52,8 @@ public:
     // state() is then Failed and error() says why.
     bool start(const Screen& screen);
 
-    // Stops the loop and frees its GPU resources. Destroy any reader of preview() or recording() first.
+    // Stops the loop and frees its GPU resources. Destroy any reader of its channels (preview(), recording(),
+    // recognition(), clip()) first.
     void stop();
 
     State state() const { return state_.load(std::memory_order_acquire); }
@@ -80,6 +81,11 @@ public:
     void setRecognitionEnabled(bool enabled) { recognitionEnabled_.store(enabled, std::memory_order_relaxed); }
     ImageChannel* recognition() const { return recognition_.get(); }
 
+    // While on, every new image is also copied for the clip buffer (see ClipRecorder: the last 10 s, saved on a key).
+    // Off costs nothing.
+    void setClipEnabled(bool enabled) { clipEnabled_.store(enabled, std::memory_order_relaxed); }
+    ImageChannel* clip() const { return clip_.get(); }
+
     // Newest statistics. The reference stays valid until the next call or start().
     const PipelineStats& stats();
 
@@ -97,6 +103,7 @@ private:
     std::unique_ptr<ImageChannel> preview_;
     std::unique_ptr<ImageChannel> recording_;
     std::unique_ptr<ImageChannel> recognition_;
+    std::unique_ptr<ImageChannel> clip_;
     std::unique_ptr<TripleBuffer<PipelineStats>> stats_;
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
@@ -105,6 +112,7 @@ private:
     Question question_;
     std::atomic<bool> recordNow_{false};
     std::atomic<bool> recognitionEnabled_{false};
+    std::atomic<bool> clipEnabled_{false};
     std::string error_;
     unsigned width_ = 0;
     unsigned height_ = 0;

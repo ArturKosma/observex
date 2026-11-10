@@ -1,5 +1,7 @@
 #include "engine/Gpu.h"
 
+#include <d3d11_4.h> // ID3D11Multithread.
+
 #include <algorithm>
 #include <cstdio>
 #include <cwchar>
@@ -159,7 +161,23 @@ Screen findOnOwnAdapter(const Screen& screen) {
     throw std::runtime_error("The screen " + screen.name + " is no longer connected");
 }
 
-GpuDevice createGpuDevice(IDXGIAdapter* adapter) {
+ComPtr<IDXGIAdapter1> findOwnAdapter(IDXGIAdapter1* gpu) {
+    DXGI_ADAPTER_DESC1 wanted{};
+    check(gpu->GetDesc1(&wanted), "IDXGIAdapter1::GetDesc1");
+    ComPtr<IDXGIFactory1> factory;
+    check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "CreateDXGIFactory1");
+    ComPtr<IDXGIAdapter1> adapter;
+    for (UINT a = 0; factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.AdapterLuid.LowPart == wanted.AdapterLuid.LowPart &&
+            desc.AdapterLuid.HighPart == wanted.AdapterLuid.HighPart) {
+            return adapter;
+        }
+    }
+    throw std::runtime_error("The GPU is no longer there");
+}
+
+GpuDevice createGpuDevice(IDXGIAdapter* adapter, bool video) {
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
     GpuDevice gpu;
     const auto create = [&](UINT flags) {
@@ -168,7 +186,7 @@ GpuDevice createGpuDevice(IDXGIAdapter* adapter) {
                                  &gpu.context);
     };
 
-    const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | (video ? D3D11_CREATE_DEVICE_VIDEO_SUPPORT : 0u);
     HRESULT result = E_FAIL;
 #ifndef NDEBUG
     // Fails when the optional "Graphics Tools" Windows feature (the debug layer) is not installed.
@@ -178,6 +196,11 @@ GpuDevice createGpuDevice(IDXGIAdapter* adapter) {
         result = create(flags);
     }
     check(result, "D3D11CreateDevice");
+    if (video) {
+        ComPtr<ID3D11Multithread> multithread;
+        check(gpu.device.As(&multithread), "ID3D11Multithread");
+        multithread->SetMultithreadProtected(TRUE);
+    }
     return gpu;
 }
 

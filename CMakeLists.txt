@@ -20,6 +20,7 @@ option(OBSERVEX_BUILD_TESTS "Build the observex unit tests" ON)
 
 include(cmake/Dependencies.cmake)
 include(cmake/TensorRT.cmake)
+include(cmake/Nvenc.cmake)
 
 # Warning flags for our own targets only (third-party code is left alone).
 add_library(observex_warnings INTERFACE)
@@ -30,9 +31,11 @@ else()
 endif()
 
 # Core: platform-free building blocks (lock-free hand-overs, statistics, marks on images, the review's undo history,
-# zoom and kind learning, recording files, the live log's look lines, the tracker, the mirror test). Unit tested.
+# zoom and kind learning, recording files, the live log's look lines and a clip's lines, the tracker, the mirror
+# test). Unit tested.
 add_library(observex_core STATIC
     src/core/BoxLearner.cpp
+    src/core/ClipLines.cpp
     src/core/Features.cpp
     src/core/ImageView.cpp
     src/core/KindLearner.cpp
@@ -48,10 +51,12 @@ target_include_directories(observex_core PUBLIC src)
 target_link_libraries(observex_core PRIVATE observex_warnings)
 
 # Engine: the real-time loop (screen capture on its own thread and GPU device), the recorder, the recogniser (a
-# trained model on the GPU through TensorRT), its live log while recording, the finder (the same model over a
-# recording), the kind update after a review and the refresher that makes old recordings' guesses fresh for it. No
-# UI code.
+# trained model on the GPU through TensorRT), its live log while recording, the clip buffer (the last 10 s through
+# the GPU's video encoder) and the clip player (Media Foundation), the finder (the same model over a recording), the
+# kind update after a review and the refresher that makes old recordings' guesses fresh for it. No UI code.
 add_library(observex_engine STATIC
+    src/engine/ClipPlayer.cpp
+    src/engine/ClipRecorder.cpp
     src/engine/Detector.cpp
     src/engine/Finder.cpp
     src/engine/Gpu.cpp
@@ -67,13 +72,14 @@ add_library(observex_engine STATIC
 target_compile_definitions(observex_engine PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(observex_engine
     PUBLIC observex_core d3d11 dxgi
-    PRIVATE windowscodecs d3dcompiler observex_tensorrt observex_warnings)
+    PRIVATE windowscodecs d3dcompiler mfplat mfreadwrite mfuuid observex_nvenc observex_tensorrt observex_warnings)
 
 # App: the window and the UI. The icon and fonts are built into the exe (see src/app/observex.rc.in).
 set(OBSERVEX_SOURCE_DIR ${CMAKE_SOURCE_DIR})
 configure_file(src/app/observex.rc.in ${CMAKE_BINARY_DIR}/observex.rc @ONLY)
 add_executable(observex
     src/app/App.cpp
+    src/app/ClipView.cpp
     src/app/MainWindow.cpp
     src/app/Review.cpp
     src/app/ReviewLog.cpp
@@ -108,6 +114,7 @@ if(OBSERVEX_BUILD_TESTS)
     enable_testing()
     add_executable(observex_tests
         tests/BoxLearnerTests.cpp
+        tests/ClipLinesTests.cpp
         tests/FeaturesTests.cpp
         tests/ImageViewTests.cpp
         tests/KindLearnerTests.cpp

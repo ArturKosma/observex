@@ -131,6 +131,39 @@ void drawIcon(ImDrawList* drawList, Icon icon, ImVec2 centre, ImU32 color, const
         drawList->AddCircleFilled(centre, 2.6f * dpi, color);
         break;
     }
+    case Icon::Replay: {
+        // A ring open at the top left, ending at the top in an arrow head that points back (anticlockwise), and two
+        // clock hands: the last seconds, gone round again.
+        constexpr float kPi = 3.14159265f;
+        const float radius = 6.5f * dpi;
+        drawList->PathArcTo(centre, radius, -kPi * 0.5f, kPi * 1.18f, 20);
+        drawList->PathStroke(color, 0, l.stroke);
+        drawList->AddTriangleFilled(ImVec2(centre.x - 3.0f * dpi, centre.y - radius),
+                                    ImVec2(centre.x + 0.8f * dpi, centre.y - radius - 3.2f * dpi),
+                                    ImVec2(centre.x + 0.8f * dpi, centre.y - radius + 3.2f * dpi), color);
+        drawList->PathLineTo(ImVec2(centre.x, centre.y - 3.2f * dpi));
+        drawList->PathLineTo(centre);
+        drawList->PathLineTo(ImVec2(centre.x + 2.4f * dpi, centre.y + 1.6f * dpi));
+        drawList->PathStroke(color, 0, l.stroke);
+        break;
+    }
+    case Icon::Play: {
+        const float half = std::round(5.5f * dpi);
+        drawList->AddTriangleFilled(ImVec2(centre.x - half * 0.7f, centre.y - half),
+                                    ImVec2(centre.x + half * 0.9f, centre.y),
+                                    ImVec2(centre.x - half * 0.7f, centre.y + half), color);
+        break;
+    }
+    case Icon::Pause: {
+        const float half = std::round(5.0f * dpi);
+        const float bar = std::round(3.0f * dpi);
+        const float gap = std::round(1.5f * dpi);
+        drawList->AddRectFilled(ImVec2(centre.x - gap - bar, centre.y - half), ImVec2(centre.x - gap, centre.y + half),
+                                color, 1.0f * dpi);
+        drawList->AddRectFilled(ImVec2(centre.x + gap, centre.y - half), ImVec2(centre.x + gap + bar, centre.y + half),
+                                color, 1.0f * dpi);
+        break;
+    }
     case Icon::None:
         break;
     }
@@ -182,7 +215,8 @@ bool BarButton::draw(const char* id, const theme::Fonts& fonts) const {
         const float left = min.x + rounding;
         const float bottom = max.y - std::round(4.0f * l.dpi);
         const float thickness = std::round(3.0f * l.dpi);
-        drawList->AddRectFilled(ImVec2(left, bottom - thickness), ImVec2(max.x - rounding, bottom), theme::kBorderHover);
+        drawList->AddRectFilled(ImVec2(left, bottom - thickness), ImVec2(max.x - rounding, bottom),
+                                theme::kBorderHover);
         drawList->AddRectFilled(ImVec2(left, bottom - thickness),
                                 ImVec2(left + (max.x - rounding - left) * std::min(progress, 1.0f), bottom), highlight);
     }

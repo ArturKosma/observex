@@ -38,6 +38,8 @@ bool Pipeline::start(const Screen& screen) {
                                                     ScreenCapture::kImageFormat);
         recognition_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                       ScreenCapture::kImageFormat);
+        clip_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                               ScreenCapture::kImageFormat);
     } catch (const std::exception& e) {
         stop();
         fail(std::string("Could not start screen capture: ") + e.what());
@@ -63,6 +65,7 @@ void Pipeline::stop() {
     preview_.reset();
     recording_.reset();
     recognition_.reset();
+    clip_.reset();
     capture_.reset();
     gpu_ = {};
     state_.store(State::Stopped, std::memory_order_release);
@@ -108,6 +111,9 @@ void Pipeline::run(std::stop_token stop) {
             const ImageStamp stamp{images, frame.presentQpc};
             if (recognitionEnabled_.load(std::memory_order_relaxed)) {
                 recognition_->write(gpu_.context.Get(), frame.texture, stamp);
+            }
+            if (clipEnabled_.load(std::memory_order_relaxed)) {
+                clip_->write(gpu_.context.Get(), frame.texture, stamp);
             }
             if (previewEnabled_.load(std::memory_order_relaxed)) {
                 preview_->write(gpu_.context.Get(), frame.texture, stamp);

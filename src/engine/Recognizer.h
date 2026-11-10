@@ -19,6 +19,7 @@
 
 namespace observex {
 
+class ClipRecorder;
 class ImageChannel;
 class ImageReader;
 class LiveLog;
@@ -94,6 +95,11 @@ public:
     // goes into `log`. Any thread; null stops it. The log stays alive while the recogniser is writing to it.
     void setLog(std::shared_ptr<LiveLog> log) { log_.store(std::move(log), std::memory_order_release); }
 
+    // While set, every look also goes into `clip` (the clip buffer: what was seen and followed in the last seconds),
+    // and everything found down to LiveLog::kMinSure sure. Any thread; null stops it. It stays alive while the
+    // recogniser is handing a look to it.
+    void setClip(std::shared_ptr<ClipRecorder> clip) { clip_.store(std::move(clip), std::memory_order_release); }
+
     // Loads the kind update next to the model again before its next look (on its own thread; see Detector), e.g.
     // after a new one was written, or drops it if there is no valid one any more. Any thread.
     void reloadKinds() { reloadKinds_.store(true, std::memory_order_release); }
@@ -114,6 +120,7 @@ private:
     TripleBuffer<Found> found_;
     TripleBuffer<RecognizerStats> stats_;
     std::atomic<std::shared_ptr<LiveLog>> log_;
+    std::atomic<std::shared_ptr<ClipRecorder>> clip_;
     std::atomic<bool> reloadKinds_{false};
     std::atomic<std::size_t> kindAnswers_{0};
     std::atomic<State> state_{State::Starting};

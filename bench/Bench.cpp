@@ -1,11 +1,12 @@
 // observex_bench: measures the capture pipeline from a console, without opening the app window.
 //
 //   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--every S] [--unsure]]
-//                  [--model FOLDER]
+//                  [--model FOLDER] [--clip FOLDER]
 //   observex_bench --model FOLDER --images FOLDER --out FILE
 //   observex_bench --model FOLDER --replay RECORDING
 //   observex_bench --model FOLDER --update-kinds RECORDINGS
 //   observex_bench --track LOG
+//   observex_bench --clip-frames CLIP --out FOLDER [--every N]
 //
 // Lists the screens, runs the real Pipeline on one (the primary by default, or number N from the list)
 // and prints its numbers once a second.
@@ -23,6 +24,11 @@
 // screen as it is. With --model too, it also writes the live log (e.g. character-live.txt, see engine/LiveLog) like the
 // app, and marks once halfway, as if Ctrl+Alt+M were pressed. --unsure saves a due image only if the model sees it
 // differently mirrored, like Record's "Only unsure" (Pipeline::setRecordOnlyQuestions), and counts the answers.
+//
+// Clip: --clip keeps the clip buffer running as the app does while observing (engine/ClipRecorder: the last 10 s
+// through the GPU's video encoder, with the recogniser's looks when --model is given too), adds its numbers (frames
+// encoded per second, milliseconds per frame, seconds and megabytes held), notes halfway, and at the end saves a clip
+// into a new folder in FOLDER, as the app's Save button does, and says what it wrote.
 //
 // Model: --model runs live recognition with the model in FOLDER (e.g. models/character) the way the app does while
 // observing, and adds its numbers: images recognised per second, milliseconds per image, things found.
@@ -51,6 +57,12 @@
 // Track: --track follows the things of a live log (a recording's character-live.txt) with the Tracker, look by look as
 // the recogniser does, and prints how steady the boxes are with and without it, and what following costs; for a log
 // with kinds (since 2026-11-08), also how often a thing's kind changes. No GPU.
+//
+// Clip frames: --clip-frames decodes a saved clip's video (CLIP is a clip folder, for its clip.mp4, or an .mp4 file)
+// frame by frame as the clip player does (engine/ClipPlayer's ClipReader, on the GPU's video decoder), writes
+// FOLDER/frames.txt with a "FRAME TIME_MS" line per frame (its place in the video from 1, the numbers the player and
+// clip.txt use, and its time since frame 1), and frame-000123.jpg for frame 1, every Nth after it (default 10) and the
+// last, so the frames can be looked at. Prints the frames, the length and how long decoding took per frame.
 
 #include "core/BoxLearner.h"
 #include "core/Features.h"
@@ -62,6 +74,8 @@
 #include "core/Recordings.h"
 #include "core/StatWindow.h"
 #include "core/Tracker.h"
+#include "engine/ClipPlayer.h"
+#include "engine/ClipRecorder.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
@@ -84,6 +98,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -114,6 +129,9 @@ struct Options {
     const char* track = nullptr;
     const char* replay = nullptr;
     const char* updateKinds = nullptr;
+    const char* clipFolder = nullptr;
+    const char* clipFrames = nullptr;
+    unsigned frameEvery = 10; // --every for --clip-frames: a JPEG of every Nth frame.
 };
 
 bool parse(int argc, char** argv, Options& options) {
@@ -130,6 +148,7 @@ bool parse(int argc, char** argv, Options& options) {
             options.recordFolder = argv[++i];
         } else if (std::strcmp(argv[i], "--every") == 0 && i + 1 < argc) {
             options.recordEvery = static_cast<unsigned>(std::atoi(argv[++i]));
+            options.frameEvery = options.recordEvery;
         } else if (std::strcmp(argv[i], "--unsure") == 0) {
             options.recordUnsure = true;
         } else if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -144,15 +163,24 @@ bool parse(int argc, char** argv, Options& options) {
             options.replay = argv[++i];
         } else if (std::strcmp(argv[i], "--update-kinds") == 0 && i + 1 < argc) {
             options.updateKinds = argv[++i];
+        } else if (std::strcmp(argv[i], "--clip") == 0 && i + 1 < argc) {
+            options.clipFolder = argv[++i];
+        } else if (std::strcmp(argv[i], "--clip-frames") == 0 && i + 1 < argc) {
+            options.clipFrames = argv[++i];
         } else {
             std::printf("usage: observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] "
-                        "[--record FOLDER [--every S] [--unsure]] [--model FOLDER]\n"
+                        "[--record FOLDER [--every S] [--unsure]] [--model FOLDER] [--clip FOLDER]\n"
                         "       observex_bench --model FOLDER --images FOLDER --out FILE\n"
                         "       observex_bench --model FOLDER --replay RECORDING\n"
                         "       observex_bench --model FOLDER --update-kinds RECORDINGS\n"
-                        "       observex_bench --track LOG\n");
+                        "       observex_bench --track LOG\n"
+                        "       observex_bench --clip-frames CLIP --out FOLDER [--every N]\n");
             return false;
         }
+    }
+    if (options.clipFrames != nullptr && options.out == nullptr) {
+        std::printf("--clip-frames needs --out\n");
+        return false;
     }
     if (options.images != nullptr && (options.model == nullptr || options.out == nullptr)) {
         std::printf("--images needs --model and --out\n");
@@ -777,6 +805,143 @@ int updateKinds(const Options& options) {
     }
 }
 
+// The local time now, as std::strftime writes it with `format`.
+std::string localTime(const char* format) {
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_s(&local, &now);
+    char text[64];
+    return std::string(text, std::strftime(text, sizeof(text), format, &local));
+}
+
+// Saves what `clip` holds into a new folder in `clipsFolder`, as the app's Save button does, waits for it and says what
+// it wrote.
+void saveClip(ClipRecorder& clip, const char* clipsFolder, const Screen& screen, const Recognizer* recognizer,
+              const char* model) {
+    if (clip.state() == ClipRecorder::State::Failed) {
+        std::printf("Clip buffer failed: %s\n", clip.error().c_str());
+        return;
+    }
+    ClipAbout about;
+    about.saved = localTime("%Y-%m-%d %H:%M:%S");
+    about.screen = screen.monitor;
+    if (recognizer != nullptr) {
+        about.model = toUtf8((std::filesystem::path(model) / L"model.onnx").c_str());
+        about.kinds = recognizer->kinds();
+    }
+    const std::filesystem::path folder = std::filesystem::path(clipsFolder) / localTime("%Y-%m-%d_%H-%M-%S");
+    const auto start = std::chrono::steady_clock::now();
+    if (!clip.save(folder, about)) {
+        std::printf("The clip buffer holds nothing to save yet.\n");
+        return;
+    }
+    while (clip.saveState() == ClipRecorder::SaveState::Saving) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (clip.saveState() == ClipRecorder::SaveState::Failed) {
+        std::printf("Saving the clip failed: %s\n", clip.saveError().c_str());
+        return;
+    }
+    const ClipInfo& info = clip.savedInfo();
+    const auto megabytes = [&](const char* name) {
+        std::error_code error;
+        const auto size = std::filesystem::file_size(folder / name, error);
+        return error ? 0.0 : static_cast<double>(size) / (1024.0 * 1024.0);
+    };
+    std::printf("Saved a clip of %.2f s (%u frames, %u looks) in %.0f ms into %s\n"
+                "  %s %.1f MB, %s %.2f MB, %s %.2f MB\n",
+                info.seconds, info.frames, info.looks, ms, toUtf8(folder.c_str()).c_str(), kClipVideo,
+                megabytes(kClipVideo), kClipText, megabytes(kClipText), kClipPicture, megabytes(kClipPicture));
+}
+
+// --clip-frames: decodes a clip's video as the clip player does, writes frames.txt and every Nth frame as a JPEG.
+int clipFrames(const Options& options) {
+    namespace fs = std::filesystem;
+    using Clock = std::chrono::steady_clock;
+    const auto msSince = [](Clock::time_point start) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    };
+    fs::path video(options.clipFrames);
+    if (fs::is_directory(video)) {
+        video /= kClipVideo;
+    }
+    const ComPtr<IDXGIAdapter1> adapter = findPrimaryGpu();
+    const GpuDevice gpu = createGpuDevice(adapter.Get(), true); // Video support, for the GPU's video decoder.
+    const Clock::time_point openStart = Clock::now();
+    ClipReader reader(gpu.device.Get(), video);
+    const double openMs = msSince(openStart);
+    const fs::path out(options.out);
+    fs::create_directories(out);
+    const std::vector<double>& times = reader.times();
+    std::printf("%s: %u x %u, %zu frames, %.3f s, decoded on the %s (opened in %.0f ms)\n",
+                toUtf8(video.c_str()).c_str(), reader.width(), reader.height(), times.size(), times.back(),
+                reader.onGpu() ? "GPU" : "CPU", openMs);
+
+    // First every frame, decoding alone, timed until the GPU is done with it.
+    std::ofstream list(out / "frames.txt", std::ios::binary);
+    ClipReader::Frame frame;
+    std::uint64_t frames = 0;
+    const Clock::time_point decodeStart = Clock::now();
+    while (reader.next(frame)) {
+        ++frames;
+        char line[64];
+        std::snprintf(line, sizeof(line), "%llu %.3f\n", static_cast<unsigned long long>(frame.number),
+                      frame.seconds * 1000.0);
+        list << line;
+    }
+    D3D11_QUERY_DESC queryDesc{D3D11_QUERY_EVENT, 0};
+    ComPtr<ID3D11Query> done;
+    check(gpu.device->CreateQuery(&queryDesc, &done), "CreateQuery");
+    gpu.context->End(done.Get());
+    while (gpu.context->GetData(done.Get(), nullptr, 0, 0) == S_FALSE) {
+        std::this_thread::yield();
+    }
+    const double decodeMs = msSince(decodeStart);
+    list.close();
+    std::printf("Decoded %llu frames in %.0f ms: %.2f ms per frame\n", static_cast<unsigned long long>(frames),
+                decodeMs, frames > 0 ? decodeMs / static_cast<double>(frames) : 0.0);
+
+    // Then again from the start, reading frame 1, every Nth after it and the last back for their JPEGs.
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = reader.width();
+    desc.Height = reader.height();
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = ScreenCapture::kImageFormat;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    check(gpu.device->CreateTexture2D(&desc, nullptr, &staging), "CreateTexture2D (clip frame)");
+    const unsigned every = std::max(options.frameEvery, 1u);
+    const Clock::time_point writeStart = Clock::now();
+    unsigned written = 0;
+    reader.rewind();
+    while (reader.next(frame)) {
+        if ((frame.number - 1) % every != 0 && frame.number != times.size()) {
+            continue;
+        }
+        gpu.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, frame.texture, frame.subresource, nullptr);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        check(gpu.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Map (clip frame)");
+        char name[32];
+        std::snprintf(name, sizeof(name), "frame-%06llu.jpg", static_cast<unsigned long long>(frame.number));
+        try {
+            writeImageFile(out / name, ImageFormat::Jpeg, mapped.pData, reader.width(), reader.height(),
+                           mapped.RowPitch);
+        } catch (...) {
+            gpu.context->Unmap(staging.Get(), 0);
+            throw;
+        }
+        gpu.context->Unmap(staging.Get(), 0);
+        ++written;
+    }
+    std::printf("Wrote frames.txt and %u JPEGs (frame 1, every %u after it, the last) into %s in %.1f s\n", written,
+                every, toUtf8(out.c_str()).c_str(), msSince(writeStart) / 1000.0);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -797,6 +962,19 @@ int main(int argc, char** argv) {
             std::printf("%s\n", e.what());
             return 1;
         }
+    }
+    if (options.clipFrames != nullptr) {
+        const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); // Media Foundation needs it.
+        int result = 1;
+        try {
+            result = clipFrames(options);
+        } catch (const std::exception& e) {
+            std::printf("%s\n", e.what());
+        }
+        if (com) {
+            CoUninitialize();
+        }
+        return result;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); // Required by DuplicateOutput1.
     if (options.images != nullptr) {
@@ -877,6 +1055,17 @@ int main(int argc, char** argv) {
                 pipeline.setRecordOnlyQuestions(options.recordUnsure);
                 pipeline.setRecordingInterval(options.recordEvery);
             }
+            // The clip buffer, as the app keeps it while observing.
+            std::shared_ptr<ClipRecorder> clip;
+            if (options.clipFolder != nullptr) {
+                clip = std::make_shared<ClipRecorder>(screen, *pipeline.clip());
+                pipeline.setClipEnabled(true);
+                if (recognizer) {
+                    recognizer->setClip(clip);
+                }
+            }
+            bool clipNoted = false;
+            bool clipFailed = false;
             bool marked = false;
             std::jthread pulse;
             if (options.pulse) {
@@ -890,8 +1079,9 @@ int main(int argc, char** argv) {
                         : options.recordUnsure ? "only unsure"
                                                : "on",
                         recognizer ? "on" : "off");
-            std::printf("  images/s  merged/s  latency avg / max ms  work avg / max ms%s\n",
-                        recognizer ? "  recognised/s  recognise avg / max ms  found" : "");
+            std::printf("  images/s  merged/s  latency avg / max ms  work avg / max ms%s%s\n",
+                        recognizer ? "  recognised/s  recognise avg / max ms  found" : "",
+                        clip ? "  encoded/s  encode avg / max ms  held s    MB  dropped" : "");
 
             using Clock = std::chrono::steady_clock;
             const Clock::time_point start = Clock::now();
@@ -913,6 +1103,14 @@ int main(int argc, char** argv) {
                     pipeline.recordNow();
                     marked = true;
                 }
+                if (clip && !clipNoted && Clock::now() - start >= std::chrono::milliseconds(options.seconds * 500)) {
+                    clip->note("halfway (observex_bench)");
+                    clipNoted = true;
+                }
+                if (clip && !clipFailed && clip->state() == ClipRecorder::State::Failed) {
+                    std::printf("Clip buffer failed: %s\n", clip->error().c_str());
+                    clipFailed = true;
+                }
 
                 if (Clock::now() >= nextPrint) {
                     nextPrint += std::chrono::seconds(1);
@@ -929,6 +1127,14 @@ int main(int argc, char** argv) {
                                     recognizer->found().count);
                         recognisedSum += seen.imagesPerSecond;
                         recogniseMsSum += seen.workAvgMs;
+                    }
+                    if (clip) {
+                        const ClipRecorderStats& held = clip->stats();
+                        std::printf("  %9.1f  %8.2f / %-8.2f  %6.1f  %4.0f  %7llu",
+                                    static_cast<double>(held.framesPerSecond), static_cast<double>(held.encodeAvgMs),
+                                    static_cast<double>(held.encodeMaxMs), held.seconds,
+                                    static_cast<double>(held.bytes) / (1024.0 * 1024.0),
+                                    static_cast<unsigned long long>(held.dropped));
                     }
                     std::printf("\n");
                     lastMerged = stats.mergedUpdates;
@@ -949,9 +1155,19 @@ int main(int argc, char** argv) {
                                 recogniseMsSum / samples);
                 }
             }
+            if (clip) {
+                saveClip(*clip, options.clipFolder, screen, recognizer.get(), options.model);
+                if (recognizer) {
+                    recognizer->setClip(nullptr);
+                }
+            }
             if (recognizer) {
                 pipeline.setRecognitionEnabled(false);
                 recognizer.reset();
+            }
+            if (clip) {
+                pipeline.setClipEnabled(false);
+                clip.reset();
             }
             if (recorder) {
                 pipeline.setRecordingInterval(0);

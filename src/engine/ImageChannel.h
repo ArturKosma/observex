@@ -30,8 +30,9 @@ public:
     ImageChannel(const ImageChannel&) = delete;
     ImageChannel& operator=(const ImageChannel&) = delete;
 
-    // Pipeline thread: copies `image` (same size and format) into a free texture and hands it to the reader.
-    void write(ID3D11DeviceContext* context, ID3D11Texture2D* image, const ImageStamp& stamp);
+    // Pipeline thread: copies `image` (same size and format) into a free texture and hands it to the reader. Only its
+    // `subresource` (e.g. one slice of a video decoder's texture array).
+    void write(ID3D11DeviceContext* context, ID3D11Texture2D* image, const ImageStamp& stamp, UINT subresource = 0);
 
     unsigned width() const { return width_; }
     unsigned height() const { return height_; }

@@ -2,6 +2,7 @@
 
 #include "core/Mirror.h"
 #include "core/StatWindow.h"
+#include "engine/ClipRecorder.h"
 #include "engine/ImageChannel.h"
 #include "engine/LiveLog.h"
 
@@ -91,9 +92,11 @@ void Recognizer::run(std::stop_token stop) {
         if (reader_->waitForImage(kWaitMs) && reader_->copyNewImage(gpu_.context.Get(), detector->input(), &stamp)) {
             const std::int64_t start = qpcNow();
             const std::shared_ptr<LiveLog> log = log_.load(std::memory_order_acquire);
+            const std::shared_ptr<ClipRecorder> clip = clip_.load(std::memory_order_acquire);
             const bool asked = question_ != nullptr && question_->asked();
-            // While logging or asked, also the things it is less sure of, for the log and the mirror test only.
-            const float minSure = log || asked ? LiveLog::kMinSure : kMinSure;
+            // While logging, keeping a clip or asked, also the things it is less sure of, for the log, the clip and the
+            // mirror test only.
+            const float minSure = log || clip || asked ? LiveLog::kMinSure : kMinSure;
             const int count = detector->detect(gpu_.context.Get(), minSure, detections.data(),
                                                static_cast<int>(Found::kMax));
             if (count < 0) {
@@ -115,7 +118,13 @@ void Recognizer::run(std::stop_token stop) {
                 tracker.update(timeMs, detections.data(), sure, found.things.data(), static_cast<int>(Found::kMax));
             found.image = ++images;
             found_.publish();
-            work.add(static_cast<float>(static_cast<double>(qpcNow() - start) * msPerTick));
+            const std::int64_t done = qpcNow();
+            work.add(static_cast<float>(static_cast<double>(done - start) * msPerTick));
+            // The published slot is not written again until it comes back as a write slot, so it can be read here.
+            if (clip) {
+                clip->looked(stamp, done, {detections.data(), static_cast<std::size_t>(count)},
+                             {found.things.data(), static_cast<std::size_t>(found.count)});
+            }
 
             // The mirror test, after the UI has what is on the image, so it never holds that up.
             if (asked) {

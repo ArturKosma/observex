@@ -591,9 +591,34 @@ Not built yet: react (mouse and keyboard), and the knowledge file (what to look 
 saved and loaded).
 
 **Training stopped (2026-11-10, the user's decision after many evenings of small gains):** no more training rounds,
-label cleaning or model tricks; the fifteenth stays. Next is heuristics on top of the model, tuned on clips: a 30 s
-ring buffer saved on a hotkey, a bench replay of a clip with per-look numbers, and our own player (frame by frame
+label cleaning or model tricks; the fifteenth stays. Next is heuristics on top of the model, tuned on clips: a
+ring buffer saved on request, a bench replay of a clip with per-look numbers, and our own player (frame by frame
 and smooth, later like Unreal's Rewind Debugger: per look what the model saw, what the tracker and rules decided).
+**Clips: built 2026-11-11** (the user asked, 2026-11-10: the last 10 s, exactly what they see, nothing drawn on it,
+every guess and anything interesting as text, so the same seconds can be compared after a heuristics change; Review
+asks "recordings or clips?", clips listed with miniatures like recordings; reviewing a clip only plays it for now,
+the user will say what comes next). The clip buffer (`engine/ClipRecorder`, see Architecture) always runs while a
+screen is observed. A clip is a folder in `<recordings folder>/clips/`, named by when it was saved: `clip.mp4`
+(H.264, a frame each time the screen changed, at the time the screen showed it), `clip.txt` (`core/ClipLines` and
+`core/LiveLines`, header explains: `frame FRAME IMAGE TIME` ties each video frame to the screen image number the
+looks use; `look`/`kinds` as in the live log, down to 10% sure; `shown IMAGE DONE ...` what the app showed after
+each look: the tracker's things with id, sureness, kinds, box, speed, held; `note TIME TEXT`), `picture.jpg` (the
+screen at the save, the list's miniature) and `clip.observex` (`ClipInfo`: saved, seconds, frames, looks, screen,
+size, model). `observex_bench --track <clip>/clip.txt` replays its looks through the tracker as for a live log.
+In the app: **Save last 10 s** (top bar, left of Record, or the system-wide Ctrl+Alt+C, shown in Settings with the
+other hotkeys) saves what the buffer holds, then says "Saved 10.3 s" for a moment; it is greyed out (with why, on
+hover) until the buffer holds frames or while a save is written. **Review** first asks "What do we review?":
+recordings (as before) or clips; the clips list ("Play a clip") shows each clip's `picture.jpg` with when, seconds,
+frames, looks and screen, newest first. A clip opens on the clip screen (`app/ClipView`, the frame as large as fits,
+framed like the observed screen) instead of the observed screen; the top bar then has play/pause (or Space), the
+time ("0:05.9 / 0:10.1"), the frame number (the `frame` lines' numbers) and Close clip. It plays the frames at their
+own times (`engine/ClipPlayer`: GPU decode through Media Foundation's source reader, with its frame-rate conversion
+turned off, `MF_XVP_DISABLE_FRC`, or it repeats and skips frames of a video whose frame rate varies; the CPU decoder
+if the GPU's fails; paced by a waitable timer). Opening one takes about 0.1 s on the UI thread. The app's own notes go
+into `clip.txt` as `note` lines: clip saved, save last 10 s (button or hotkey), recording started/stopped, mark,
+review and clip opened/closed, kind update made, show Characters/Kinds on/off. The clip buffer pauses while a review
+is open (the finder gets the GPU) and repeats the last image meanwhile. Checked 2026-11-11: every decoded frame's time
+matches its `frame` line within 0.06 ms; colours within about 0.7 of 255 per channel of `picture.jpg`.
 Targets, from the 2026-11-09 measurement above: steady false alarms (UI panels, minimap, pillars, name tags) and
 boxes around 2+ characters, which no rule over time removes, and kinds that change from look to look.
 
@@ -643,7 +668,25 @@ captures only the screens on that GPU):
   recording channel into a CPU-readable texture and writes numbered JPEGs (`engine/ImageFile`, WIC). Slow disks or
   encoding can never hold up capture; images that arrive while one is saving replace each other. Each saved image
   gets a `saved` line in the live log.
-- **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window, swap chain, system-wide hotkeys: Ctrl+Alt+R, Ctrl+Alt+M), ImGui, `Theme`
+- **Clip thread** (`engine/ClipRecorder`, while a screen is observed; the user asked, 2026-11-10): the clip buffer.
+  Its own GPU device reads the clip channel (every new image while `Pipeline::setClipEnabled`) and has the GPU's
+  video encoder (NVENC, loaded at run time from the driver's `nvEncodeAPI64.dll`, API 13.0) compress it into H.264,
+  synchronously: a frame each time the screen changed, timed by when the screen showed it, at least a frame gap apart
+  (1/144 s, or what H.264 level 5.2 allows at the screen's size). Within a gap it copies nothing; the image the screen
+  shows when the gap ends is the next frame, timed a moment later (under a gap) if the screen showed it sooner, so the
+  video keeps to its level (a 240 Hz screen gives about 120 frames a second: every other image). No B-frames, a key frame at least every 0.5 s (a still screen's
+  last image is repeated as one), constant quality 22 within 120 Mbit/s, BT.709 limited range. It keeps the
+  compressed frames, cut at key frames, back to the last key frame at or before 10 s ago, plus every look the
+  recogniser hands it (`Recognizer::setClip`: what it found down to 10% sure and what the tracker followed, through a
+  fixed 64-look queue that never waits; drops are counted) and the UI's notes. `save` hands a copy of all that (the
+  frames shared, not copied) to a writer thread: `clip.mp4` (Media Foundation's sink writer, the frames as they are,
+  no second encode; MP4 timescale 144000, so the frame times stay exact), `clip.txt`, `picture.jpg` (the newest
+  image) and `clip.observex` last. A clip is 10.0 to 10.5 s. Measured 2026-11-11 (Release bench, 2560 x 1440 at 240
+  Hz, pulse, `--model models/character`, 4 runs each with and without `--clip`): 120 frames a second at about 4.3 ms
+  each, capture unchanged (239.8 images/s), the recogniser 3.28 -> 3.57 ms a look (239 -> 238 a second), a save takes
+  under 0.1 s; the plain desktop makes about 7 MB a clip. (Before the gap rule it copied every image, 240 a second,
+  and encoded 150-160 frames a second, over the level: 0.8 ms more a look.)
+- **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window, swap chain, system-wide hotkeys: Ctrl+Alt+R, Ctrl+Alt+M, Ctrl+Alt+C), ImGui, `Theme`
   (fonts, colours, logo, the boxes and tags drawn over screen images, shared by the review and the live view), `Widgets` (`BarButton`, the top-bar button look), `ScreenPicker` (the miniatures),
   `ScreenImage` (a screen image the UI can draw at any size: it keeps a mip chain so shrunken views look smooth, and
   draws opaque), `Thumbnails` (the Review list's pictures), `Settings` (observex.cfg, folder picker) and `Review` (the review screen; it reads each image with
@@ -654,8 +697,8 @@ The threads share data only through lock-free hand-overs, so the UI and the reco
 - `TripleBuffer<T>` (core): newest-value hand-over for stats.
 - `ImageChannel` / `ImageReader` (engine): three shared GPU textures rotated by a TripleBuffer; keyed mutexes order
   the two devices' GPU work. The reader copies each new image out right away and hands the texture straight back.
-  One channel for the UI preview, one for the recorder, one for the recogniser (its reader also gets an event, so it
-  sleeps until an image arrives).
+  One channel for the UI preview, one for the recorder, one for the recogniser and one for the clip buffer (their
+  readers also wait on an event, so they sleep until an image arrives).
 - Atomics for state, the preview and recognition on/off flags, the recording rate and the model preparing progress.
 
 Lifecycle: the UI thread owns the pipeline. Picking a screen starts it on that screen; a display mode change restarts
@@ -665,7 +708,9 @@ not the observed one, whose miniature reuses the observed image. A recording bel
 start time, images saved, its `RecordingInfo`); a pipeline restart only pauses it (the `Recorder` is destroyed before the pipeline stops
 and made again after, numbering on in the same folder). Picking a screen, a disconnected screen or a save error
 ends it. The `Recognizer` lives with the observed screen: made in `App::observe`, destroyed in `stopObserving`
-before the pipeline frees its channel (its destructor also cancels preparing a model).
+before the pipeline frees its channel (its destructor also cancels preparing a model). So does the `ClipRecorder`
+(made in `observe` and handed to the recogniser; destroyed after the recogniser, finishing a save still being
+written), so the clip buffer starts empty on each pipeline start.
 
 Planned next, inside `engine/`: a reactor (`SendInput`) and a knowledge file; see
 [docs/training-loop.md](docs/training-loop.md).
@@ -689,12 +734,18 @@ Configuring, building and running the tests and the bench here is fine. Do not l
 
 - Configure: `cmake --preset vs2022` (Visual Studio 2022 generator, output in `build/vs2022`). The first configure
   downloads TensorRT 11.4's DLLs (about 2 GB, NVIDIA's pip server), its headers (NVIDIA's GitHub) and the CUDA 13.3
-  runtime parts into `deps/` (gitignored, kept across clean builds), each checked by SHA256 (`cmake/TensorRT.cmake`).
+  runtime parts into `deps/` (gitignored, kept across clean builds), each checked by SHA256 (`cmake/TensorRT.cmake`),
+  and NVENC's header (`nvEncodeAPI.h`, FFmpeg's nv-codec-headers n13.0.19.1, `cmake/Nvenc.cmake`).
 - Build: `cmake --build --preset debug` (or `release`)
 - Test: `ctest --preset debug`
 - Bench: `build/vs2022/bin/Release/observex_bench.exe [--screen N] [--seconds S] [--no-pulse] [--no-preview]
-  [--record FOLDER [--every S] [--unsure]] [--model FOLDER]`. Lists the screens and measures one (the primary by
-  default). `--unsure` records like Record's "Only unsure" (needs `--model`; its answers are the log's `mirror`
+  [--record FOLDER [--every S] [--unsure]] [--model FOLDER] [--clip FOLDER]`. Lists the screens and measures one (the
+  primary by default). `--clip` runs the clip buffer as the app does, prints its numbers (encoded/s, encode ms, seconds
+  and MB held, dropped looks), notes halfway, and at the end saves a clip into a new folder in FOLDER (a scratch
+  folder: it shows the screen) and says what it wrote; `observex_bench --track FOLDER/clip.txt` replays its looks.
+  `observex_bench --clip-frames CLIP --out FOLDER [--every N]` decodes a clip as the player does and writes
+  `frames.txt` ("FRAME TIME_MS" per frame) and a JPEG of frame 1, every Nth and the last, to look at a clip's frames
+  (1.7 ms a frame on the GPU at 1440p). `--unsure` records like Record's "Only unsure" (needs `--model`; its answers are the log's `mirror`
   lines).
   Its "pulse" is an invisible 2 x 2 pixel, click-through, never-focused window in the screen's corner that presents
   every refresh like a game, so the screen has something to capture. `--record` saves images like the Record button
@@ -749,13 +800,13 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   `KindLearner`: re-fitting the kind classifier to the review's answers and for
   the kind update, and picking kinds with it; `Features`: the `<category>-features.bin` format and when it is fresh;
   `ModelInfo`: model.json's kinds and kind classifier, and `kinds-update.json`; `LiveLines`: the live log's `look`
-  and `kinds` lines; `ReviewLines`: the review log's words; `Recordings`: the `recording.observex` file
-  and listing recordings and their images; `Detection`,
+  and `kinds` lines; `ClipLines`: a clip's `frame`, `shown` and `note` lines; `ReviewLines`: the review log's words;
+  `Recordings`: the `recording.observex` file, listing recordings and their images, and `clip.observex` and listing
+  clips; `Detection`,
   `Tracker`: following found things from look to look). No Windows or GPU headers. Unit tested.
-- `src/engine/`: the real-time pipeline, the recorder and the recogniser (`Gpu`, `ScreenCapture`, `ImageChannel`,
-  `Pipeline`, `Recorder`, `ImageFile`, `Detector`, `Recognizer`, `Finder`, `Refresher`, `KindUpdater`). Windows,
-  Direct3D 11, CUDA and TensorRT,
-  no ImGui.
+- `src/engine/`: the real-time pipeline, the recorder, the recogniser and the clip buffer (`Gpu`, `ScreenCapture`,
+  `ImageChannel`, `Pipeline`, `Recorder`, `ImageFile`, `Detector`, `Recognizer`, `Finder`, `Refresher`, `KindUpdater`,
+  `ClipRecorder`, `ClipPlayer`). Windows, Direct3D 11, CUDA, TensorRT, NVENC and Media Foundation, no ImGui.
 - `src/app/`: the window and UI (`App`, `MainWindow`, `Theme`, `Widgets`, `ScreenPicker`, `ScreenImage`, `Thumbnails`,
   `Settings`, `Review`, `ReviewLog`, `Snapshot`, `main`), plus
   `observex.rc.in` and `Resources.h` (icon, fonts and version info built into the exe).
@@ -771,6 +822,7 @@ Configuring, building and running the tests and the bench here is fine. Do not l
 - `docs/`: plans that span many sessions. `training-loop.md` is how observex learns to recognise things.
 - `cmake/Dependencies.cmake`: Dear ImGui and doctest via FetchContent, and the Inter font files. Pin every dependency
   to a release and its SHA256. `cmake/TensorRT.cmake`: TensorRT and the CUDA runtime into `deps/`.
+  `cmake/Nvenc.cmake`: NVENC's header into `deps/` (the encoder itself comes with the NVIDIA driver).
 
 ## Conventions
 

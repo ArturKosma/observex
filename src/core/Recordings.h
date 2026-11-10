@@ -82,4 +82,47 @@ std::vector<RecordingEntry> listRecordings(const std::filesystem::path& root);
 // The image files of a recording (.jpg, .jpeg or .png), by file name (UTF-8), in name order. Empty if there are none.
 std::vector<std::string> listImages(const std::filesystem::path& folder);
 
+// A clip: the last kClipSeconds of the observed screen as the user saw it, kept in memory all the time while a screen
+// is observed (engine/ClipRecorder) and saved when the user asks (2026-11-11: the "Save last 10 s" button or
+// Ctrl+Alt+C), so what heuristics would have done can later be compared on the same seconds. Each clip is a folder in
+// the clips folder (kClipsFolder, inside the recordings folder), named by when it was saved, holding:
+//   clip.mp4       the screen as captured, nothing drawn on it (H.264, a frame each time the screen changed);
+//   clip.txt       everything the recogniser saw and followed on every look, the frames, and what else happened;
+//   picture.jpg    the screen when it was saved, for the review's list of clips;
+//   clip.observex  a few key=value lines (ClipInfo), by which the review lists the clips.
+inline constexpr double kClipSeconds = 10.0;
+inline constexpr char kClipsFolder[] = "clips";
+inline constexpr char kClipFile[] = "clip.observex";
+inline constexpr char kClipVideo[] = "clip.mp4";
+inline constexpr char kClipText[] = "clip.txt";
+inline constexpr char kClipPicture[] = "picture.jpg";
+
+struct ClipInfo {
+    std::string saved;    // Local time it was saved: "2026-11-10 18:22:05".
+    double seconds = 0.0; // From its first frame to the save. The last frame is a moment before it (at most half a
+                          // second: a still screen's image is repeated that often).
+    unsigned frames = 0;  // Video frames.
+    unsigned looks = 0;   // The recogniser's looks in it.
+    std::string screen;   // The monitor's name, e.g. "Odyssey G61SH".
+    unsigned width = 0;   // The screen's size in pixels (the video's).
+    unsigned height = 0;
+    std::string model; // The model the recogniser ran, e.g. "...\models\character\model.onnx (written 2026-11-10 00:18)".
+};
+
+std::string formatClipInfo(const ClipInfo& info);
+// Skips comments, unknown keys and malformed lines.
+ClipInfo parseClipInfo(std::string_view text);
+// Writes <folder>/clip.observex in one step. False if it could not.
+bool writeClipInfo(const std::filesystem::path& folder, const ClipInfo& info);
+// Reads <folder>/clip.observex; an empty ClipInfo if there is none.
+ClipInfo readClipInfo(const std::filesystem::path& folder);
+
+struct ClipEntry {
+    std::filesystem::path folder;
+    ClipInfo info;
+};
+
+// The clips directly inside `clipsFolder` (the folders holding clip.observex), newest first.
+std::vector<ClipEntry> listClips(const std::filesystem::path& clipsFolder);
+
 } // namespace observex

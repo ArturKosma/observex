@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <initializer_list>
 
 namespace observex {
 
@@ -28,10 +29,16 @@ constexpr char kShowPopup[] = "show";
 constexpr char kCategoryPopup[] = "What are we looking for?";
 constexpr char kRecordPopup[] = "What do we record?";
 constexpr char kRecordingsPopup[] = "recordings";
+constexpr char kReviewPopup[] = "What do we review?";
+constexpr char kClipsPopup[] = "clips";
 constexpr char kChooseText[] = "Choose a screen to observe";
 constexpr char kHotkeyText[] = "Ctrl+Alt+R";
+constexpr char kClipHotkeyText[] = "Ctrl+Alt+C";
 constexpr int kRecordHotkey = 0; // MainWindow hotkey ids.
 constexpr int kMarkHotkey = 1;
+constexpr int kClipHotkey = 2;
+// How long Save last 10 s says "Saved 10.3 s" after a save.
+constexpr auto kSavedShownFor = std::chrono::seconds(3);
 // What live recognition looks for: its model folder, live log, Show flag and box tags.
 constexpr const Category& kLive = kCategories[0];
 // Seconds between saved images while recording (at least, recording only unsure). Neighbouring images are near
@@ -116,6 +123,67 @@ bool choiceTile(const char* id, const char* name, const char* description, ImVec
     return clicked;
 }
 
+// One row of a list popup (the recordings, the clips) as a tile: on the left a picture of the image file `picture`
+// (an empty frame until it is read: only rows in view are read), right of it `title` and under it the `details`
+// (empty ones left out), muted and cut at the tile's edge, together in the middle of the row. Drawn at the cursor;
+// returns true when clicked.
+bool pictureRow(int id, ImVec2 tileSize, Thumbnails& thumbnails, const std::filesystem::path& picture,
+                std::string_view title, std::initializer_list<std::string_view> details, const theme::Fonts& fonts,
+                float dpi) {
+    const float inset = std::round(8.0f * dpi); // Around the picture.
+    const ImVec2 pictureSize(std::round((tileSize.y - inset * 2.0f) * 16.0f / 9.0f), tileSize.y - inset * 2.0f);
+    const float textGap = std::round(14.0f * dpi); // Between the picture and the text, and after the text.
+    const float lineGap = std::round(6.0f * dpi);
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    ImGui::PushID(id);
+    const bool clicked = ImGui::InvisibleButton("##row", tileSize);
+    ImGui::PopID();
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    const ImVec2 max = ImGui::GetItemRectMax();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const ImU32 tileColor = hovered ? theme::kSurfaceActive : theme::kSurfaceHover;
+    drawList->AddRectFilled(min, max, tileColor, 8.0f * dpi);
+    drawList->AddRect(min, max, hovered ? theme::kAccent : theme::kBorderHover, 8.0f * dpi, 0, 1.0f);
+
+    // The picture, fitted into its frame keeping its shape; the frame stays empty if it cannot be read.
+    const ImVec2 frameMin(min.x + inset, min.y + inset);
+    const ImVec2 frameMax(frameMin.x + pictureSize.x, frameMin.y + pictureSize.y);
+    const float pictureRounding = 5.0f * dpi;
+    drawList->AddRectFilled(frameMin, frameMax, theme::kBackground, pictureRounding);
+    const ScreenImage* image = ImGui::IsItemVisible() ? thumbnails.get(picture) : nullptr;
+    if (image) {
+        const float scale = std::min(pictureSize.x / static_cast<float>(image->width()),
+                                     pictureSize.y / static_cast<float>(image->height()));
+        const ImVec2 size(std::round(static_cast<float>(image->width()) * scale),
+                          std::round(static_cast<float>(image->height()) * scale));
+        const ImVec2 imageMin(std::round(frameMin.x + (pictureSize.x - size.x) * 0.5f),
+                              std::round(frameMin.y + (pictureSize.y - size.y) * 0.5f));
+        image->draw(drawList, imageMin, ImVec2(imageMin.x + size.x, imageMin.y + size.y), pictureRounding, tileColor);
+    }
+
+    const float textX = frameMax.x + textGap;
+    const auto lines = static_cast<float>(
+        std::count_if(details.begin(), details.end(), [](std::string_view detail) { return !detail.empty(); }));
+    const float fontSize = ImGui::GetFontSize();
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const float textTop = std::round(min.y + (tileSize.y - fontSize - (lineGap + lineHeight) * lines) * 0.5f);
+    drawList->AddText(fonts.medium, fontSize, ImVec2(textX, textTop), theme::kText, title.data(),
+                      title.data() + title.size());
+    drawList->PushClipRect(ImVec2(textX, min.y), ImVec2(max.x - textGap, max.y), true);
+    float y = textTop + fontSize + lineGap;
+    for (const std::string_view detail : details) {
+        if (!detail.empty()) {
+            drawList->AddText(ImVec2(textX, y), theme::kTextMuted, detail.data(), detail.data() + detail.size());
+            y += lineHeight + lineGap;
+        }
+    }
+    drawList->PopClipRect();
+    return clicked;
+}
+
 // When `file` was last written, in local time: "2026-11-01 09:44". "missing" if there is no such file.
 std::string fileTime(const std::filesystem::path& file) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -128,6 +196,59 @@ std::string fileTime(const std::filesystem::path& file) {
     char text[24];
     std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u", time.wYear, time.wMonth, time.wDay, time.wHour,
                   time.wMinute);
+    return text;
+}
+
+// The live model and when it was written: "...\models\character\model.onnx (written 2026-11-10 00:18)".
+std::string liveModelAbout() {
+    const std::filesystem::path model = modelFolder(kLive.id) / L"model.onnx";
+    return toUtf8(model.c_str()) + " (written " + fileTime(model) + ")";
+}
+
+// `time` as a folder name, "2026-10-31_23-05-12", and as text, "2026-10-31 23:05:12".
+std::string folderName(const SYSTEMTIME& time) {
+    char name[40];
+    std::snprintf(name, sizeof(name), "%04u-%02u-%02u_%02u-%02u-%02u", time.wYear, time.wMonth, time.wDay, time.wHour,
+                  time.wMinute, time.wSecond);
+    return name;
+}
+
+std::string timeText(const SYSTEMTIME& time) {
+    char text[40];
+    std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u:%02u", time.wYear, time.wMonth, time.wDay, time.wHour,
+                  time.wMinute, time.wSecond);
+    return text;
+}
+
+// `parent`/`name`, or `name`_2, _3, ... if that is taken.
+std::filesystem::path freeFolder(const std::filesystem::path& parent, const std::string& name) {
+    std::filesystem::path folder = parent / name;
+    std::error_code error;
+    for (int i = 2; std::filesystem::exists(folder, error); ++i) {
+        folder = parent / (name + "_" + std::to_string(i));
+    }
+    return folder;
+}
+
+// A folder's name, for notes: "2026-11-10_18-22-05".
+std::string nameOf(const std::filesystem::path& folder) {
+    return toUtf8(folder.filename().c_str());
+}
+
+// A clip's time: "0:03.2", minutes, seconds and tenths.
+void formatClipTime(char* text, std::size_t size, double seconds) {
+    const auto tenths = static_cast<long long>(std::max(seconds, 0.0) * 10.0 + 0.5);
+    std::snprintf(text, size, "%lld:%02lld.%lld", tenths / 600, tenths / 10 % 60, tenths % 10);
+}
+
+// `text` with every digit a 0: about as wide as any number of its shape, so text that counts does not move what is
+// laid out by its width.
+std::string zeroDigits(std::string text) {
+    for (char& c : text) {
+        if (c >= '1' && c <= '9') {
+            c = '0';
+        }
+    }
     return text;
 }
 
@@ -197,15 +318,30 @@ int App::run() {
         if (window_->takeHotkeyPress(kMarkHotkey)) {
             markMoment();
         }
+        if (window_->takeHotkeyPress(kClipHotkey)) {
+            saveClip(kClipHotkeyText);
+        }
         if (recorder_ && recorder_->failed()) {
             recordingError_ = "Recording stopped. " + recorder_->error();
-            stopRecording();
+            stopRecording("recording stopped by an error");
         }
         if (recording_ && recorder_) {
             const unsigned saved = recording_->saved + recorder_->saved();
             if (recordingDone(saved)) {
-                stopRecording();
+                stopRecording("recording done");
                 recordingError_ = "Recording done: " + std::to_string(saved) + " images. Record again in a new place.";
+            }
+        }
+        // How the last clip save went: the button says it is saved, or the error shows at the top right.
+        if (clipSaving_ && clipRecorder_) {
+            const ClipRecorder::SaveState state = clipRecorder_->saveState();
+            if (state == ClipRecorder::SaveState::Saved) {
+                clipSaving_ = false;
+                clipSavedAt_ = std::chrono::steady_clock::now();
+                noteInClip("clip saved: " + nameOf(clipRecorder_->savedFolder()));
+            } else if (state == ClipRecorder::SaveState::Failed) {
+                clipSaving_ = false;
+                clipSaveError_ = "Could not save the clip: " + clipRecorder_->saveError();
             }
         }
 
@@ -213,6 +349,14 @@ int App::run() {
         if (closeReview_) {
             closeReview();
             closeReview_ = false;
+        }
+        if (closeClip_) {
+            closeClip();
+            closeClip_ = false;
+        }
+        if (clipToOpen_) {
+            openClip(*clipToOpen_);
+            clipToOpen_.reset();
         }
         if (review_) {
             review_->update(); // The finder's progress, also while minimized.
@@ -227,11 +371,13 @@ int App::run() {
         if (kindUpdater_ && kindUpdater_->state() != KindUpdater::State::Running) {
             if (kindUpdater_->state() == KindUpdater::State::Done && recognizer_) {
                 recognizer_->reloadKinds();
+                noteInClip("kind update made: the recogniser reloads it");
             }
             kindUpdater_.reset();
         }
         if (chosen_) {
-            closeReview();    // Picking a screen is asking to see it.
+            closeReview(); // Picking a screen is asking to see it.
+            closeClip();
             stopRecording();  // A recording is of one screen.
             picker_->close(); // Its capture of the chosen screen goes first; the pipeline takes over.
             observe(*chosen_);
@@ -243,20 +389,28 @@ int App::run() {
         // then the review's finder gets the GPU. With no images the recogniser waits, model loaded, and picks up again
         // the moment the review closes. Recording only unsure saves nothing meanwhile: nobody answers its questions.
         pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed && !review_);
+        // The clip buffer pauses with it: a clip is for what the recogniser saw, and the finder gets the GPU. Meanwhile
+        // it repeats the last image, so a clip saved right after a review still plays (still, with no looks).
+        pipeline_.setClipEnabled(clipRecorder_ && clipRecorder_->state() != ClipRecorder::State::Failed && !review_);
         if (!window_->prepareFrame()) {
             pipeline_.setPreviewEnabled(false); // Minimized: nobody sees it.
             picker_->close();
             Sleep(10);
             continue;
         }
-        pipeline_.setPreviewEnabled(observedImage_ != nullptr && !review_); // The review covers it.
+        // The review and a clip cover it. A clip leaves recognition and the clip buffer running, unlike the review.
+        pipeline_.setPreviewEnabled(observedImage_ != nullptr && !review_ && !clipView_);
         if (preview_ && preview_->copyNewImage(gpu_.context.Get(), observedImage_->texture())) {
             observedImage_->imageCopied();
         }
+        if (clipView_) {
+            clipView_->update();
+        }
 
-        // While reviewing, the arrow keys, Tab and Space belong to the review, not to moving between buttons.
+        // While reviewing or playing a clip, the arrow keys, Tab and Space belong to them, not to moving between
+        // buttons.
         ImGuiIO& io = ImGui::GetIO();
-        if (review_) {
+        if (review_ || clipView_) {
             io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         } else {
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -312,6 +466,7 @@ void App::init() {
     if (!snapshot_) {
         hotkeyRegistered_ = window_->registerHotkey(kRecordHotkey, MOD_CONTROL | MOD_ALT, 'R');
         markHotkeyRegistered_ = window_->registerHotkey(kMarkHotkey, MOD_CONTROL | MOD_ALT, 'M');
+        clipHotkeyRegistered_ = window_->registerHotkey(kClipHotkey, MOD_CONTROL | MOD_ALT, 'C');
     }
     picker_ = std::make_unique<ScreenPicker>(gpu_.device.Get(), gpuAdapter_.Get());
     thumbnails_ = std::make_unique<Thumbnails>(gpu_.device.Get());
@@ -332,8 +487,9 @@ void App::init() {
 }
 
 void App::shutdown() {
-    refresher_.reset(); // Its finder writes nothing.
-    review_.reset();    // Closing observex while reviewing makes no kind update.
+    refresher_.reset();   // Its finder writes nothing.
+    review_.reset();      // Closing observex while reviewing makes no kind update.
+    clipView_.reset();    // Its image and reader are on the UI's device, which goes below.
     kindUpdater_.reset(); // One still at work writes nothing.
     stopRecording();
     stopObserving();
@@ -368,12 +524,22 @@ void App::observe(const Screen& screen) {
         return;
     }
 
+    // The clip buffer: the last 10 s, all the time (the user asked, 2026-11-10).
+    clipError_.clear();
+    try {
+        clipRecorder_ = std::make_shared<ClipRecorder>(screen, *pipeline_.clip());
+        pipeline_.setClipEnabled(true);
+    } catch (const std::exception& e) {
+        clipError_ = e.what();
+    }
+
     // The model tools/train made.
     recognizerError_.clear();
     try {
         // It answers recording only unsure's questions.
         recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(), modelFolder(kLive.id),
                                                    &pipeline_.question());
+        recognizer_->setClip(clipRecorder_); // Every look goes into the clip buffer too.
     } catch (const std::exception& e) {
         recognizerError_ = e.what();
     }
@@ -381,8 +547,11 @@ void App::observe(const Screen& screen) {
 
 void App::stopObserving() {
     pauseRecording();    // The recorder reads from the pipeline's channel; it goes first.
-    recognizer_.reset(); // So does the recogniser.
-    preview_.reset();    // Before the pipeline frees the channel it reads from.
+    recognizer_.reset(); // So does the recogniser (it hands looks to the clip buffer, so before it).
+    pipeline_.setClipEnabled(false);
+    clipRecorder_.reset(); // Reads from the pipeline's clip channel; a save still being written finishes first.
+    clipSaving_ = false;
+    preview_.reset(); // Before the pipeline frees the channel it reads from.
     observedImage_.reset();
     pipeline_.setRecognitionEnabled(false);
     pipeline_.stop();
@@ -434,25 +603,16 @@ void App::startRecording(RecordKind kind) {
     // Each recording gets its own folder, named by the date and time, e.g. 2026-10-31_23-05-12.
     SYSTEMTIME now;
     GetLocalTime(&now);
-    char name[40];
-    std::snprintf(name, sizeof(name), "%04u-%02u-%02u_%02u-%02u-%02u", now.wYear, now.wMonth, now.wDay, now.wHour,
-                  now.wMinute, now.wSecond);
-    std::filesystem::path folder = settings_.recordingsFolder / name;
-    std::error_code error;
-    for (int i = 2; std::filesystem::exists(folder, error); ++i) {
-        folder = settings_.recordingsFolder / (std::string(name) + "_" + std::to_string(i));
-    }
+    const std::filesystem::path folder = freeFolder(settings_.recordingsFolder, folderName(now));
     recordingError_.clear();
     // What live recognition sees goes into the recording too (engine/LiveLog), to look at afterwards. A setting, on
     // by default.
     std::shared_ptr<LiveLog> log;
     if (settings_.liveLog) {
         try {
-            const std::filesystem::path model = modelFolder(kLive.id) / L"model.onnx";
             char about[600];
-            std::snprintf(about, sizeof(about), "Model %s (written %s), screen %s (%s), %u x %u.",
-                          toUtf8(model.c_str()).c_str(), fileTime(model).c_str(), observed_->monitor.c_str(),
-                          observed_->name.c_str(), pipeline_.width(), pipeline_.height());
+            std::snprintf(about, sizeof(about), "Model %s, screen %s (%s), %u x %u.", liveModelAbout().c_str(),
+                          observed_->monitor.c_str(), observed_->name.c_str(), pipeline_.width(), pipeline_.height());
             log = std::make_shared<LiveLog>(folder / (std::string(kLive.id) + "-live.txt"), about);
         } catch (const std::exception& e) {
             recordingError_ = std::string("Could not record: ") + e.what();
@@ -461,11 +621,8 @@ void App::startRecording(RecordKind kind) {
     }
     recording_ = Recording{folder, std::chrono::steady_clock::now()};
     recording_->log = std::move(log);
-    char started[24];
-    std::snprintf(started, sizeof(started), "%04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay, now.wHour,
-                  now.wMinute, now.wSecond);
     RecordingInfo& info = recording_->info;
-    info.started = started;
+    info.started = timeText(now);
     info.screen = observed_->monitor;
     info.width = pipeline_.width();
     info.height = pipeline_.height();
@@ -475,6 +632,11 @@ void App::startRecording(RecordKind kind) {
     // The folder exists once the recorder runs. Without the file the review would not list this recording.
     if (recording_ && !writeRecordingInfo(recording_->folder, recording_->info)) {
         recordingError_ = "Could not write " + toUtf8((recording_->folder / kRecordingFile).c_str());
+    }
+    if (recording_) {
+        noteInClip(std::string("recording started: ") +
+                   (kind == RecordKind::Unsure ? "only unsure" : "every " + std::to_string(kRecordingInterval) + " s") +
+                   ", into " + nameOf(recording_->folder));
     }
 }
 
@@ -508,7 +670,7 @@ void App::pauseRecording() {
     }
 }
 
-void App::stopRecording() {
+void App::stopRecording(const char* why) {
     pauseRecording();
     if (recording_) {
         RecordingInfo& info = recording_->info;
@@ -520,6 +682,8 @@ void App::stopRecording() {
         if (!writeRecordingInfo(recording_->folder, info)) {
             recordingError_ = "Could not write " + toUtf8((recording_->folder / kRecordingFile).c_str());
         }
+        noteInClip(std::string(why) + ": " + nameOf(recording_->folder) + ", " + std::to_string(info.images) +
+                   " images");
     }
     recording_.reset();
 }
@@ -530,6 +694,43 @@ void App::markMoment() {
     }
     recording_->log->mark(++recording_->marks);
     pipeline_.recordNow(); // The image on screen now, to see what the mark is about.
+    noteInClip("mark " + std::to_string(recording_->marks));
+}
+
+bool App::canSaveClip() const {
+    return clipRecorder_ && clipRecorder_->state() == ClipRecorder::State::Running &&
+           clipRecorder_->saveState() != ClipRecorder::SaveState::Saving;
+}
+
+void App::saveClip(const char* how) {
+    if (!canSaveClip()) {
+        return;
+    }
+    // Each clip gets its own folder in the clips folder, named by the date and time, e.g. 2026-11-10_18-22-05.
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    std::filesystem::path folder = freeFolder(settings_.recordingsFolder / kClipsFolder, folderName(now));
+    ClipAbout about;
+    about.saved = timeText(now);
+    about.screen = observed_->monitor;
+    // So clip.txt says which model saw what it holds, and its kind numbers can be read.
+    if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+        about.model = liveModelAbout();
+        about.kinds = recognizer_->kinds();
+    }
+    noteInClip(std::string("save last 10 s (") + how + ")");
+    clipSaveError_.clear();
+    if (clipRecorder_->save(std::move(folder), std::move(about))) {
+        clipSaving_ = true;
+    } else {
+        clipSaveError_ = "Could not save the clip: it holds nothing yet.";
+    }
+}
+
+void App::noteInClip(std::string_view text) {
+    if (clipRecorder_) {
+        clipRecorder_->note(text);
+    }
 }
 
 void App::saveSettings() {
@@ -538,8 +739,15 @@ void App::saveSettings() {
     }
 }
 
-void App::openRecordings() {
-    // Read once per opening: a few small files per recording.
+void App::openReviewChooser() {
+    // Read once per opening (a few small files per recording and clip), so the chooser can count them.
+    readRecordings();
+    readClips();
+    reviewError_.clear();
+    ImGui::OpenPopup(kReviewPopup);
+}
+
+void App::readRecordings() {
     recordings_.clear();
     for (RecordingEntry& entry : listRecordings(settings_.recordingsFolder)) {
         RecordingRow row;
@@ -566,13 +774,25 @@ void App::openRecordings() {
         row.entry = std::move(entry);
         recordings_.push_back(std::move(row));
     }
-    reviewError_.clear();
-    ImGui::OpenPopup(kRecordingsPopup);
+}
+
+void App::readClips() {
+    clips_.clear();
+    for (ClipEntry& entry : listClips(settings_.recordingsFolder / kClipsFolder)) {
+        ClipRow row;
+        row.when = describeWhen(entry.info.saved);
+        row.entry = std::move(entry);
+        clips_.push_back(std::move(row));
+    }
 }
 
 void App::startReview(const Category& category) {
     try {
         review_ = std::make_unique<Review>(gpu_.device.Get(), reviewFolder_, category);
+        noteInClip("review opened: " + nameOf(reviewFolder_) + ", " + category.name);
+        if (clipView_) {
+            closeClip_ = true; // Between frames; the review is drawn instead meanwhile.
+        }
     } catch (const std::exception& e) {
         reviewError_ = std::string("Could not open the recording: ") + e.what();
     }
@@ -583,6 +803,7 @@ void App::closeReview() {
         return;
     }
     const Category& category = review_->category();
+    noteInClip("review closed: " + nameOf(review_->folder()));
     refresher_.reset(); // Its finder writes nothing.
     review_.reset();    // Saves when, if it changed the answers.
     // Not in snapshot mode: it would write into models/, which tests must leave alone.
@@ -591,6 +812,21 @@ void App::closeReview() {
         kindUpdater_ = std::make_unique<KindUpdater>(settings_.recordingsFolder, category.id, kindIdsOf(category),
                                                      modelFolder(category.id));
     }
+}
+
+void App::openClip(const ClipEntry& clip) {
+    closeReview(); // One thing at a time is shown instead of the screen.
+    closeClip();
+    clipView_ = std::make_unique<ClipView>(gpuAdapter_.Get(), gpu_.device.Get(), clip.folder, clip.info);
+    noteInClip("clip opened: " + nameOf(clip.folder));
+}
+
+void App::closeClip() {
+    if (!clipView_) {
+        return;
+    }
+    noteInClip("clip closed: " + nameOf(clipView_->folder()));
+    clipView_.reset();
 }
 
 bool App::playSnapshot() {
@@ -666,6 +902,8 @@ void App::drawFrame() {
     ImGui::Begin("##view", nullptr, kFixedWindow);
     if (review_) {
         review_->draw(fonts_);
+    } else if (clipView_) {
+        clipView_->draw();
     } else if (observed_) {
         drawObservedScreen();
     } else {
@@ -674,7 +912,7 @@ void App::drawFrame() {
     // Errors stack at the top right.
     const float inset = std::round(12.0f * dpiScale_);
     ImVec2 corner(viewport->Pos.x + viewport->Size.x - inset, viewport->Pos.y + barHeight + inset);
-    for (const std::string* error : {&recordingError_, &reviewError_}) {
+    for (const std::string* error : {&recordingError_, &reviewError_, &clipSaveError_}) {
         if (!error->empty()) {
             theme::drawLabel(ImGui::GetWindowDrawList(), corner, ImVec2(1.0f, 0.0f), error->c_str());
             corner.y += ImGui::GetTextLineHeight() + std::round(16.0f * dpiScale_);
@@ -787,38 +1025,114 @@ void App::drawTopBar(float height) {
         ImGui::EndPopup();
     }
 
-    // Review, left of Record: opens a recording to answer what observex found in it, or closes the review.
+    // Save last 10 s, left of Record: saves what the clip buffer holds as a clip (the user asked, 2026-11-10). After a
+    // save it says how long the clip is for a few seconds.
+    BarButton saveButton;
+    saveButton.icon = Icon::Replay;
+    const ClipRecorder::SaveState saveState =
+        clipRecorder_ ? clipRecorder_->saveState() : ClipRecorder::SaveState::None;
+    const bool saving = saveState == ClipRecorder::SaveState::Saving;
+    const bool justSaved =
+        saveState == ClipRecorder::SaveState::Saved && std::chrono::steady_clock::now() - clipSavedAt_ < kSavedShownFor;
+    char saveText[32];
+    if (saving) {
+        saveButton.text = "Saving\xE2\x80\xA6";
+        saveButton.open = true;
+        saveButton.enabled = false;
+    } else if (justSaved) {
+        std::snprintf(saveText, sizeof(saveText), "Saved %.1f s", clipRecorder_->savedInfo().seconds);
+        saveButton.text = saveText;
+        saveButton.open = true;
+        saveButton.enabled = canSaveClip();
+    } else {
+        std::snprintf(saveText, sizeof(saveText), "Save last %.0f s", kClipSeconds);
+        saveButton.text = saveText;
+        saveButton.detail = clipHotkeyRegistered_ || snapshot_ ? kClipHotkeyText : nullptr;
+        saveButton.enabled = canSaveClip();
+    }
+    x -= std::round(8.0f * dpiScale_) + saveButton.width(fonts_);
+    ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
+    if (saveButton.draw("##saveclip", fonts_)) {
+        saveClip("the button");
+    }
+    if (ImGui::IsItemHovered()) {
+        if (saving) {
+            ImGui::SetTooltip("Saving the last %.0f s into %s", kClipSeconds,
+                              toUtf8(clipRecorder_->savedFolder().c_str()).c_str());
+        } else if (!observed_) {
+            ImGui::SetTooltip("Choose a screen first: while one is observed, its last %.0f s are kept to save",
+                              kClipSeconds);
+        } else if (!clipRecorder_) {
+            ImGui::SetTooltip("%s", clipError_.empty() ? "The screen is not captured, so there is nothing to save"
+                                                       : ("The clip buffer could not start: " + clipError_).c_str());
+        } else if (clipRecorder_->state() == ClipRecorder::State::Failed) {
+            ImGui::SetTooltip("The clip buffer stopped: %s", clipRecorder_->error().c_str());
+        } else if (clipRecorder_->state() == ClipRecorder::State::Starting) {
+            ImGui::SetTooltip("The clip buffer is starting\xE2\x80\xA6");
+        } else {
+            const char* hotkey = clipHotkeyRegistered_ || snapshot_
+                                     ? "Ctrl+Alt+C saves them too, even while a game is in front."
+                                     : "Ctrl+Alt+C is taken by another app, so only this button saves them.";
+            const std::string saved =
+                justSaved ? "Saved into " + toUtf8(clipRecorder_->savedFolder().c_str()) + ".\n\n" : std::string();
+            ImGui::SetTooltip("%sSaves the last %.0f s of the screen as you saw them: the video, with no boxes drawn "
+                              "on it, and as text\neverything the model found and followed on every look, so they "
+                              "can be compared after a change.\nWatch them in Review, Clips. %s",
+                              saved.c_str(), kClipSeconds, hotkey);
+        }
+    }
+
+    // Review, left of Save: asks what to review, training recordings (answer what observex found in one) or clips
+    // (play one); or closes the review or the clip.
     BarButton reviewButton;
     if (review_) {
         reviewButton.icon = Icon::Close;
         reviewButton.text = "Close review";
+    } else if (clipView_) {
+        reviewButton.icon = Icon::Close;
+        reviewButton.text = "Close clip";
     } else {
         reviewButton.icon = Icon::Picture;
         reviewButton.text = "Review";
-        reviewButton.open = ImGui::IsPopupOpen(kRecordingsPopup) || ImGui::IsPopupOpen(kCategoryPopup);
+        reviewButton.open = ImGui::IsPopupOpen(kReviewPopup) || ImGui::IsPopupOpen(kRecordingsPopup) ||
+                            ImGui::IsPopupOpen(kClipsPopup) || ImGui::IsPopupOpen(kCategoryPopup);
     }
     x -= std::round(8.0f * dpiScale_) + reviewButton.width(fonts_);
     ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
     if (reviewButton.draw("##review", fonts_)) {
         if (review_) {
             closeReview_ = true;
+        } else if (clipView_) {
+            closeClip_ = true;
         } else {
-            openRecordings();
+            openReviewChooser();
         }
     }
-    if (ImGui::IsItemHovered() && !review_ && !reviewButton.open) {
-        ImGui::SetTooltip("Open a recording and answer what observex found in it");
+    if (ImGui::IsItemHovered() && !review_ && !clipView_ && !reviewButton.open) {
+        ImGui::SetTooltip("Answer what observex found in a training recording, or play a clip");
     }
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap), ImGuiCond_Always,
-                            ImVec2(1.0f, 0.0f));
+    // The chooser and both lists hang under the button.
+    const ImVec2 reviewCorner(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap);
+    ImGui::SetNextWindowPos(reviewCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    drawReviewChooser();
+    if (openList_ != nullptr) { // Here, not inside the chooser's popup, so the list's name means the same popup.
+        ImGui::OpenPopup(openList_);
+        openList_ = nullptr;
+    }
+    ImGui::SetNextWindowPos(reviewCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     drawRecordings();
+    ImGui::SetNextWindowPos(reviewCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    drawClips();
     if (openCategory_) { // Here, not inside the list's popup, so the chooser's name means the same popup.
         openCategory_ = false;
         ImGui::OpenPopup(kCategoryPopup);
     }
     drawCategoryChooser();
+    const float stepsRight = x - std::round(16.0f * dpiScale_); // Left of the Review button.
     if (review_) {
-        drawReviewSteps(height);
+        drawReviewSteps(height, stepsRight);
+    } else if (clipView_) {
+        drawClipSteps(height, stepsRight);
     }
 
     ImGui::SetNextWindowPos(settingsCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
@@ -846,7 +1160,7 @@ void App::drawTopBar(float height) {
     const ImVec2 screenMax = ImGui::GetItemRectMax();
 
     // Right of it, while the screen shows: Show, the flags for what is drawn over it (like view flags in Unreal).
-    if (observed_ && !review_) {
+    if (observed_ && !review_ && !clipView_) {
         BarButton showButton;
         showButton.icon = Icon::Eye;
         showButton.text = "Show";
@@ -932,6 +1246,9 @@ void App::drawSettings() {
     ImGui::TextDisabled(markHotkeyRegistered_ || snapshot_
                             ? "Ctrl+Alt+M marks a moment in the log while recording, to talk about later."
                             : "Ctrl+Alt+M is taken by another app, so moments cannot be marked.");
+    ImGui::TextDisabled(clipHotkeyRegistered_ || snapshot_
+                            ? "Ctrl+Alt+C saves the last 10 s as a clip, even while a game is in front."
+                            : "Ctrl+Alt+C is taken by another app, so only the Save last 10 s button saves clips.");
 }
 
 void App::drawRecordChooser() {
@@ -983,6 +1300,7 @@ void App::drawShowFlags() {
     ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
     if (ImGui::Checkbox(kLive.name, &settings_.showCharacters)) {
         saveSettings();
+        noteInClip(std::string("show ") + kLive.name + (settings_.showCharacters ? " on" : " off"));
     }
 
     // Under it, how looking for them goes.
@@ -1020,6 +1338,7 @@ void App::drawShowFlags() {
     ImGui::BeginDisabled(!knowsKinds || !settings_.showCharacters);
     if (ImGui::Checkbox("Kinds", &settings_.showKinds)) {
         saveSettings();
+        noteInClip(settings_.showKinds ? "show Kinds on" : "show Kinds off");
     }
     ImGui::EndDisabled();
     ImGui::Indent(indent);
@@ -1040,8 +1359,9 @@ void App::drawShowFlags() {
     ImGui::Unindent(indent);
 }
 
-void App::drawReviewSteps(float height) {
-    // In the middle of the bar: back, where we are, forward.
+void App::drawReviewSteps(float height, float right) {
+    // In the middle of the bar: back, where we are, forward; moved left of `right` (the bar's buttons on the right)
+    // in a narrow window.
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float gap = std::round(12.0f * dpiScale_);
     BarButton back;
@@ -1070,7 +1390,7 @@ void App::drawReviewSteps(float height) {
     const ImVec2 pos = ImGui::GetWindowPos();
     const float buttonY = pos.y + std::round((height - BarButton::kHeight * dpiScale_) * 0.5f);
     const float textY = pos.y + std::round((height - fontSize) * 0.5f);
-    float x = std::round(pos.x + (viewport->Size.x - total) * 0.5f);
+    float x = std::round(std::min(pos.x + (viewport->Size.x - total) * 0.5f, right - total));
     ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
     if (back.draw("##back", fonts_)) {
         review_->previous();
@@ -1099,6 +1419,131 @@ void App::drawReviewSteps(float height) {
     }
 }
 
+void App::drawClipSteps(float height, float right) {
+    // In the middle of the bar: play or pause, where the clip is ("0:03.2 / 0:10.3") and, muted, the frame shown
+    // ("Frame 38", numbered as in clip.txt). Laid out by the widest the numbers get, so nothing moves while they
+    // count; moved left of `right` (the bar's buttons on the right) in a narrow window.
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float gap = std::round(12.0f * dpiScale_);
+    const float textGap = std::round(8.0f * dpiScale_);
+    BarButton play;
+    play.icon = clipView_->playing() ? Icon::Pause : Icon::Play;
+    play.enabled = clipView_->canPlay();
+
+    char position[16];
+    char length[16];
+    formatClipTime(position, sizeof(position), clipView_->position());
+    formatClipTime(length, sizeof(length), clipView_->seconds());
+    const std::string time = std::string(position) + " / " + length;
+    const std::string widestTime = zeroDigits(std::string(length) + " / " + length);
+    const std::string frame = clipView_->frame() > 0 ? "Frame " + formatCount(clipView_->frame()) : std::string();
+    const std::size_t frames = std::max<std::size_t>(clipView_->info().frames, 1000);
+    const std::string widestFrame = zeroDigits("Frame " + formatCount(frames));
+
+    const float fontSize = ImGui::GetFontSize();
+    const float timeWidth = fonts_.medium->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, widestTime.c_str()).x;
+    const float frameWidth = ImGui::CalcTextSize(widestFrame.c_str()).x;
+    const float total = play.width(fonts_) + gap + timeWidth + textGap + frameWidth;
+
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const float buttonY = pos.y + std::round((height - BarButton::kHeight * dpiScale_) * 0.5f);
+    const float textY = pos.y + std::round((height - fontSize) * 0.5f);
+    float x = std::round(std::min(pos.x + (viewport->Size.x - total) * 0.5f, right - total));
+    ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
+    if (play.draw("##play", fonts_)) {
+        clipView_->togglePlay();
+    }
+    if (ImGui::IsItemHovered() && play.enabled) {
+        ImGui::SetTooltip("%s", clipView_->playing() ? "Pause (Space)"
+                                : clipView_->ended() ? "Play again from the start (Space)"
+                                                     : "Play (Space)");
+    }
+    x += play.width(fonts_) + gap;
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddText(fonts_.medium, fontSize, ImVec2(x, textY), play.enabled ? theme::kText : theme::kTextMuted,
+                      time.c_str());
+    x += timeWidth + textGap;
+    drawList->AddText(ImVec2(x, textY), theme::kTextMuted, frame.c_str());
+}
+
+void App::drawReviewChooser() {
+    // The Review button first asks what to review (the user asked, 2026-11-10): the training recordings, to answer
+    // what the model found in them, or the clips (Save last 10 s), to play them. Then the list of either.
+    if (!ImGui::BeginPopup(kReviewPopup)) {
+        return;
+    }
+    const float dpi = dpiScale_;
+    ImGui::PushFont(fonts_.medium, 18.0f);
+    ImGui::TextUnformatted(kReviewPopup);
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f * dpi));
+
+    const ImVec2 tileSize(std::round(440.0f * dpi), std::round(60.0f * dpi));
+    char description[160];
+    std::snprintf(description, sizeof(description), "%s %s  \xC2\xB7  answer what the model found, to train it",
+                  formatCount(recordings_.size()).c_str(), recordings_.size() == 1 ? "recording" : "recordings");
+    if (choiceTile("recordings", "Training recordings", description, tileSize, fonts_, dpi)) {
+        openList_ = kRecordingsPopup;
+        ImGui::CloseCurrentPopup();
+    }
+    std::snprintf(
+        description, sizeof(description), "%s %s  \xC2\xB7  the last %.0f s, saved with Save last %.0f s, to play",
+        formatCount(clips_.size()).c_str(), clips_.size() == 1 ? "clip" : "clips", kClipSeconds, kClipSeconds);
+    if (choiceTile("clips", "Clips", description, tileSize, fonts_, dpi)) {
+        openList_ = kClipsPopup;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+void App::drawClips() {
+    // The clips in the clips folder, newest first, each with its picture (the screen when it was saved), like the
+    // recordings. Picking one plays it.
+    if (!ImGui::BeginPopup(kClipsPopup)) {
+        return;
+    }
+    const float dpi = dpiScale_;
+    const ImVec2 tileSize(std::round(520.0f * dpi), std::round(88.0f * dpi));
+    ImGui::PushFont(fonts_.medium, 18.0f);
+    ImGui::TextUnformatted("Play a clip");
+    ImGui::PopFont();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + tileSize.x + ImGui::GetStyle().ScrollbarSize);
+    ImGui::TextDisabled("%s", toUtf8((settings_.recordingsFolder / kClipsFolder).c_str()).c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f * dpi));
+
+    if (clips_.empty()) {
+        ImGui::TextUnformatted("No clips yet.");
+        ImGui::TextDisabled("Observe a screen and press Save last %.0f s (%s).", kClipSeconds, kClipHotkeyText);
+        ImGui::EndPopup();
+        return;
+    }
+    const float spacing = ImGui::GetStyle().ItemSpacing.y;
+    const float listHeight = std::min(static_cast<float>(clips_.size()) * (tileSize.y + spacing) - spacing,
+                                      std::round(ImGui::GetMainViewport()->Size.y * 0.6f));
+    ImGui::BeginChild("##clips", ImVec2(tileSize.x + ImGui::GetStyle().ScrollbarSize, listHeight));
+    for (std::size_t i = 0; i < clips_.size(); ++i) {
+        const ClipRow& row = clips_[i];
+        // "10.3 s · 1,241 frames · 2,380 looks · Odyssey G61SH".
+        const ClipInfo& info = row.entry.info;
+        char seconds[24];
+        std::snprintf(seconds, sizeof(seconds), "%.1f s", info.seconds);
+        std::string detail = std::string(seconds) + "  \xC2\xB7  " + formatCount(info.frames) +
+                             (info.frames == 1 ? " frame" : " frames") + "  \xC2\xB7  " + formatCount(info.looks) +
+                             (info.looks == 1 ? " look" : " looks");
+        if (!info.screen.empty()) {
+            detail += "  \xC2\xB7  " + info.screen;
+        }
+        if (pictureRow(static_cast<int>(i), tileSize, *thumbnails_, row.entry.folder / kClipPicture, row.when, {detail},
+                       fonts_, dpi)) {
+            clipToOpen_ = row.entry;
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::EndPopup();
+}
+
 void App::drawRecordings() {
     // The Review button's list: every recording in the recordings folder, newest first, each with a picture of its
     // first image (the user asked, 2026-11-02). Picking one asks what to look for in it next.
@@ -1107,8 +1552,6 @@ void App::drawRecordings() {
     }
     const float dpi = dpiScale_;
     const ImVec2 tileSize(std::round(520.0f * dpi), std::round(88.0f * dpi));
-    const float inset = std::round(8.0f * dpi); // Around the picture.
-    const ImVec2 pictureSize(std::round((tileSize.y - inset * 2.0f) * 16.0f / 9.0f), tileSize.y - inset * 2.0f);
     ImGui::PushFont(fonts_.medium, 18.0f);
     ImGui::TextUnformatted("Review a recording");
     ImGui::PopFont();
@@ -1124,56 +1567,15 @@ void App::drawRecordings() {
         ImGui::EndPopup();
         return;
     }
-    const float textGap = std::round(14.0f * dpi); // Between the picture and the text, and after the text.
-    const float lineGap = std::round(6.0f * dpi);
     const float spacing = ImGui::GetStyle().ItemSpacing.y;
     const float listHeight = std::min(static_cast<float>(recordings_.size()) * (tileSize.y + spacing) - spacing,
                                       std::round(ImGui::GetMainViewport()->Size.y * 0.6f));
     ImGui::BeginChild("##recordings", ImVec2(tileSize.x + ImGui::GetStyle().ScrollbarSize, listHeight));
     for (std::size_t i = 0; i < recordings_.size(); ++i) {
         const RecordingRow& row = recordings_[i];
-        const ImVec2 min = ImGui::GetCursorScreenPos();
-        ImGui::PushID(static_cast<int>(i));
-        const bool clicked = ImGui::InvisibleButton("##recording", tileSize);
-        ImGui::PopID();
-        const bool hovered = ImGui::IsItemHovered();
-        if (hovered) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        }
-        const ImVec2 max = ImGui::GetItemRectMax();
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-        const ImU32 tileColor = hovered ? theme::kSurfaceActive : theme::kSurfaceHover;
-        drawList->AddRectFilled(min, max, tileColor, 8.0f * dpi);
-        drawList->AddRect(min, max, hovered ? theme::kAccent : theme::kBorderHover, 8.0f * dpi, 0, 1.0f);
-
-        // The picture on the left: an empty frame until it is read (only rows in view are read), or if it cannot
-        // be. Fitted into the frame, keeping its shape.
-        const ImVec2 frameMin(min.x + inset, min.y + inset);
-        const ImVec2 frameMax(frameMin.x + pictureSize.x, frameMin.y + pictureSize.y);
-        const float pictureRounding = 5.0f * dpi;
-        drawList->AddRectFilled(frameMin, frameMax, theme::kBackground, pictureRounding);
-        const ScreenImage* picture = ImGui::IsItemVisible() ? thumbnails_->get(row.firstImage) : nullptr;
-        if (picture) {
-            const float scale = std::min(pictureSize.x / static_cast<float>(picture->width()),
-                                         pictureSize.y / static_cast<float>(picture->height()));
-            const ImVec2 size(std::round(static_cast<float>(picture->width()) * scale),
-                              std::round(static_cast<float>(picture->height()) * scale));
-            const ImVec2 pictureMin(std::round(frameMin.x + (pictureSize.x - size.x) * 0.5f),
-                                    std::round(frameMin.y + (pictureSize.y - size.y) * 0.5f));
-            picture->draw(drawList, pictureMin, ImVec2(pictureMin.x + size.x, pictureMin.y + size.y), pictureRounding,
-                          tileColor);
-        }
-
-        // Right of it, in the middle of the row: when, then the details, then when the user last changed answers
-        // in a review of it, if ever (the user asked, 2026-11-07).
-        const float textX = frameMax.x + textGap;
-        const float lines = row.lastReviewed.empty() ? 1.0f : 2.0f; // Under the first.
-        const float textTop = std::round(
-            min.y + (tileSize.y - ImGui::GetFontSize() - (lineGap + ImGui::GetTextLineHeight()) * lines) * 0.5f);
-        drawList->AddText(fonts_.medium, ImGui::GetFontSize(), ImVec2(textX, textTop), theme::kText, row.when.c_str());
-
-        // How long, how many images, and how far each category's review got: "00:34 · 12 images · Characters 11
-        // of 12 reviewed".
+        // Each row: a picture of its first image, when, then the details, then when the user last changed answers
+        // in a review of it, if ever (the user asked, 2026-11-07). The details: how long, how many images, and how
+        // far each category's review got: "00:34 · 12 images · Characters 11 of 12 reviewed".
         std::string detail;
         if (row.entry.info.seconds > 0) {
             char duration[16];
@@ -1195,8 +1597,7 @@ void App::drawRecordings() {
                 std::snprintf(text, sizeof(text), "  \xC2\xB7  %s: %zu to check, %zu of %zu reviewed",
                               kCategories[c].name, count.toCheck, count.reviewed, row.images);
             } else if (count.toCheck > 0) {
-                std::snprintf(text, sizeof(text), "  \xC2\xB7  %s: %zu to check", kCategories[c].name,
-                              count.toCheck);
+                std::snprintf(text, sizeof(text), "  \xC2\xB7  %s: %zu to check", kCategories[c].name, count.toCheck);
             } else if (count.reviewed > 0) {
                 std::snprintf(text, sizeof(text), "  \xC2\xB7  %s %zu of %zu reviewed", kCategories[c].name,
                               count.reviewed, row.images);
@@ -1209,15 +1610,8 @@ void App::drawRecordings() {
         if (!reviewed) {
             detail += "  \xC2\xB7  not reviewed yet";
         }
-        drawList->PushClipRect(ImVec2(textX, min.y), ImVec2(max.x - textGap, max.y), true);
-        drawList->AddText(ImVec2(textX, textTop + ImGui::GetFontSize() + lineGap), theme::kTextMuted, detail.c_str());
-        if (!row.lastReviewed.empty()) {
-            drawList->AddText(
-                ImVec2(textX, textTop + ImGui::GetFontSize() + (lineGap + ImGui::GetTextLineHeight()) + lineGap),
-                theme::kTextMuted, row.lastReviewed.c_str());
-        }
-        drawList->PopClipRect();
-        if (clicked) {
+        if (pictureRow(static_cast<int>(i), tileSize, *thumbnails_, row.firstImage, row.when,
+                       {detail, row.lastReviewed}, fonts_, dpi)) {
             if (row.images == 0) {
                 reviewError_ = "No images in the recording of " + row.when;
             } else {
