@@ -51,16 +51,26 @@ TEST_CASE("record kinds go to their words and back") {
     CHECK(parseRecordKind("later") == RecordKind::Every);
 }
 
-TEST_CASE("a recording is done after its images, and says how long is left") {
-    CHECK_FALSE(recordingDone(kRecordImages - 1));
-    CHECK(recordingDone(kRecordImages));
-    // Every 3 s: exactly the images left, whatever the time.
+TEST_CASE("every 3 s is done after its images, and says how long is left") {
+    CHECK_FALSE(recordingDone(RecordKind::Every, kRecordImages - 1, 9999.0));
+    CHECK(recordingDone(RecordKind::Every, kRecordImages, 0.0));
+    // Exactly the images left, whatever the time.
     CHECK(recordingSecondsLeft(RecordKind::Every, 3, 0, 0.0) == doctest::Approx(kRecordImages * 3.0));
     CHECK(recordingSecondsLeft(RecordKind::Every, 3, kRecordImages - 10, 999.0) == doctest::Approx(30.0));
-    // Only unsure: a new place's pace until it has a few, then its own (here one image every 6 s).
-    CHECK(recordingSecondsLeft(RecordKind::Unsure, 3, 0, 0.0) == doctest::Approx(kRecordImages * 4.5));
-    CHECK(recordingSecondsLeft(RecordKind::Unsure, 3, 10, 60.0) == doctest::Approx((kRecordImages - 10) * 6.0));
-    CHECK(recordingSecondsLeft(RecordKind::Unsure, 3, kRecordImages + 1, 60.0) == 0.0);
+    CHECK(recordingProgress(RecordKind::Every, kRecordImages / 2, 9999.0) ==
+          doctest::Approx(0.5).epsilon(0.01));
+    CHECK(recordingProgress(RecordKind::Every, kRecordImages + 5, 0.0) == 1.0f);
+}
+
+TEST_CASE("only unsure is done after its minute, however many images it saved") {
+    // None saved: the model was sure of everything.
+    CHECK_FALSE(recordingDone(RecordKind::Unsure, 0, kUnsureSeconds - 0.5));
+    CHECK(recordingDone(RecordKind::Unsure, 0, kUnsureSeconds));
+    CHECK_FALSE(recordingDone(RecordKind::Unsure, kRecordImages + 10, 1.0)); // Images do not end it.
+    CHECK(recordingSecondsLeft(RecordKind::Unsure, kUnsureEvery, 7, 20.0) == doctest::Approx(kUnsureSeconds - 20.0));
+    CHECK(recordingSecondsLeft(RecordKind::Unsure, kUnsureEvery, 7, kUnsureSeconds + 3.0) == 0.0);
+    CHECK(recordingProgress(RecordKind::Unsure, 0, kUnsureSeconds * 0.25) == doctest::Approx(0.25));
+    CHECK(recordingProgress(RecordKind::Unsure, 0, kUnsureSeconds * 2.0) == 1.0f);
 }
 
 TEST_CASE("recordings are listed newest first, only folders with a recording file") {

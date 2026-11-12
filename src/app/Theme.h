@@ -11,6 +11,7 @@ inline constexpr ImU32 kBackground = IM_COL32(14, 14, 17, 255);
 inline constexpr ImU32 kSurface = IM_COL32(22, 22, 26, 255); // Popups and placeholders.
 inline constexpr ImU32 kSurfaceHover = IM_COL32(31, 31, 37, 255);
 inline constexpr ImU32 kSurfaceActive = IM_COL32(40, 40, 47, 255);
+inline constexpr ImU32 kSurfaceOpenHover = IM_COL32(54, 54, 64, 255); // An open (pressed) button under the mouse.
 inline constexpr ImU32 kBorder = IM_COL32(38, 38, 45, 255);
 inline constexpr ImU32 kBorderHover = IM_COL32(62, 62, 73, 255);
 inline constexpr ImU32 kText = IM_COL32(236, 236, 241, 255);
@@ -26,6 +27,10 @@ inline constexpr ImU32 kOwn = IM_COL32(240, 112, 200, 255);
 inline constexpr ImU32 kUnknown = IM_COL32(214, 214, 224, 255);
 // A dead character (a corpse): brick red, apart from the record dot's brighter red and the user's own pink.
 inline constexpr ImU32 kDead = IM_COL32(204, 96, 72, 255);
+// The game's interface (the Show flag UI): cyan, apart from every character kind's colour.
+inline constexpr ImU32 kUi = IM_COL32(34, 211, 238, 255);
+// The ground plane (the Show flag Ground): lime, apart from the monsters' green.
+inline constexpr ImU32 kGround = IM_COL32(163, 230, 53, 255);
 inline constexpr ImU32 kOverlay = IM_COL32(14, 14, 17, 210); // Labels drawn over screen images.
 inline constexpr ImU32 kHalo = IM_COL32(0, 0, 0, 140); // Behind box outlines, so they show on snow as well as rock.
 
@@ -33,6 +38,16 @@ inline constexpr ImU32 kHalo = IM_COL32(0, 0, 0, 140); // Behind box outlines, s
 constexpr ImU32 faded(ImU32 color, float alpha) {
     const auto opacity = static_cast<ImU32>(static_cast<float>(color >> IM_COL32_A_SHIFT) * alpha + 0.5f);
     return (color & ~IM_COL32_A_MASK) | (opacity << IM_COL32_A_SHIFT);
+}
+
+// `color` moved `amount` (0 to 1) of the way to white, opacity kept, e.g. a highlight under the mouse.
+constexpr ImU32 lighter(ImU32 color, float amount) {
+    const auto channel = [&](int shift) {
+        const float value = static_cast<float>((color >> shift) & 0xFFu);
+        return static_cast<ImU32>(value + (255.0f - value) * amount + 0.5f) << shift;
+    };
+    return channel(IM_COL32_R_SHIFT) | channel(IM_COL32_G_SHIFT) | channel(IM_COL32_B_SHIFT) |
+           (color & IM_COL32_A_MASK);
 }
 
 // Same colour as a Win32 COLORREF (0x00BBGGRR), for the window's title bar.

@@ -58,6 +58,8 @@ public:
     std::uint64_t seek(std::uint64_t number);
     // The keyframe (a frame that decodes on its own) at or before frame `number`.
     std::uint64_t keyframeAtOrBefore(std::uint64_t number) const;
+    // The keyframes' numbers, in order, from 1.
+    const std::vector<std::uint64_t>& keyframes() const { return keyframes_; }
 
 private:
     // Keeps Media Foundation started while the reader lives (MFStartup and MFShutdown are counted).
@@ -98,13 +100,14 @@ private:
 
 // Plays a saved clip's video (clip.mp4, see core/Recordings and engine/ClipRecorder) on its own thread: decodes it
 // with the GPU's video decoder (Media Foundation) on its own GPU device and hands each frame to the UI through an
-// ImageChannel when its time comes, so the UI never waits for decoding.
+// ImageChannel when its time comes, so the UI never waits for decoding. seek() shows any frame, for a slider and for
+// stepping frame by frame.
 class ClipPlayer {
 public:
     enum class State : std::uint8_t {
         Playing,
         Paused,
-        Ended,  // Showed the last frame; play() starts again from the first.
+        Ended,  // Showed the last frame; play() starts again from the first, seek() makes it Paused.
         Failed, // See error(); e.g. the file cannot be decoded.
     };
 
@@ -121,15 +124,32 @@ public:
     unsigned width() const;
     unsigned height() const;
     double seconds() const;
+    // Every frame's time in seconds from the first, in order: times()[n - 1] is frame n's (the same numbers as
+    // clip.txt's frame lines and ImageStamp::number). Known once constructed; never empty.
+    const std::vector<double>& times() const;
+    // The keyframes' numbers in order, from 1: the frames that decode on their own (a clip has one at least every
+    // 0.1 s while the screen changes; 0.5 s in clips saved before 2026-11-11 noon). Known once constructed. Seeking
+    // one shows it within a few milliseconds, as no frame before it needs decoding; any other frame waits for the ones
+    // from the keyframe before it.
+    const std::vector<std::uint64_t>& keyframes() const;
 
     // The frames as they come, for an ImageReader on the UI's device (ScreenCapture::kImageFormat, width() x height()).
     // Each frame's ImageStamp::number is its place in the video, from 1 (clip.txt's frame lines use the same numbers);
     // its shownQpc is unused (0).
     ImageChannel& frames();
 
-    // UI thread. play() goes on from where it was paused, or from the first frame once Ended.
+    // UI thread. play() goes on from where it was paused or sought, or from the first frame once Ended.
     void play();
     void pause();
+    // UI thread. Shows frame `number` (clamped to 1 .. times().size()) as soon as it is decoded, then goes on from it:
+    // playing on from there while Playing, else stays on it (Ended becomes Paused). One being decoded is finished and
+    // shown first, then the latest asked meanwhile (those between are skipped), so a dragged slider shows a frame each
+    // time one is decoded; unless the latest is on the way to it, then that one at once. Never waits.
+    // The frame after the one shown comes within a millisecond (the decoder has it ready); any other is decoded from
+    // the key frame at or before it, the frames between for nothing (at 1440p on the 4090, 6 ms for a keyframe and
+    // about 1.3 ms for each frame after it: 40 ms on average and 90 at most with a keyframe every 0.5 s, the clips
+    // before 2026-11-11 noon; --clip-seek in the bench measures it). The one shown already is not sent again.
+    void seek(std::uint64_t number);
 
     State state() const;
     const std::string& error() const; // Valid once state() is Failed.

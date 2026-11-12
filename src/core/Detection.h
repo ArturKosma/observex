@@ -93,4 +93,14 @@ inline bool unsureOfKind(float closest) {
     return closest >= 0.0f && closest < kKindsClose;
 }
 
+// A thing the heuristics show (src/heuristics: the tracker follows it from look to look). Its box is where it is now;
+// `sure` is smoothed over the last few looks, `kind` is the one the model has been surest of lately, and `kindSure`,
+// `secondKind` and `second` are how sure it has been lately of that kind and of the next.
+struct Tracked : Detection {
+    std::uint32_t id = 0; // The same while it is followed; never given to another thing.
+    float speedX = 0.0f;  // How fast it moves on the screen, in pixels per millisecond.
+    float speedY = 0.0f;
+    bool held = false; // Not found on this look: kept through a gap, its box moved on by its speed.
+};
+
 } // namespace observex

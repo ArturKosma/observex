@@ -48,6 +48,40 @@ TEST_CASE("writeLook writes one look line for a model without kinds, as the logs
     CHECK(linesOf(std::span<const char>(out.data(), writeLook(out, 7, 1.0, {})))[0] == "look 7 1.0");
 }
 
+TEST_CASE("writeLook for a clip writes every number so it reads back exactly") {
+    std::vector<char> out(kExactLookChars);
+    const std::vector<Detection> found{thing(100, 0.2996f, 0, 0.5996f, 2, 0.3f)};
+    const auto lines = linesOf(std::span<const char>(out.data(), writeLook(out, 12, 33.5004, found, true)));
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0] == "look 12 33.5004 0.2996 100 20 40 80");
+    CHECK(lines[1] == "kinds 12 0 0.5996 2 0.3");
+
+    // Numbers as the model and the clock give them: read back bit for bit.
+    Detection odd = thing(1241.37842f, 0.29999998f, 3, 0.6000001f, 1, 0.123456789f);
+    odd.y = 694.0001f;
+    odd.width = 91.33333f;
+    odd.height = 1e-5f;
+    const double timeMs = 4523.123456789012;
+    std::vector<Detection> many(100, odd);
+    const auto oddLines = linesOf(std::span<const char>(out.data(), writeLook(out, 7, timeMs, many, true)));
+    REQUIRE(oddLines.size() == 2);
+    unsigned long long image = 0;
+    double backMs = 0.0;
+    std::vector<Detection> back;
+    REQUIRE(readLook(oddLines[0], image, backMs, back));
+    REQUIRE(readKinds(oddLines[1], image, back));
+    CHECK(backMs == timeMs);
+    REQUIRE(back.size() == 100); // All fit.
+    CHECK(back[99].x == odd.x);
+    CHECK(back[99].y == odd.y);
+    CHECK(back[99].width == odd.width);
+    CHECK(back[99].height == odd.height);
+    CHECK(back[99].sure == odd.sure);
+    CHECK(back[99].kind == 3);
+    CHECK(back[99].kindSure == odd.kindSure);
+    CHECK(back[99].second == odd.second);
+}
+
 TEST_CASE("writeLook adds a kinds line for a model with kinds, and the reader gets back what was found") {
     std::array<char, kLookChars> out{};
     // A monster 90% (NPC 30%), and a player whose sureness is that of being either of its two kinds.

@@ -30,8 +30,9 @@
 // writer (as they are: no second encode) and writes clip.txt, picture.jpg and clip.observex.
 //
 // The video has a frame each time the screen changed, at the time the screen showed it (so its frame rate varies), no
-// B-frames, and a key frame (IDR) at least every kKeyEvery, so the last kClipSeconds can be cut out at a key frame;
-// while the screen does not change, the last image is repeated as a key frame every kKeyEvery. Frames are at least
+// B-frames, and a key frame (IDR) at least every kKeyEvery, so the last kClipSeconds can be cut out at a key frame
+// and the clip player shows any frame quickly (it decodes from the key frame before it); while the screen does not
+// change, the last image is repeated as a key frame every kRepeatEvery. Frames are at least
 // a frame gap apart (1 / Impl::framesPerSecond: at most kMaxFramesPerSecond, and what H.264 level 5.2 allows at the
 // screen's size). Within a gap the thread copies nothing: the image the screen shows at its end is the next frame,
 // and if the screen showed it sooner than a gap after the last frame, the frame's time is a moment later than that
@@ -41,7 +42,13 @@ namespace observex {
 
 namespace {
 
-constexpr double kKeyEvery = 0.5; // Seconds between key frames, at most.
+// Seconds between key frames, at most, while the screen changes: 0.1 s since 2026-11-11 (it was 0.5 s), so a frame
+// decodes within about 20 ms at 1440p (12 frames from its key frame at 120 a second) and dragging the clip screen's
+// timeline shows frame after frame; on two 10 s Lineage 2 clips the files grow about 25% and 60% (93 -> 115 MB,
+// 50 -> 80 MB: a key frame is about 400 KB, the others 40-85 KB).
+constexpr double kKeyEvery = 0.1;
+// Seconds a still screen waits before its last image is repeated (as a key frame).
+constexpr double kRepeatEvery = 0.5;
 constexpr unsigned kMaxFramesPerSecond = 144;
 // H.264 level 5.2's most macroblocks (16 x 16 pixels) a second, which decoders are built for (2560 x 1440: 144 a
 // second).
@@ -52,6 +59,7 @@ constexpr std::uint8_t kQuality = 22;
 constexpr std::uint32_t kMaxBitRate = 120'000'000;
 constexpr unsigned kWaitMs = 20;        // Most the thread sleeps between looks at its queues.
 constexpr std::size_t kQueueLooks = 64; // Looks waiting for the thread (about 0.3 s of looking).
+constexpr std::size_t kQueueSnaps = 64; // Snapped images waiting for it (about 0.3 s at 240 images a second).
 
 std::int64_t qpcNow() {
     LARGE_INTEGER now;
@@ -82,9 +90,28 @@ struct Look {
     std::vector<Tracked> followed;
 };
 
+// The snapper's boxes on one image (engine/BoxSnapper) as the thread keeps them.
+struct Snap {
+    ImageStamp stamp;
+    std::int64_t qpc = 0;     // When the screen showed the image.
+    std::int64_t doneQpc = 0; // When the snapper had them.
+    double leadMs = 0.0;
+    std::vector<Tracked> things;
+    std::uint64_t lookImage = 0; // The look it took in just before (0: none),
+    std::vector<SnapFind> finds; // and its searches.
+};
+
 struct Note {
     std::int64_t qpc = 0;
     std::string text;
+};
+
+// The grid the Show flag Ground drew over one screen image (ClipRecorder::grounded).
+struct Grounded {
+    std::int64_t qpc = 0; // When the screen showed the image.
+    std::uint64_t image = 0;
+    std::uint64_t followed = 0;
+    GroundCamera camera;
 };
 
 // A look on its way from the recogniser's thread, in a fixed slot so handing it over allocates nothing.
@@ -95,6 +122,18 @@ struct QueuedLook {
     std::uint32_t followed = 0;
     std::array<Detection, Found::kMax> things{};
     std::array<Tracked, Found::kMax> shown{};
+};
+
+// A snapped image on its way from the snapper's thread, likewise.
+struct QueuedSnap {
+    ImageStamp stamp;
+    std::int64_t doneQpc = 0;
+    double leadMs = 0.0;
+    std::uint32_t count = 0;
+    std::array<Tracked, Found::kMax> things{};
+    std::uint64_t lookImage = 0;
+    std::uint32_t findCount = 0;
+    std::array<SnapFind, Found::kMax> finds{}; // One search a thing.
 };
 
 // Everything a save writes, copied out of the buffer.
@@ -109,7 +148,9 @@ struct SaveJob {
     std::vector<std::uint8_t> sequenceHeader; // SPS and PPS, Annex B.
     std::vector<std::shared_ptr<const Packet>> packets;
     std::vector<Look> looks;
+    std::vector<Snap> snaps;
     std::vector<Note> notes;
+    std::vector<Grounded> grounds;
     std::vector<std::uint8_t> picture; // The screen at the save, BGRA, rows width * 4 bytes apart; empty: none.
 };
 
@@ -243,16 +284,18 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
         }
         text += ".\n";
     }
-    char line[640];
+    char line[1024];
     std::snprintf(
         line, sizeof(line),
         "# Times are milliseconds since the first video frame: of when the screen showed the image (frame, look), or\n"
-        "#   of when it happened (shown's DONE, note).\n"
+        "#   of when it happened (shown's DONE, note). The looks start up to %.0f s before the first frame (at negative\n"
+        "#   times), so a replay of them through the heuristics has caught up with live by then. Every number is\n"
+        "#   written exactly: it reads back as the value the app had.\n"
         "# frame FRAME IMAGE TIME: video frame FRAME of clip.mp4 (from 1) is screen image number IMAGE (the numbers\n"
         "#   looks use), shown at TIME. The screen changed between two frames; images the video encoder had no time\n"
         "#   for are not in it (it takes at most %u a second). The same IMAGE again repeats the frame before: the\n"
         "#   screen did not change for %.1f s.\n",
-        job.framesPerSecond, kKeyEvery);
+        kClipWarmUpSeconds, job.framesPerSecond, kRepeatEvery);
     text += line;
     std::snprintf(
         line, sizeof(line),
@@ -268,31 +311,53 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
             "#   id (the same while it is followed), how sure (smoothed), its kind and how sure of it, its second kind\n"
             "#   and how sure of that (-1: no kinds), its box in screen pixels, its speed in pixels per millisecond,\n"
             "#   and 1 if it was not found on this look but held where its speed takes it.\n"
+            "# snapped IMAGE TIME DONE LEAD [the same as shown]...: what the app showed from DONE on, after its snapper\n"
+            "#   put the boxes onto screen image IMAGE, shown at TIME: the same as shown, each box LEAD ms ahead of where\n"
+            "#   it is on that image along its speed, HELD 1 if it was not found there (where its speed takes it). They\n"
+            "#   start up to as long before the first frame as the looks.\n"
+            "# finds IMAGE LOOK FINDER [ID LEARNED LX LY LWIDTH LHEIGHT GUESSX GUESSY REACH FOUND X Y MATCH]...: right\n"
+            "#   after its snapped line, how the snapper got there: the look it took in just before (its IMAGE; 0: none),\n"
+            "#   how it searches (FINDER), then each search: the thing's id, the image and box it was learned from (0:\n"
+            "#   none yet), where its box's top left was looked for and how far, 1 if found and where, and the best\n"
+            "#   match (-1 to 1; -2: nothing to search with). A replay takes these results for the same searches, so it\n"
+            "#   shows exactly what live did (the video is compressed and lacks images).\n"
+            "# ground IMAGE TIME FOLLOWED KNOWN MEASURED PITCH DISTANCE FOCAL MIDDLEX MIDDLEY YAW FEETX FEETY: the grid\n"
+            "#   the Show flag Ground drew over screen image IMAGE, shown at TIME, from the ground finder's camera on\n"
+            "#   image FOLLOWED: the camera as drawn (KNOWN and MEASURED 1 or 0, angles in radians, lengths in own\n"
+            "#   heights, the lens and the screen's middle in pixels). KNOWN 0: nothing drawn from TIME on. The last\n"
+            "#   line at or before a frame's TIME is what was seen on it.\n"
             "# note TIME TEXT: something that happened then, e.g. a recording started.\n";
 
-    // Frames, looks and notes in time order; at the same time a frame comes first, then the look at its image.
+    // Frames, looks, snapped images, grids and notes in time order; at the same time a frame comes first, then the
+    // look at its image, then the snapped one, then the grid drawn over it (several in the order drawn).
     struct Item {
         std::int64_t qpc;
-        int order; // 0 frame, 1 look, 2 note.
+        int order; // 0 frame, 1 look, 2 snapped, 3 note, 4 ground.
         std::size_t index;
     };
     std::vector<Item> items;
-    items.reserve(job.packets.size() + job.looks.size() + job.notes.size());
+    items.reserve(job.packets.size() + job.looks.size() + job.snaps.size() + job.notes.size() + job.grounds.size());
     for (std::size_t i = 0; i < job.packets.size(); ++i) {
         items.push_back({job.packets[i]->qpc, 0, i});
     }
     for (std::size_t i = 0; i < job.looks.size(); ++i) {
         items.push_back({job.looks[i].qpc, 1, i});
     }
+    for (std::size_t i = 0; i < job.snaps.size(); ++i) {
+        items.push_back({job.snaps[i].qpc, 2, i});
+    }
     for (std::size_t i = 0; i < job.notes.size(); ++i) {
-        items.push_back({job.notes[i].qpc, 2, i});
+        items.push_back({job.notes[i].qpc, 3, i});
+    }
+    for (std::size_t i = 0; i < job.grounds.size(); ++i) {
+        items.push_back({job.grounds[i].qpc, 4, i});
     }
     std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
         return a.qpc != b.qpc ? a.qpc < b.qpc : a.order < b.order;
     });
 
     looks = 0;
-    std::vector<char> lookLines(kLookChars);
+    std::vector<char> lookLines(kExactLookChars);
     for (const Item& item : items) {
         if (item.order == 0) {
             const Packet& packet = *job.packets[item.index];
@@ -300,12 +365,22 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
         } else if (item.order == 1) {
             const Look& look = job.looks[item.index];
             const auto image = static_cast<unsigned long long>(look.stamp.number);
-            text.append(lookLines.data(), writeLook(lookLines, image, ms(look.qpc), look.found));
+            text.append(lookLines.data(), writeLook(lookLines, image, ms(look.qpc), look.found, true));
             appendShown(text, image, ms(look.doneQpc), look.followed);
             ++looks;
-        } else {
+        } else if (item.order == 2) {
+            const Snap& snap = job.snaps[item.index];
+            appendSnapped(text, static_cast<unsigned long long>(snap.stamp.number), ms(snap.qpc), ms(snap.doneQpc),
+                          snap.leadMs, snap.things);
+            appendFinds(text, static_cast<unsigned long long>(snap.stamp.number),
+                        static_cast<unsigned long long>(snap.lookImage), snap.finds);
+        } else if (item.order == 3) {
             const Note& note = job.notes[item.index];
             appendNote(text, ms(note.qpc), note.text);
+        } else {
+            const Grounded& ground = job.grounds[item.index];
+            appendGround(text, static_cast<unsigned long long>(ground.image), ms(ground.qpc),
+                         static_cast<unsigned long long>(ground.followed), ground.camera);
         }
     }
     return text;
@@ -371,18 +446,25 @@ struct ClipRecorder::Impl {
     std::deque<std::shared_ptr<const Packet>> packets;
     std::uint64_t packetBytes = 0;
     std::deque<Look> looks;
+    std::deque<Snap> snaps;
     std::deque<Note> notes;
+    std::deque<Grounded> grounds;
     std::atomic<bool> holding{false}; // It holds at least one frame.
 
     // From the recogniser's thread (one writer) to the clip thread (one reader).
     std::array<QueuedLook, kQueueLooks> queue{};
     std::atomic<std::uint64_t> queueHead{0}; // Looks put in, ever.
     std::atomic<std::uint64_t> queueTail{0}; // Looks taken out, ever.
+    // From the snapper's thread (one writer) to the clip thread.
+    std::array<QueuedSnap, kQueueSnaps> snapQueue{};
+    std::atomic<std::uint64_t> snapHead{0};
+    std::atomic<std::uint64_t> snapTail{0};
     std::atomic<std::uint64_t> dropped{0};
 
     // From the UI thread.
     std::mutex mutex;
     std::vector<Note> newNotes;
+    std::vector<Grounded> newGrounds;
     bool saveAsked = false;
     SaveJob asked; // The folder, what it is about and when; the rest is filled on the clip thread.
 
@@ -417,6 +499,7 @@ struct ClipRecorder::Impl {
     // Drops what is older than the last key frame shown at or before `cutoffQpc`.
     void trim(std::int64_t cutoffQpc);
     void takeLooks();
+    void takeSnaps();
     void takeNotes();
     // The save the UI asked for, with a copy of all it holds.
     SaveJob takeSave();
@@ -637,11 +720,21 @@ void ClipRecorder::Impl::trim(std::int64_t cutoffQpc) {
         }
     }
     const std::int64_t first = packets.empty() ? cutoffQpc : packets.front()->qpc;
-    while (!looks.empty() && looks.front().qpc < first) {
+    const auto warmUp = static_cast<std::int64_t>(kClipWarmUpSeconds * static_cast<double>(frequency));
+    while (!looks.empty() && looks.front().qpc < first - warmUp) {
         looks.pop_front();
+    }
+    // Snapped images from as long before as the looks (until the evening of 2026-11-11 from the one shown at the first
+    // frame), so a replay of them has caught up with live by then too (core/ClipGuesses' snapGuesses).
+    while (!snaps.empty() && snaps.front().qpc < first - warmUp) {
+        snaps.pop_front();
     }
     while (!notes.empty() && notes.front().qpc < first) {
         notes.pop_front();
+    }
+    // The grids from the last one drawn at or before the first frame (what was seen on it) on.
+    while (grounds.size() >= 2 && grounds[1].qpc <= first) {
+        grounds.pop_front();
     }
 }
 
@@ -665,12 +758,37 @@ void ClipRecorder::Impl::takeLooks() {
     queueTail.store(tail, std::memory_order_release);
 }
 
+void ClipRecorder::Impl::takeSnaps() {
+    const std::uint64_t head = snapHead.load(std::memory_order_acquire);
+    std::uint64_t tail = snapTail.load(std::memory_order_relaxed);
+    for (; tail != head; ++tail) {
+        const QueuedSnap& queued = snapQueue[static_cast<std::size_t>(tail % kQueueSnaps)];
+        Snap snap;
+        snap.stamp = queued.stamp;
+        snap.doneQpc = queued.doneQpc;
+        snap.leadMs = queued.leadMs;
+        snap.qpc = queued.stamp.shownQpc != 0 ? queued.stamp.shownQpc : queued.doneQpc;
+        snap.things.assign(queued.things.begin(), queued.things.begin() + queued.count);
+        snap.lookImage = queued.lookImage;
+        snap.finds.assign(queued.finds.begin(), queued.finds.begin() + queued.findCount);
+        if (!snaps.empty() && snap.qpc < snaps.back().qpc) {
+            snap.qpc = snaps.back().qpc;
+        }
+        snaps.push_back(std::move(snap));
+    }
+    snapTail.store(tail, std::memory_order_release);
+}
+
 void ClipRecorder::Impl::takeNotes() {
     std::scoped_lock lock(mutex);
     for (Note& note : newNotes) {
         notes.push_back(std::move(note));
     }
     newNotes.clear();
+    for (const Grounded& ground : newGrounds) {
+        grounds.push_back(ground);
+    }
+    newGrounds.clear();
 }
 
 SaveJob ClipRecorder::Impl::takeSave() {
@@ -697,9 +815,19 @@ SaveJob ClipRecorder::Impl::takeSave() {
             job.looks.push_back(look);
         }
     }
+    for (const Snap& snap : snaps) {
+        if (snap.qpc <= job.savedQpc) {
+            job.snaps.push_back(snap);
+        }
+    }
     for (const Note& note : notes) {
         if (note.qpc <= job.savedQpc) {
             job.notes.push_back(note);
+        }
+    }
+    for (const Grounded& ground : grounds) {
+        if (ground.qpc <= job.savedQpc) {
+            job.grounds.push_back(ground);
         }
     }
 
@@ -787,9 +915,38 @@ void ClipRecorder::looked(const ImageStamp& stamp, std::int64_t doneQpc, std::sp
     impl.queueHead.store(head + 1, std::memory_order_release);
 }
 
+void ClipRecorder::snapped(const ImageStamp& stamp, std::int64_t doneQpc, double leadMs,
+                           std::span<const Tracked> things, std::uint64_t lookImage, std::span<const SnapFind> finds) {
+    if (state() == State::Failed) {
+        return;
+    }
+    Impl& impl = *impl_;
+    const std::uint64_t head = impl.snapHead.load(std::memory_order_relaxed);
+    if (head - impl.snapTail.load(std::memory_order_acquire) >= kQueueSnaps) {
+        impl.dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    QueuedSnap& slot = impl.snapQueue[static_cast<std::size_t>(head % kQueueSnaps)];
+    slot.stamp = stamp;
+    slot.doneQpc = doneQpc;
+    slot.leadMs = leadMs;
+    slot.count = static_cast<std::uint32_t>(std::min(things.size(), slot.things.size()));
+    std::copy_n(things.begin(), slot.count, slot.things.begin());
+    slot.lookImage = lookImage;
+    slot.findCount = static_cast<std::uint32_t>(std::min(finds.size(), slot.finds.size()));
+    std::copy_n(finds.begin(), slot.findCount, slot.finds.begin());
+    impl.snapHead.store(head + 1, std::memory_order_release);
+}
+
 void ClipRecorder::note(std::string_view text) {
     std::scoped_lock lock(impl_->mutex);
     impl_->newNotes.push_back({qpcNow(), std::string(text)});
+}
+
+void ClipRecorder::grounded(std::int64_t shownQpc, std::uint64_t image, std::uint64_t followed,
+                            const GroundCamera& drawn) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newGrounds.push_back({shownQpc, image, followed, drawn});
 }
 
 bool ClipRecorder::save(std::filesystem::path folder, ClipAbout about) {
@@ -826,6 +983,7 @@ void ClipRecorder::run(std::stop_token stop) {
     state_.store(State::Running, std::memory_order_release);
 
     const auto keyEvery = static_cast<std::int64_t>(kKeyEvery * static_cast<double>(impl.frequency));
+    const auto repeatEvery = static_cast<std::int64_t>(kRepeatEvery * static_cast<double>(impl.frequency));
     // Rounded up, so the video's times (in its own units) never come closer either.
     const std::int64_t minGap = (impl.frequency + impl.framesPerSecond - 1) / impl.framesPerSecond;
     const auto keep = static_cast<std::int64_t>(kClipSeconds * static_cast<double>(impl.frequency));
@@ -870,7 +1028,7 @@ void ClipRecorder::run(std::stop_token stop) {
                     lastKeyQpc = key ? qpc : lastKeyQpc;
                 }
             }
-            if (!took && encoded && now - lastQpc >= keyEvery) {
+            if (!took && encoded && now - lastQpc >= repeatEvery) {
                 // The screen has not changed for a while: the same image again, as a key frame.
                 encodeMs = impl.encode(now, lastImage, true);
                 lastQpc = now;
@@ -884,6 +1042,7 @@ void ClipRecorder::run(std::stop_token stop) {
             }
 
             impl.takeLooks();
+            impl.takeSnaps();
             impl.takeNotes();
             bool saveAsked = false;
             {

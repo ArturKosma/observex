@@ -381,21 +381,25 @@ ID3D11Texture2D* ClipReader::upload(IMFMediaBuffer* buffer) {
     return own_.Get();
 }
 
-// The UI's thread and the player's share only atomics: the UI turns Playing into Paused and Paused or Ended into
-// Playing (and asks for a restart) and sets `wake`; the player's thread turns Playing into Ended, sets Failed and the
-// position. Neither ever waits for the other.
+// The UI's thread and the player's share only atomics: the UI turns Playing into Paused, Paused or Ended into Playing,
+// and Ended into Paused when it seeks, asks for a frame (`seekTo`) and sets `wake`; the player's thread turns Playing
+// into Ended, sets Failed and the position. Only the UI leaves Ended, so play() after Ended needs no flag to restart:
+// the thread starts again from the first frame when it is asked to play while at the end. Neither ever waits for the
+// other.
 struct ClipPlayer::Impl {
     GpuDevice gpu;
     std::unique_ptr<ImageChannel> channel;
     unsigned width = 0;
     unsigned height = 0;
-    double seconds = 0.0;
+    std::vector<double> times;               // Set before the constructor returns, then only read,
+    std::vector<std::uint64_t> keyframes;    // as these.
     std::atomic<State> state{State::Playing};
-    std::atomic<bool> restart{false}; // play() after Ended: start again from the first frame.
+    std::atomic<std::uint64_t> seekTo{0}; // The frame seek() asked for and the thread has not taken yet (0: none).
     std::atomic<double> position{0.0};
     std::string error;
-    HANDLE wake = nullptr; // Set by play(), pause() and stopping, so the thread looks at the state again.
-    std::jthread thread;   // Last, so it stops before the members it uses are destroyed.
+    std::uint64_t shown = 0; // Player's thread only: the frame handed over last (0 before the first).
+    HANDLE wake = nullptr;   // Set by play(), pause(), seek() and stopping, so the thread looks at them again.
+    std::jthread thread;     // Last, so it stops before the members it uses are destroyed.
 
     Impl() {
         wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -416,6 +420,9 @@ struct ClipPlayer::Impl {
     void run(std::stop_token stop, ComPtr<IDXGIAdapter1> adapter, std::filesystem::path video,
              std::promise<void> opened);
     void playFrames(std::stop_token stop, ClipReader& reader);
+    bool decodeTo(const std::stop_token& stop, ClipReader& reader, std::uint64_t& number, ClipReader::Frame& frame,
+                  bool& holding);
+    void handOver(const ClipReader::Frame& frame);
 };
 
 void ClipPlayer::Impl::run(std::stop_token stop, ComPtr<IDXGIAdapter1> adapter, std::filesystem::path video,
@@ -428,7 +435,8 @@ void ClipPlayer::Impl::run(std::stop_token stop, ComPtr<IDXGIAdapter1> adapter, 
         reader = std::make_unique<ClipReader>(gpu.device.Get(), video);
         width = reader->width();
         height = reader->height();
-        seconds = reader->times().back();
+        times = reader->times();
+        keyframes = reader->keyframes();
         channel = std::make_unique<ImageChannel>(gpu.device.Get(), width, height, ScreenCapture::kImageFormat);
     } catch (...) {
         reader.reset();
@@ -463,7 +471,6 @@ void ClipPlayer::Impl::playFrames(std::stop_token stop, ClipReader& reader) {
     }
     const HANDLE waits[2] = {wake, timer};
     const double ticksPerSecond = qpcPerSecond();
-    const std::vector<double>& times = reader.times();
 
     // The video's clock: it read `clockSeconds` at `clockQpc` and runs with real time while playing.
     double clockSeconds = 0.0;
@@ -471,10 +478,26 @@ void ClipPlayer::Impl::playFrames(std::stop_token stop, ClipReader& reader) {
     bool clockRunning = false;
     ClipReader::Frame frame;
     bool holding = false; // `frame` is decoded and waits for its time.
-    bool atEnd = false;
+    bool atEnd = false;   // The reader gave its last frame.
 
     try {
         while (!stop.stop_requested()) {
+            // A seek first, so it works while paused too.
+            if (std::uint64_t number = seekTo.exchange(0, std::memory_order_acq_rel); number != 0) {
+                const bool again = number == shown && !atEnd; // Shown already: nothing to decode or send.
+                if (!again && !decodeTo(stop, reader, number, frame, holding)) {
+                    continue; // Stopping.
+                }
+                // On from it: playing at real speed from its time, or waiting there.
+                clockSeconds = times[static_cast<std::size_t>(number - 1)];
+                clockRunning = false;
+                atEnd = false;
+                if (!again) {
+                    handOver(frame);
+                    holding = false;
+                }
+                continue;
+            }
             if (state.load(std::memory_order_acquire) != State::Playing) {
                 if (clockRunning) { // Paused: the clock stops where it is.
                     clockSeconds += static_cast<double>(qpcNow() - clockQpc) / ticksPerSecond;
@@ -483,14 +506,14 @@ void ClipPlayer::Impl::playFrames(std::stop_token stop, ClipReader& reader) {
                 WaitForSingleObject(wake, INFINITE);
                 continue;
             }
-            if (restart.exchange(false, std::memory_order_acquire)) {
+            if (atEnd) { // Asked to play once it had played to the end (play() after Ended): from the first frame.
                 reader.rewind();
                 holding = false;
                 atEnd = false;
                 clockSeconds = 0.0;
                 clockRunning = false;
             }
-            if (!holding && !atEnd) {
+            if (!holding) {
                 if (clockRunning) {
                     // Decoding fell a keyframe behind: go on from the newest keyframe due, skipping the frames before
                     // it, rather than slow down. (Frames only a little late are handed over at once; the UI shows the
@@ -503,12 +526,12 @@ void ClipPlayer::Impl::playFrames(std::stop_token stop, ClipReader& reader) {
                     }
                 }
                 holding = reader.next(frame);
-                atEnd = !holding;
-            }
-            if (atEnd) {
-                State playing = State::Playing;
-                state.compare_exchange_strong(playing, State::Ended, std::memory_order_acq_rel);
-                continue;
+                if (!holding) {
+                    atEnd = true;
+                    State playing = State::Playing;
+                    state.compare_exchange_strong(playing, State::Ended, std::memory_order_acq_rel);
+                    continue;
+                }
             }
             if (!clockRunning) { // Starts with the first frame decoded, so decoding it never makes it late.
                 clockQpc = qpcNow();
@@ -526,9 +549,7 @@ void ClipPlayer::Impl::playFrames(std::stop_token stop, ClipReader& reader) {
             if (state.load(std::memory_order_acquire) != State::Playing) {
                 continue; // Paused while it decoded: keep it for later.
             }
-            channel->write(gpu.context.Get(), frame.texture, ImageStamp{frame.number, 0}, frame.subresource);
-            gpu.context->Flush(); // Start the copy now; the UI's device waits for it through the keyed mutex.
-            position.store(frame.seconds, std::memory_order_release);
+            handOver(frame);
             holding = false;
         }
     } catch (...) {
@@ -536,6 +557,45 @@ void ClipPlayer::Impl::playFrames(std::stop_token stop, ClipReader& reader) {
         throw;
     }
     CloseHandle(timer);
+}
+
+// Decodes up to frame `number` into `frame`: on from where the reader is when that leads there without passing a key
+// frame (so the frame after the one shown is one decode), else from the key frame at or before it, the frames before
+// `number` decoded for nothing. A newer seek that comes meanwhile waits until this one is shown, so a dragged slider
+// shows a frame each time one is decoded (when the newer one dropped it, a drag back showed nothing until it rested:
+// each new frame asked for started again from its keyframe). Unless the newer one asks for a frame on the way here:
+// then it stops there (`number` becomes it). False when stopping; `frame` and `holding` then say what was decoded last.
+bool ClipPlayer::Impl::decodeTo(const std::stop_token& stop, ClipReader& reader, std::uint64_t& number,
+                                ClipReader::Frame& frame, bool& holding) {
+    const std::uint64_t next = reader.nextNumber();
+    if (!(holding && frame.number == number) && (number < next || reader.keyframeAtOrBefore(number) > next)) {
+        reader.seek(number);
+        holding = false;
+    }
+    while (!holding || frame.number != number) {
+        if (stop.stop_requested()) {
+            return false;
+        }
+        const std::uint64_t at = reader.nextNumber();
+        if (std::uint64_t newer = seekTo.load(std::memory_order_acquire);
+            newer != 0 && newer < number && newer >= at && reader.keyframeAtOrBefore(newer) <= at &&
+            seekTo.compare_exchange_strong(newer, 0, std::memory_order_acq_rel)) {
+            number = newer;
+        }
+        holding = reader.next(frame);
+        if (!holding) {
+            throw std::runtime_error("The video ended before frame " + std::to_string(number));
+        }
+    }
+    return true;
+}
+
+// Sends `frame` to the UI. The position first, so the UI never sees the frame with the time of the one before.
+void ClipPlayer::Impl::handOver(const ClipReader::Frame& frame) {
+    position.store(frame.seconds, std::memory_order_release);
+    channel->write(gpu.context.Get(), frame.texture, ImageStamp{frame.number, 0}, frame.subresource);
+    gpu.context->Flush(); // Start the copy now; the UI's device waits for it through the keyed mutex.
+    shown = frame.number;
 }
 
 ClipPlayer::ClipPlayer(IDXGIAdapter1* gpu, const std::filesystem::path& video) : impl_(std::make_unique<Impl>()) {
@@ -561,7 +621,15 @@ unsigned ClipPlayer::height() const {
 }
 
 double ClipPlayer::seconds() const {
-    return impl_->seconds;
+    return impl_->times.back();
+}
+
+const std::vector<double>& ClipPlayer::times() const {
+    return impl_->times;
+}
+
+const std::vector<std::uint64_t>& ClipPlayer::keyframes() const {
+    return impl_->keyframes;
 }
 
 ImageChannel& ClipPlayer::frames() {
@@ -570,9 +638,6 @@ ImageChannel& ClipPlayer::frames() {
 
 void ClipPlayer::play() {
     State was = impl_->state.load(std::memory_order_acquire);
-    if (was == State::Ended) {
-        impl_->restart.store(true, std::memory_order_relaxed);
-    }
     if ((was == State::Paused || was == State::Ended) &&
         impl_->state.compare_exchange_strong(was, State::Playing, std::memory_order_acq_rel)) {
         SetEvent(impl_->wake);
@@ -584,6 +649,14 @@ void ClipPlayer::pause() {
     if (impl_->state.compare_exchange_strong(was, State::Paused, std::memory_order_acq_rel)) {
         SetEvent(impl_->wake);
     }
+}
+
+void ClipPlayer::seek(std::uint64_t number) {
+    State ended = State::Ended;
+    impl_->state.compare_exchange_strong(ended, State::Paused, std::memory_order_acq_rel);
+    const auto frames = static_cast<std::uint64_t>(impl_->times.size());
+    impl_->seekTo.store(std::clamp<std::uint64_t>(number, 1, frames), std::memory_order_release);
+    SetEvent(impl_->wake);
 }
 
 ClipPlayer::State ClipPlayer::state() const {

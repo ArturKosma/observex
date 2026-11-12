@@ -47,7 +47,7 @@ LiveLog::LiveLog(const std::filesystem::path& file, const std::string& about) : 
                  "#   KINDS, for a model with kinds: the closest any thing's two surest kinds were in either look (also\n"
                  "#   saved under %.2f: unsure which kind it is).\n"
                  "# saved FILE IMAGE TIME: the recording saved screen image number IMAGE as FILE.\n"
-                 "# mark N TIME: the user pressed Ctrl+Alt+M (mark N); the image shown then is saved too.\n"
+                 "# mark N TIME: moment N marked (Ctrl+Alt+M until 2026-11-12); the image shown then is saved too.\n"
                  "# resume TIME: capture started again; image numbers start again from 1.\n",
                  about.c_str(), static_cast<double>(kMinSure * 100.0f),
                  static_cast<double>(Recognizer::kMinSure * 100.0f), static_cast<double>(Recognizer::kMirrorDisagrees),

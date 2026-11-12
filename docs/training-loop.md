@@ -97,7 +97,7 @@ when the score is good enough.
 Each step can be tried on its own.
 
 1. **Recording**: save frames (and later the user's clicks and keys) to the data folder, without slowing capture.
-   **Built (frames).** Record button or Ctrl+Alt+R; one folder per recording, named by date and time, holding
+   **Built (frames).** Record button (and Ctrl+Alt+R until 2026-11-12); one folder per recording, named by date and time, holding
    `000001.jpg`, `000002.jpg`, ...; 1 image every 3 seconds, fixed (the user asked for no rate setting; it was 1 per
    second until 2026-11-01, when the user chose fewer images over skipping near copies in the review); only images
    the screen actually updated. JPEG quality 85: about 0.7 MB per 2560 x 1440 Lineage 2 image, about 0.85 GB per
@@ -397,7 +397,7 @@ Each step can be tried on its own.
      within 2 pixels), about 1 s to start instead of 5.
    - *Live log* (2026-11-01; the user sees sureness high at some moments, 30% to 40% at others, and one-image
      blips, and wanted to show Claude): while recording, every look goes into `character-live.txt` (everything at
-     least 10% sure), tied to the saved images by screen image number, with Ctrl+Alt+M marks (a Settings
+     least 10% sure), tied to the saved images by screen image number, with Ctrl+Alt+M marks until 2026-11-12 (a Settings
      checkbox, on by default, turns it off). On a 15 s test the same character ranged from 20% to 88% sure (median
      84%). The user's first fight log (17.5 s): far characters standing apart hold 85-90% (the model's ceiling is
      about 90%); the small dark Nightmare Weaver wanders 40-85%; close-ups cut by the screen edge and piles of
@@ -494,7 +494,8 @@ Each step can be tried on its own.
       walking for 110 images instead of 5.5. Now both kinds stop after 110 images (`kRecordImages`) and the Stop
       button shows "38 of 110 images · about 4 min left" with a progress bar. Every 3 s stays for an unbiased look
       now and then, since what only unsure skips is never saved. 12 to 15 new places then make the 1,200 to 1,500
-      more images the research suggested.
+      more images the research suggested. Since 2026-11-12 (the user asked) only unsure records for one minute,
+      asking once a second and saving only when unsure (at most 60 images, none while the model is sure).
    3. A background trainer: after answers, fine-tune from the current model in the background, export, and refit the
       running engine, so the boxes change live.
    4. **Learning in the review (the user asked, 2026-11-08: "better auto-guesses with each picture in a review").**

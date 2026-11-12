@@ -14,8 +14,9 @@ struct Settings {
     std::filesystem::path recordingsFolder; // Each recording gets its own folder inside it.
     bool showCharacters = true;             // Show flag: draw the characters found on the observed screen.
     bool showKinds = true; // Show flag: say which kind each one is (monster, player, ...), with a model that knows.
-    bool liveLog = true;       // Recordings also log what live recognition sees (character-live.txt) and take marks.
-    RecordKind recordKind = RecordKind::Every; // The kind Record last started; the hotkey starts it too.
+    bool showUi = false;   // Show flag: highlight the game's interface the UI finder found (engine/UiFinder).
+    bool showGround = false; // Show flag: the ground plane the ground finder follows (engine/GroundFinder).
+    bool liveLog = true;   // Recordings also log what live recognition sees (character-live.txt).
 
     // Reads `file` (one "key=value" per line, UTF-8). A missing file or key keeps the default.
     static Settings load(const std::filesystem::path& file);

@@ -9,8 +9,10 @@
 #include "app/Theme.h"
 #include "app/Thumbnails.h"
 #include "core/Recordings.h"
+#include "engine/BoxSnapper.h"
 #include "engine/ClipRecorder.h"
 #include "engine/Gpu.h"
+#include "engine/HeuristicsLibrary.h"
 #include "engine/ImageChannel.h"
 #include "engine/KindUpdater.h"
 #include "engine/LiveLog.h"
@@ -18,6 +20,8 @@
 #include "engine/Recognizer.h"
 #include "engine/Recorder.h"
 #include "engine/Refresher.h"
+#include "engine/GroundFinder.h"
+#include "engine/UiFinder.h"
 
 #include <chrono>
 #include <cstdint>
@@ -36,9 +40,9 @@ namespace observex {
 //
 // The UI is a top bar and, below it, the screen being observed, a recording being reviewed or a clip being played. The
 // bar holds the screen button (live miniatures of all screens; picking one starts the pipeline on it), Show (what is
-// drawn over the observed screen, e.g. the characters the recogniser finds on it), the Review button (training
-// recordings or clips), Save last 10 s (a clip), the Record button and Settings. While reviewing, its middle steps
-// through the images; while a clip plays, it plays and pauses it.
+// drawn over the observed screen, e.g. the characters the recogniser finds on it, or the game's interface), the Review
+// button (training recordings or clips), Save last 10 s (a clip), the Record button and Settings. While reviewing, its
+// middle steps through the images; while a clip plays, it plays and pauses it.
 class App {
 public:
     // Snapshot mode, for checking the UI without showing it: the window stays hidden, the input `steps` play in
@@ -47,8 +51,8 @@ public:
     // go to `recordingsFolder` (by default a "recordings" folder next to the PNG; the Review button lists the
     // recordings in it), and no Windows dialog is shown.
     struct Snapshot {
-        // A click (from == to), a drag (from somewhere to somewhere else), a turn of the mouse wheel at `from`, or a
-        // key press. Window pixels.
+        // A click (from == to), a drag (from somewhere to somewhere else), a turn of the mouse wheel at `from`, a
+        // key press, or text typed. Window pixels.
         struct Step {
             ImVec2 from;
             ImVec2 to;
@@ -56,6 +60,7 @@ public:
             ImGuiKey modifier = ImGuiMod_None; // Held with the key: ImGuiMod_Ctrl (Ctrl+Z) or ImGuiMod_Shift.
             ImGuiMouseButton button = ImGuiMouseButton_Left; // Of the click or drag.
             float wheel = 0.0f;                              // Wheel turns (away from the user: positive).
+            std::string text;                                // Typed into the field with the keyboard (UTF-8).
         };
         std::wstring path;
         std::vector<Step> steps;
@@ -83,27 +88,26 @@ private:
     // After a display mode change: observes the same screen again if it is still connected.
     void observeAgain();
 
-    // Recording. The user starts it, and stops it or it stops by itself after kRecordImages: the Record button asks
-    // which kind (RecordKind), the hotkey starts the kind picked last. A recording outlives pipeline restarts: pause
-    // before the pipeline stops, resume once it runs again, into the same folder.
+    // Recording. The user starts it, and stops it or it stops by itself (recordingDone): the Record button asks which
+    // kind (RecordKind). A recording outlives pipeline restarts: pause before the pipeline stops, resume once it runs
+    // again, into the same folder.
     bool canRecord() const;
     bool canRecordUnsure() const; // The model is loading or running, so it can say what it is unsure of.
-    void toggleRecording();
     void startRecording(RecordKind kind);
     // `why` goes into the clip buffer's notes: "recording stopped", "recording done", ...
     void stopRecording(const char* why = "recording stopped");
     void pauseRecording();
     void resumeRecording();
-    // Ctrl+Alt+M while recording: a numbered mark in the live log, and the image on screen is saved too.
-    void markMoment();
 
     // Clips (the user asked, 2026-11-10): the clip buffer always holds the last 10 s of the observed screen; Save last
-    // 10 s or Ctrl+Alt+C saves them into a new folder in the clips folder, named by the date and time. `how` ("the
-    // button", "Ctrl+Alt+C") is for the clip's notes.
+    // 10 s saves them into a new folder in the clips folder, named by the date and time.
     bool canSaveClip() const;
-    void saveClip(const char* how);
-    // A line for the clip buffer's text about what the user did, e.g. "mark 2". Nothing while there is no buffer.
+    void saveClip();
+    // A line for the clip buffer's text about what the user did, e.g. "show Kinds off". Nothing while there is no buffer.
     void noteInClip(std::string_view text);
+    // What the Show flag Ground drew this UI frame (groundDrawn_), into the clip buffer if it changed: so a clip's
+    // Recorded shows the grid exactly as it was seen.
+    void noteGroundInClip();
 
     // Review: first what to review (the review chooser: training recordings or clips). Recordings: pick one from the
     // list (the recording.observex files in the recordings folder), then what to look for in it (the category popup),
@@ -117,7 +121,15 @@ private:
     void closeReview();
     // Between frames: opening a clip closes a review; closing it (Close clip, picking a screen, starting a review).
     void openClip(const ClipEntry& clip);
+    // New heuristics for the clip screen's Today: from heuristics_, or the ones built in if the DLL makes none.
+    std::unique_ptr<Heuristics> todaysHeuristics() const;
+    // And its snapping, likewise.
+    std::unique_ptr<Snapping> todaysSnapping() const;
+    // And its following of the camera (the Ground flag), likewise.
+    std::unique_ptr<Grounding> todaysGround() const;
     void closeClip();
+    // Between frames: the clip in `folder` goes to the Recycle Bin (its X in the clips list), closed first if open.
+    void removeClip(const std::filesystem::path& folder);
 
     // Writes the settings to observex.cfg (not in snapshot mode).
     void saveSettings();
@@ -130,18 +142,28 @@ private:
     void drawSettings();
     void drawRecordChooser();
     void drawShowFlags();
-    // In the middle of the bar, ending left of `right`: the review's back, where it is and forward; the clip's play
-    // or pause and where it is.
+    // The Characters flag (Show, and Guesses over a clip): saved, and noted in the clip buffer.
+    void showCharacters(bool on);
+    // Over a clip: `guesser`'s characters are drawn (Characters on again if it was off).
+    void pickGuesser(ClipView::Guesser guesser);
+    // The clip screen's Guesses popup: the Characters flag with whose characters are drawn over the clip
+    // (ClipView::Guesser) under it, Kinds and UI.
+    void drawGuessers();
+    // In the middle of the bar, ending left of `right`: the review's back, where it is and forward; the clip's frame
+    // back, play or pause, frame on, and where it is.
     void drawReviewSteps(float height, float right);
     void drawClipSteps(float height, float right);
     void drawReviewChooser();
     void drawRecordings();
     void drawClips();
+    void drawRemoveClip();
     void drawCategoryChooser();
     void drawChooseScreen();
     void drawObservedScreen();
     // The characters found on the observed screen, over its image at `min` to `max`.
     void drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max);
+    // Hands the ground finder what is on the screen now: the things shown and the interface's pieces.
+    void hintGround();
 
     // One recording, from Record to Stop.
     struct Recording {
@@ -149,15 +171,15 @@ private:
         std::chrono::steady_clock::time_point started;
         unsigned saved = 0;           // Images saved by earlier Recorders, before a pipeline restart,
         std::uint64_t savedBytes = 0; // and the bytes their files take.
-        std::shared_ptr<LiveLog> log; // What live recognition sees, the saved images and the marks.
-        unsigned marks = 0;
+        std::shared_ptr<LiveLog> log; // What live recognition sees and the saved images.
         RecordingInfo info; // Written to the folder's recording.observex at the start and again at the stop.
     };
     // One recording in the Review button's list.
     struct RecordingRow {
         RecordingEntry entry;
         std::string when;                  // "Today, 12:56" or "31 Oct, 23:59".
-        std::size_t images = 0;            // Image files in its folder.
+        std::size_t images = 0;            // Image files in its folder,
+        std::uint64_t bytes = 0;           // and their size together.
         std::filesystem::path firstImage;  // Its picture in the list; empty if there are no images.
         std::vector<ReviewCount> reviewed; // How far each entry of kCategories got.
         std::string lastReviewed;          // "Last reviewed today, 10:48"; empty if no review changed answers.
@@ -165,7 +187,8 @@ private:
     // One clip in the clips list.
     struct ClipRow {
         ClipEntry entry;
-        std::string when; // When it was saved: "Today, 18:22".
+        std::string when;        // When it was saved: "Today, 18:22".
+        std::uint64_t bytes = 0; // Its files together (the video most).
     };
 
     float dpiScale_ = 1.0f;
@@ -180,8 +203,34 @@ private:
     std::optional<Screen> observed_;         // The screen being observed, if any.
     std::optional<Screen> chosen_;           // Picked this frame; observed from the start of the next one.
     std::string error_;                      // Why the observed screen cannot be shown.
+    // What the recogniser and the clip screen's Today go by: observex_heuristics.dll, loaded again when rebuilt.
+    std::shared_ptr<HeuristicsSource> heuristics_;
     std::unique_ptr<Recognizer> recognizer_; // Looks for characters on the observed screen, shown or not.
     std::string recognizerError_;            // Why it could not start.
+    // Puts the recogniser's boxes onto every new image; shown instead of the recogniser's while it runs. Shared with
+    // the recogniser, which hands it every look.
+    std::shared_ptr<BoxSnapper> snapper_;
+    std::string snapperError_; // Why it could not start.
+    // Where the game's interface is, found all the time while observing; the Show flag UI draws it.
+    std::unique_ptr<UiFinder> uiFinder_;
+    std::string uiFinderError_; // Why it could not start.
+    // Follows the game's camera while the Show flag Ground is on, which draws the ground plane it sees.
+    std::unique_ptr<GroundFinder> groundFinder_;
+    std::string groundFinderError_; // Why it could not start.
+    bool groundFollowing_ = false;  // It was handed images last frame (else it starts afresh when it is again).
+    double previewMs_ = 0.0;        // When the screen showed the image last previewed (groundMs),
+    std::int64_t previewQpc_ = 0;   // likewise in QPC ticks, and its number.
+    std::uint64_t previewImage_ = 0;
+    // The grid the flag Ground drew over the preview this UI frame (drawObservedScreen), and the last one the clip
+    // buffer was given.
+    struct GroundDrawn {
+        bool drawn = false;
+        std::uint64_t image = 0;    // The preview image it was drawn over,
+        std::uint64_t followed = 0; // from the ground finder's camera, of this image followed whole (GroundSeen).
+        GroundCamera camera;
+    };
+    GroundDrawn groundDrawn_;
+    GroundDrawn groundNoted_;
     // Keeps the last 10 s of the observed screen and what the recogniser saw, to save as a clip on request. Shared
     // with the recogniser, which hands it every look.
     std::shared_ptr<ClipRecorder> clipRecorder_;
@@ -192,6 +241,9 @@ private:
     std::unique_ptr<ClipView> clipView_;                // While a clip plays; shown instead of the observed screen.
     std::optional<ClipEntry> clipToOpen_;               // Picked in the clips list; opened between frames.
     bool closeClip_ = false;                            // Close clip was clicked; closed between frames.
+    std::optional<ClipRow> clipToConfirm_;              // Its X was clicked in the clips list: asking first.
+    std::optional<std::filesystem::path> clipToRemove_; // Removing it was confirmed; removed between frames.
+    float guessesRight_ = 0.0f;                         // Where the Guesses button ended, the frame before.
     std::vector<ClipRow> clips_;                        // The clips list, read when Review opens.
     Settings settings_;
     std::filesystem::path settingsFile_; // Empty in snapshot mode: settings are not saved.
@@ -210,12 +262,9 @@ private:
     std::filesystem::path reviewFolder_;       // Picked for review, waiting for the category.
     std::string reviewWhen_;                   // When it was recorded, for the category chooser.
     std::size_t reviewFolderImages_ = 0;
-    bool closeReview_ = false;          // Close was clicked; closed between frames.
-    std::string reviewError_;           // Why the last review could not start.
-    bool hotkeyRegistered_ = false;     // Ctrl+Alt+R toggles recording.
-    bool markHotkeyRegistered_ = false; // Ctrl+Alt+M marks a moment while recording.
-    bool clipHotkeyRegistered_ = false; // Ctrl+Alt+C saves the last 10 s as a clip.
-    bool showStats_ = false;            // Toggled with F3.
+    bool closeReview_ = false; // Close was clicked; closed between frames.
+    std::string reviewError_;  // Why the last review could not start.
+    bool showStats_ = false;   // Toggled with F3.
     bool imguiReady_ = false;
     std::optional<Snapshot> snapshot_;
     int snapshotFrame_ = 0;

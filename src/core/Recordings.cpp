@@ -43,14 +43,21 @@ bool writeFileInOneStep(const std::filesystem::path& file, const std::string& te
 
 } // namespace
 
+bool recordingDone(RecordKind kind, unsigned saved, double elapsed) {
+    return kind == RecordKind::Unsure ? elapsed >= kUnsureSeconds : saved >= kRecordImages;
+}
+
 double recordingSecondsLeft(RecordKind kind, unsigned every, unsigned saved, double elapsed) {
-    const double left = saved < kRecordImages ? kRecordImages - saved : 0.0;
-    if (kind == RecordKind::Every) {
-        return left * every;
+    if (kind == RecordKind::Unsure) {
+        return std::max(0.0, kUnsureSeconds - elapsed);
     }
-    constexpr unsigned kOwnPaceAfter = 5;
-    constexpr double kNewPlaceDuePerSaved = 1.5; // 74 due, 50 saved in the user's first new place.
-    return left * (saved >= kOwnPaceAfter ? elapsed / saved : every * kNewPlaceDuePerSaved);
+    return (saved < kRecordImages ? kRecordImages - saved : 0.0) * every;
+}
+
+float recordingProgress(RecordKind kind, unsigned saved, double elapsed) {
+    const double done = kind == RecordKind::Unsure ? elapsed / kUnsureSeconds
+                                                   : static_cast<double>(saved) / static_cast<double>(kRecordImages);
+    return static_cast<float>(std::clamp(done, 0.0, 1.0));
 }
 
 const char* recordKindId(RecordKind kind) {

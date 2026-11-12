@@ -1,8 +1,9 @@
 #pragma once
 
 #include "core/Detection.h"
+#include "core/Ground.h"
+#include "core/Heuristics.h"
 #include "core/Recordings.h"
-#include "core/Tracker.h"
 #include "core/TripleBuffer.h"
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
@@ -27,7 +28,7 @@ struct ClipRecorderStats {
     float encodeMaxMs = 0.0f;
     double seconds = 0.0;      // How much it holds now (up to a little over kClipSeconds).
     std::uint64_t bytes = 0;   // The compressed video it holds.
-    std::uint64_t dropped = 0; // Looks it had no room for since it started (never waits for room).
+    std::uint64_t dropped = 0; // Looks and snapped images it had no room for since it started (never waits).
 };
 
 // What a saved clip says about where it came from (clip.observex and the head of clip.txt).
@@ -78,8 +79,19 @@ public:
     void looked(const ImageStamp& stamp, std::int64_t doneQpc, std::span<const Detection> found,
                 std::span<const Tracked> followed);
 
+    // For the snapper's thread (engine/BoxSnapper), after each image: the boxes it put onto the image `stamp`, each
+    // `leadMs` ahead along its speed, as the UI shows them from `doneQpc` on, and how it got them: the look it took in
+    // just before (its image number, 0: none) and its searches (Snapping::finds), so a replay is exact. Never waits
+    // and allocates nothing; an image that finds no room is dropped (stats().dropped).
+    void snapped(const ImageStamp& stamp, std::int64_t doneQpc, double leadMs, std::span<const Tracked> things,
+                 std::uint64_t lookImage, std::span<const SnapFind> finds);
+
     // A line about this moment for the clip's text, e.g. "recording started" or "mark 2". UI thread.
     void note(std::string_view text);
+    // UI thread, whenever what the Show flag Ground draws changes: the grid `drawn` over screen image `image` (shown at
+    // `shownQpc`), from the ground finder's camera on image `followed`; `drawn` not known: nothing drawn from then on.
+    // So a clip's Recorded shows the grid exactly as it was seen (core/ClipLines' ground line).
+    void grounded(std::int64_t shownQpc, std::uint64_t image, std::uint64_t followed, const GroundCamera& drawn);
 
     // UI thread: saves what it holds (the last kClipSeconds) into `folder` (created), in the background. False if a
     // save is still being written, it holds nothing yet or it is not running (state()).

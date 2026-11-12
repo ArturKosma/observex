@@ -77,6 +77,30 @@ bool ImageReader::copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* ta
     return true;
 }
 
+ID3D11Texture2D* ImageReader::useNewImage(ImageStamp* stamp) {
+    TripleBuffer<ImageStamp>& handover = channel_.handover_;
+    if (lent_ != nullptr || !handover.fetch()) {
+        return nullptr;
+    }
+    // As copyNewImage: held only while the work that reads it is queued, released after it on the GPU.
+    Slot& slot = slots_[static_cast<std::size_t>(handover.readIndex())];
+    if (slot.mutex->AcquireSync(ImageChannel::kReaderKey, 0) != S_OK) {
+        return nullptr;
+    }
+    if (stamp != nullptr) {
+        *stamp = handover.readSlot();
+    }
+    lent_ = &slot;
+    return slot.texture.Get();
+}
+
+void ImageReader::endUse() {
+    if (lent_ != nullptr) {
+        lent_->mutex->ReleaseSync(ImageChannel::kWriterKey);
+        lent_ = nullptr;
+    }
+}
+
 bool ImageReader::waitForImage(unsigned timeoutMs) const {
     return WaitForSingleObject(channel_.writtenEvent_, timeoutMs) == WAIT_OBJECT_0;
 }

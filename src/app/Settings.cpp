@@ -48,10 +48,12 @@ Settings Settings::load(const std::filesystem::path& file) {
             settings.showCharacters = value != "0";
         } else if (key == "show-kinds") {
             settings.showKinds = value != "0";
+        } else if (key == "show-ui") {
+            settings.showUi = value != "0";
+        } else if (key == "show-ground") {
+            settings.showGround = value != "0";
         } else if (key == "live-log") {
             settings.liveLog = value != "0";
-        } else if (key == "record-kind") {
-            settings.recordKind = parseRecordKind(value);
         }
     }
     return settings;
@@ -62,8 +64,9 @@ bool Settings::save(const std::filesystem::path& file) const {
     out << "recordings=" << toUtf8(recordingsFolder) << "\r\n";
     out << "show-characters=" << (showCharacters ? 1 : 0) << "\r\n";
     out << "show-kinds=" << (showKinds ? 1 : 0) << "\r\n";
+    out << "show-ui=" << (showUi ? 1 : 0) << "\r\n";
+    out << "show-ground=" << (showGround ? 1 : 0) << "\r\n";
     out << "live-log=" << (liveLog ? 1 : 0) << "\r\n";
-    out << "record-kind=" << recordKindId(recordKind) << "\r\n";
     return static_cast<bool>(out);
 }
 

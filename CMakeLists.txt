@@ -31,12 +31,14 @@ else()
 endif()
 
 # Core: platform-free building blocks (lock-free hand-overs, statistics, marks on images, the review's undo history,
-# zoom and kind learning, recording files, the live log's look lines and a clip's lines, the tracker, the mirror
-# test). Unit tested.
+# zoom and kind learning, recording files, the live log's look lines and a clip's lines and guesses, what the
+# heuristics take and give, the mirror test). Unit tested.
 add_library(observex_core STATIC
     src/core/BoxLearner.cpp
+    src/core/ClipGuesses.cpp
     src/core/ClipLines.cpp
     src/core/Features.cpp
+    src/core/Ground.cpp
     src/core/ImageView.cpp
     src/core/KindLearner.cpp
     src/core/LiveLines.cpp
@@ -46,20 +48,44 @@ add_library(observex_core STATIC
     src/core/Recordings.cpp
     src/core/ReviewHistory.cpp
     src/core/ReviewLines.cpp
-    src/core/Tracker.cpp)
+    src/core/UiLayout.cpp)
 target_include_directories(observex_core PUBLIC src)
 target_link_libraries(observex_core PRIVATE observex_warnings)
+
+# Heuristics (src/heuristics): what observex makes of the model's looks before it shows them, today the tracker and
+# the rules around it. Built twice: as observex_rules for the tests, the bench and the app's own fallback, and as
+# observex_heuristics.dll, which the app loads and loads again whenever it is rebuilt, so a heuristics change shows
+# in the running app: build only that target (`--target observex_heuristics`), as the app's exe is locked while it
+# runs. Unit tested (the tracker).
+add_library(observex_rules STATIC
+    src/heuristics/GroundMotion.cpp
+    src/heuristics/MinimapCone.cpp
+    src/heuristics/Rules.cpp
+    src/heuristics/SnapRules.cpp
+    src/heuristics/Snapper.cpp
+    src/heuristics/Tracker.cpp)
+target_link_libraries(observex_rules PUBLIC observex_core PRIVATE observex_warnings)
+add_library(observex_heuristics SHARED src/heuristics/Plugin.cpp)
+target_link_libraries(observex_heuristics PRIVATE observex_rules observex_warnings)
+# Next to the app: the Release one with C:\_ai\observex\observex.exe.
+set_target_properties(observex_heuristics PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR})
 
 # Engine: the real-time loop (screen capture on its own thread and GPU device), the recorder, the recogniser (a
 # trained model on the GPU through TensorRT), its live log while recording, the clip buffer (the last 10 s through
 # the GPU's video encoder) and the clip player (Media Foundation), the finder (the same model over a recording), the
 # kind update after a review and the refresher that makes old recordings' guesses fresh for it. No UI code.
 add_library(observex_engine STATIC
+    src/engine/BoxSnapper.cpp
     src/engine/ClipPlayer.cpp
+    src/engine/ClipGround.cpp
     src/engine/ClipRecorder.cpp
+    src/engine/ClipSnapper.cpp
     src/engine/Detector.cpp
     src/engine/Finder.cpp
     src/engine/Gpu.cpp
+    src/engine/GreyMaker.cpp
+    src/engine/GroundFinder.cpp
+    src/engine/HeuristicsLibrary.cpp
     src/engine/ImageChannel.cpp
     src/engine/ImageFile.cpp
     src/engine/KindUpdater.cpp
@@ -68,10 +94,11 @@ add_library(observex_engine STATIC
     src/engine/Recognizer.cpp
     src/engine/Recorder.cpp
     src/engine/Refresher.cpp
-    src/engine/ScreenCapture.cpp)
+    src/engine/ScreenCapture.cpp
+    src/engine/UiFinder.cpp)
 target_compile_definitions(observex_engine PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(observex_engine
-    PUBLIC observex_core d3d11 dxgi
+    PUBLIC observex_core observex_rules d3d11 dxgi
     PRIVATE windowscodecs d3dcompiler mfplat mfreadwrite mfuuid observex_nvenc observex_tensorrt observex_warnings)
 
 # App: the window and the UI. The icon and fonts are built into the exe (see src/app/observex.rc.in).
@@ -81,6 +108,7 @@ add_executable(observex
     src/app/App.cpp
     src/app/ClipView.cpp
     src/app/MainWindow.cpp
+    src/app/Overlay.cpp
     src/app/Review.cpp
     src/app/ReviewLog.cpp
     src/app/ScreenImage.cpp
@@ -93,6 +121,7 @@ add_executable(observex
     src/app/main.cpp
     ${CMAKE_BINARY_DIR}/observex.rc)
 target_link_libraries(observex PRIVATE observex_engine imgui dwmapi observex_warnings)
+add_dependencies(observex observex_heuristics) # Building the app builds the heuristics it loads.
 
 # Debug builds keep a console window for stderr; other configs are a plain windowed app.
 # The Release build goes straight into the project folder, so C:\_ai\observex\observex.exe is always the newest.
@@ -109,13 +138,16 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT observex)
 # Bench: measures the pipeline from a console, without the app window (see bench/Bench.cpp).
 add_executable(observex_bench bench/Bench.cpp)
 target_link_libraries(observex_bench PRIVATE observex_engine dwmapi observex_warnings)
+add_dependencies(observex_bench observex_heuristics) # For --heuristics.
 
 if(OBSERVEX_BUILD_TESTS)
     enable_testing()
     add_executable(observex_tests
         tests/BoxLearnerTests.cpp
+        tests/ClipGuessesTests.cpp
         tests/ClipLinesTests.cpp
         tests/FeaturesTests.cpp
+        tests/GroundTests.cpp
         tests/ImageViewTests.cpp
         tests/KindLearnerTests.cpp
         tests/LiveLinesTests.cpp
@@ -127,9 +159,12 @@ if(OBSERVEX_BUILD_TESTS)
         tests/ReviewHistoryTests.cpp
         tests/ReviewLinesTests.cpp
         tests/StatWindowTests.cpp
+        tests/SnapRulesTests.cpp
+        tests/SnapperTests.cpp
         tests/TrackerTests.cpp
         tests/TripleBufferTests.cpp
+        tests/UiLayoutTests.cpp
         tests/test_main.cpp)
-    target_link_libraries(observex_tests PRIVATE observex_core doctest::doctest observex_warnings)
+    target_link_libraries(observex_tests PRIVATE observex_rules doctest::doctest observex_warnings)
     add_test(NAME observex_tests COMMAND observex_tests)
 endif()

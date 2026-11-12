@@ -15,19 +15,25 @@ enum class RecordKind : std::uint8_t {
     Unsure, // When an image is due, only if the model sees it differently mirrored (Recognizer::kMirrorDisagrees).
 };
 
-// Both kinds stop by themselves after this many images, so the Stop button can show how far a recording is and how
-// long is left (the user asked, 2026-11-03): about what one place needs. Every 3 s takes 5.5 minutes; only unsure
-// about 8 in a new place, where two of three due images were saved.
+// Every stops by itself after this many images, so the Stop button can show how far a recording is and how long is
+// left (the user asked, 2026-11-03): about what one place needs, 5.5 minutes at one every 3 s.
 inline constexpr unsigned kRecordImages = 110;
+// Only unsure records for this long, asking once a second (kUnsureEvery) and saving the image only when the model is
+// unsure of it, so at most one image a second and none while it is sure of everything (the user asked, 2026-11-12;
+// before, it went on until kRecordImages, at most one every 3 s).
+inline constexpr unsigned kUnsureSeconds = 60;
+inline constexpr unsigned kUnsureEvery = 1;
 
-inline bool recordingDone(unsigned saved) {
-    return saved >= kRecordImages;
-}
+// Whether a recording of `kind` is done, with `saved` images saved `elapsed` seconds after it started: Every after
+// kRecordImages, Unsure after kUnsureSeconds.
+bool recordingDone(RecordKind kind, unsigned saved, double elapsed);
 
-// About how many seconds a recording of `kind` needs for the rest of its kRecordImages, `elapsed` seconds after it
-// started, with `saved` saved and an image due every `every` seconds. Unsure goes at its own pace once it has saved
-// a few, before that at a new place's (two of three due images saved).
+// About how many seconds are left of a recording of `kind`, `elapsed` seconds after it started, with `saved` saved
+// and an image due every `every` seconds.
 double recordingSecondsLeft(RecordKind kind, unsigned every, unsigned saved, double elapsed);
+
+// How far a recording of `kind` is, 0 to 1, as recordingDone counts.
+float recordingProgress(RecordKind kind, unsigned saved, double elapsed);
 
 // The kind's word in recording.observex and observex.cfg ("every", "unsure"), and back (Every if unknown; "auto",
 // the kind of 2026-11-02 and 03 that went on to only unsure, as Unsure).
@@ -83,14 +89,18 @@ std::vector<RecordingEntry> listRecordings(const std::filesystem::path& root);
 std::vector<std::string> listImages(const std::filesystem::path& folder);
 
 // A clip: the last kClipSeconds of the observed screen as the user saw it, kept in memory all the time while a screen
-// is observed (engine/ClipRecorder) and saved when the user asks (2026-11-11: the "Save last 10 s" button or
-// Ctrl+Alt+C), so what heuristics would have done can later be compared on the same seconds. Each clip is a folder in
+// is observed (engine/ClipRecorder) and saved when the user asks (2026-11-11: the "Save last 10 s" button), so what
+// heuristics would have done can later be compared on the same seconds. Each clip is a folder in
 // the clips folder (kClipsFolder, inside the recordings folder), named by when it was saved, holding:
 //   clip.mp4       the screen as captured, nothing drawn on it (H.264, a frame each time the screen changed);
 //   clip.txt       everything the recogniser saw and followed on every look, the frames, and what else happened;
 //   picture.jpg    the screen when it was saved, for the review's list of clips;
 //   clip.observex  a few key=value lines (ClipInfo), by which the review lists the clips.
 inline constexpr double kClipSeconds = 10.0;
+// The recogniser's looks are kept from this long before the clip's first frame too (clip.txt has them at negative
+// times), so a replay of the looks through the heuristics (core/ClipGuesses) has caught up with what the app followed
+// by the first frame. On a 10 s fight (2026-11-11) a replay from nothing drew a few boxes differently for up to 3.7 s.
+inline constexpr double kClipWarmUpSeconds = 5.0;
 inline constexpr char kClipsFolder[] = "clips";
 inline constexpr char kClipFile[] = "clip.observex";
 inline constexpr char kClipVideo[] = "clip.mp4";

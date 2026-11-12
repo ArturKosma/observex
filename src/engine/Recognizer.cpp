@@ -1,7 +1,9 @@
 #include "engine/Recognizer.h"
 
+#include "core/Heuristics.h"
 #include "core/Mirror.h"
 #include "core/StatWindow.h"
+#include "engine/BoxSnapper.h"
 #include "engine/ClipRecorder.h"
 #include "engine/ImageChannel.h"
 #include "engine/LiveLog.h"
@@ -25,8 +27,8 @@ std::int64_t qpcNow() {
 } // namespace
 
 Recognizer::Recognizer(const Screen& screen, ImageChannel& channel, std::filesystem::path modelFolder,
-                       Question* question)
-    : modelFolder_(std::move(modelFolder)), question_(question), width_(channel.width()),
+                       std::shared_ptr<const HeuristicsSource> heuristics, Question* question)
+    : modelFolder_(std::move(modelFolder)), heuristics_(std::move(heuristics)), question_(question), width_(channel.width()),
       height_(channel.height()) {
     const Screen own = findOnOwnAdapter(screen); // So this device cannot hold up the pipeline's.
     adapter_ = own.adapter;
@@ -77,7 +79,14 @@ void Recognizer::run(std::stop_token stop) {
     StatWindow work;
     std::uint64_t images = 0;
     std::int64_t windowStart = qpcNow();
-    Tracker tracker;
+    std::uint64_t heuristicsVersion = heuristics_->version();
+    std::unique_ptr<Heuristics> heuristics;
+    try {
+        heuristics = heuristics_->make();
+    } catch (const std::exception& e) {
+        fail(e.what());
+        return;
+    }
     std::array<Detection, Found::kMax> detections;
     std::array<Detection, Found::kMax> mirrored;
     const std::int64_t timeOrigin = windowStart;
@@ -106,21 +115,29 @@ void Recognizer::run(std::stop_token stop) {
             if (log) {
                 log->looked(stamp, detections.data(), count);
             }
-            int sure = 0; // Surest first, so what is at least kMinSure sure comes first.
-            while (sure < count && detections[static_cast<std::size_t>(sure)].sure >= kMinSure) {
-                ++sure;
-            }
             // Followed by when the screen showed the image, so the speeds are true on-screen speeds.
             const std::int64_t shownQpc = stamp.shownQpc != 0 ? stamp.shownQpc : start;
             const double timeMs = static_cast<double>(shownQpc - timeOrigin) * msPerTick;
             Found& found = found_.writeSlot();
-            found.count =
-                tracker.update(timeMs, detections.data(), sure, found.things.data(), static_cast<int>(Found::kMax));
+            // What it found, through the heuristics (core/Heuristics: at least kMinSure sure, then the tracker): new
+            // ones once the app loaded a rebuilt DLL (if they cannot be made, the ones it has go on).
+            if (const std::uint64_t version = heuristics_->version(); version != heuristicsVersion) {
+                heuristicsVersion = version;
+                try {
+                    heuristics = heuristics_->make();
+                } catch (const std::exception&) {
+                }
+            }
+            found.count = heuristics->update(timeMs, {detections.data(), static_cast<std::size_t>(count)},
+                                             found.things.data(), static_cast<int>(Found::kMax));
             found.image = ++images;
             found_.publish();
+            // The published slot is not written again until it comes back as a write slot, so it can be read here.
+            if (const std::shared_ptr<BoxSnapper> snapper = snapper_.load(std::memory_order_acquire)) {
+                snapper->looked(stamp, {found.things.data(), static_cast<std::size_t>(found.count)});
+            }
             const std::int64_t done = qpcNow();
             work.add(static_cast<float>(static_cast<double>(done - start) * msPerTick));
-            // The published slot is not written again until it comes back as a write slot, so it can be read here.
             if (clip) {
                 clip->looked(stamp, done, {detections.data(), static_cast<std::size_t>(count)},
                              {found.things.data(), static_cast<std::size_t>(found.count)});

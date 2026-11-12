@@ -73,6 +73,12 @@ public:
     // device), sets `stamp` (if given) to which image it is, and returns true. Never waits.
     bool copyNewImage(ID3D11DeviceContext* context, ID3D11Texture2D* target, ImageStamp* stamp = nullptr);
 
+    // Like copyNewImage, but lends the image itself (a shader can read it: a copy of a 2560 x 1440 screen held up the
+    // GPU the model runs on for about 0.4 ms, 2026-11-11): if a new one arrived, returns its texture on the reader's
+    // device and sets `stamp`, else null. Never waits. Queue the GPU work that reads it, then call endUse().
+    ID3D11Texture2D* useNewImage(ImageStamp* stamp = nullptr);
+    void endUse();
+
     // Waits up to `timeoutMs` for the pipeline to write an image. Returns true if one may have arrived since the
     // last wait (call copyNewImage to take it). For a reader that wants every image the moment it comes.
     bool waitForImage(unsigned timeoutMs) const;
@@ -88,6 +94,7 @@ private:
 
     ImageChannel& channel_;
     std::array<Slot, 3> slots_;
+    Slot* lent_ = nullptr; // Between useNewImage and endUse.
 };
 
 } // namespace observex

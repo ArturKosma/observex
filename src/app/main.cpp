@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cwchar>
 #include <cwctype>
 #include <optional>
@@ -27,7 +28,8 @@ ImGuiKey keyNamed(const std::wstring& name) {
 }
 
 // observex.exe [--snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --right-drag X1 Y1 X2 Y2 |
-//              --scroll X Y TURNS | --key [Ctrl+]NAME]... [--mouse X Y] [--recordings FOLDER] [--wait SECONDS]]
+//              --scroll X Y TURNS | --key [Ctrl+]NAME | --type TEXT]... [--mouse X Y] [--recordings FOLDER]
+//              [--wait SECONDS]]
 // The snapshot options draw the UI in a hidden window and save it; see App::Snapshot.
 std::optional<observex::App::Snapshot> readSnapshotOptions() {
     int count = 0;
@@ -68,6 +70,18 @@ std::optional<observex::App::Snapshot> readSnapshotOptions() {
                 name = name.substr(6);
             }
             snapshot->steps.push_back({ImVec2(), ImVec2(), keyNamed(name), modifier});
+        } else if (snapshot && arg == L"--type" && i + 1 < count) {
+            // Text typed with the keyboard, e.g. a frame number into the clip bar's field.
+            const std::wstring text = args[++i];
+            std::string utf8(static_cast<std::size_t>(
+                                 WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr)),
+                             '\0');
+            WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, utf8.data(), static_cast<int>(utf8.size()), nullptr,
+                                nullptr);
+            utf8.resize(std::strlen(utf8.c_str()));
+            observex::App::Snapshot::Step typed;
+            typed.text = std::move(utf8);
+            snapshot->steps.push_back(std::move(typed));
         } else if (snapshot && arg == L"--recordings" && i + 1 < count) {
             snapshot->recordingsFolder = args[++i];
         } else if (snapshot && arg == L"--mouse" && i + 2 < count) {

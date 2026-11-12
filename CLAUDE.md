@@ -41,11 +41,14 @@ F3 shows the pipeline's and the recogniser's numbers over the view (hidden by de
 Live recognition (step 5 of the training loop): while a screen is observed, the recogniser runs the trained character
 model (`models/character/model.onnx`) on every new captured image, on its own thread, whatever is shown: also while
 minimized or with the flag off. While reviewing it pauses (the user asked, 2026-11-01): the pipeline hands it no
-images, so the review's finder gets the GPU; the model stays loaded and it picks up again when the review closes.
+images, so the review's finder gets the GPU; the model stays loaded and it picks up again when the review closes. It
+pauses while a clip is open too (the user asked, 2026-11-11: a clip is offline data, and running on meant the GPU
+66-93% busy and the video encoder 21%, from the model and the clip buffer).
 **Show** (eye icon, right of the screen button, only while the screen
 is shown) is a dropdown of flags like Unreal's view flags: **Characters** draws a violet box tagged "Character 81%"
-around each character the tracker follows (saved in observex.cfg as `show-characters`). Under the flag: how
-recognition is doing ("3 found · 240 images a second · 3.1 ms each"), the progress of preparing a new model for the
+around each character the tracker follows (saved in observex.cfg as `show-characters`). Under the flag, only
+while it cannot draw (since 2026-11-12 the user wants no explanations or numbers under the flags; F3 has the
+numbers): the progress of preparing a new model for the
 GPU (once per new model, 35 s on the 4090, saved as `model.engine` next to it; later starts load in 0.4 s), or why it
 cannot run (e.g. no model.onnx). **Kinds** (the user asked, 2026-11-02; `show-kinds`, on by default) tags each
 box with its kind in the review's colours ("Monster 74%", green; Player blue, NPC amber, You pink; once a model is
@@ -79,8 +82,8 @@ a model trained with it) is left out, never taken for no. The model fits the rev
 order (`kindsFit`), so a model trained before "can't tell" came keeps its update and the review's learning. The live recogniser then reloads it on its own thread (`Recognizer::reloadKinds`,
 `Detector::setKindUpdate`); the finder's Detector loads it too. How sure of a character stays the network's, so what
 is found, its boxes and its order never change; only which kind and how sure of it come from the update (`pickKinds`:
-the kind is the update's surest, the second its next, each `sure` x its share of the update's kinds). Under Kinds a
-dim line then says "Kinds also learned from 11,083 of your answers". It is made only when some answers are newer
+the kind is the update's surest, the second its next, each `sure` x its share of the update's kinds). (Under Kinds a
+dim line said "Kinds also learned from 11,083 of your answers" until 2026-11-12.) It is made only when some answers are newer
 than model.onnx and ignored once a newer model.onnx is exported (right after a training it gained nothing and was a
 little worse in the review: 26 -> 32 wrong); it fits all answers, since the newest alone forget older places (97% ->
 77%). It needs every reviewed recording's guesses and features from the current model; while a review is open the
@@ -96,15 +99,164 @@ and 210 a second at first, 3.3 ms and 235 once the network ran as a CUDA graph, 
 until 2026-11-03); capture unchanged (239.8 images a second, 0.04 ms latency). The GPU is then nearly fully used, so other GPU work feels it: the finder took 37 ms per image instead of
 5 next to it (hence the pause while reviewing), and a game does too: with the user's Lineage 2 running, about 100
 images a second at 10 ms each (2026-11-01); a looks-per-second limit is the fix if the game suffers (not built).
+**UI** (the user asked, 2026-11-12: step 1 towards a per-pixel depth model of the screen that leaves the game's
+interface out, and later reading HP or a target's name from it; `show-ui`, off by default) draws every piece of the
+game's interface the UI finder found: filled see-through cyan (`theme::kUi`), outlined, tagged with its name ("Chat",
+"Window"). The finding goes on whatever the flag says (the user asked, 2026-11-12: the flag only draws), while a
+screen is observed; it pauses with the recogniser while a review or a clip is open. An open clip has a finder of its
+own on the frames shown (`ClipView`, handed the frame shown when it changes, at most 10 a second; the Guesses popup
+has the same UI flag, the user asked, 2026-11-12). `engine/UiFinder` (below-normal priority, own GPU device): the
+pipeline hands it a new image every 100 ms (`UiFinder::kImagesPerSecond`, the ui channel), `GreyMaker` (keeping one) makes it grey on the GPU, only the full-size level comes back (3.7 MB), and
+`core/UiLayout::find` finds on it, needing no model:
+- Framed windows ("Window": Map, Skills, Inventory, Character Status, the minimap, ...): Lineage 2 draws each with a
+  1-pixel light frame line (grey 120 or more and 40 brighter than the pixels 2 away on both sides). The lines are
+  found in rows and columns, joined across gaps up to 30 (tabs, buttons) while they stay solid, and kept from 40
+  pixels long if solid: line pixels 65% of the length or more. Text makes lines too (its letters' tops along a row,
+  60% at most, 39% on average; tall letters stacked down a column, mostly under 65%); frame lines are 95% and more,
+  but the Actions window's side beside its close button is 69% (75% lost it). Before (the user's clip
+  2026-11-12_14-21-53, the Inventory slid over the chat), chat text made a window that cut the chat short. Two
+  upright ones at least 40 apart standing on a level one (within 6), with a level one covering half the width where
+  they end (or sides 150 or longer), make a window. A top line is looked for near where both sides start (up to 60
+  above, the title bar): near only one side's start it was another window's (the Inventory's bottom made the
+  hotbar's top, over the ground between them, its right side starting 280 lower). Requiring the top line to reach
+  both sides was tried and lost the title bars of windows whose top line breaks at a corner (the minimap's buttons,
+  close buttons). The screen's left and right edges stand in for a side there (the
+  Inventory at the right edge) when both level lines reach the edge (since 2026-11-12: the chat's tab row, from x 104,
+  and the hotbar's end made a window over the ground between the widened chat and the hotbar), and only where no
+  side line of its own is within 12 pixels of the edge (the Equipment panel was two windows). A window partly under
+  another is found whole: a first look finds rectangles (the visible part, where it is one), then lines ending at a
+  found window's edge from outside it, on its rows or columns, are taken to go on under it to its far edge, and a
+  second look keeps a window only if at least one corner is under a window of the first look, each other corner is
+  where its side's own line ends (not along a longer line: two windows' lines that only line up made a window over
+  the ground with five windows open), and it covers something those do not (so two windows side by side stay two). Before (the user's clip
+  of 2026-11-12), the minimap with the Inventory over its lower left kept only its strip right of the Inventory.
+- ui.txt's pieces (Chat, Messages, Hotbar, Status, Target, Menu, Bar: no frame, partly see-through; and Minimap, by
+  its compass, for when bright sky behind it hides its frame: a frame line must be 40 brighter than the pixels 2 away
+  on both sides, and against white sky it is not, so 60% of clip 2026-11-12_11-34-03 had no minimap; its compass is
+  just inside the frame, so where the window is found it wins; and Buttons, the icon panel at the bottom right, which
+  has no frame of its own, by its first button's corner or, when a tooltip covers that, its last button):
+  `models/ui/ui.txt` (gitignored with the models; its header explains its lines) names anchors, small pictures cut
+  from clips by `tools/ui/make_anchors.py` (`NAME.pgm`, their mean over the frames named, and `NAME-mask.pgm`, the
+  pixels that never changed there: the interface's own, so the world behind never counts). They are found anywhere
+  on the screen by zero-mean correlation over the mask (an SSE2 test of up to 8 bright/dark pixel pairs first, at most
+  64 hits each), one per place across anchors (the larger score x sqrt(masked pixels) wins), and each piece sits
+  relative to its anchor. A side can stretch to another anchor (`right resize-corner ...`: a resized chat; the search
+  stops at the next window's anchor), or to the nearest frame line (`right line`: the target window's right edge).
+  A side may name several ways, tried in turn (the Chat's right: its upper corner `resize-corner`, then its lower one
+  `chat-corner`, for when a window covers the upper; cut from three clips so the chat's scroll thumb, which moves
+  with the text, is left out of it: cut from two, it held the thumb where they had it, and on clip
+  2026-11-12_14-21-53 the corner was never found, so the Inventory over the upper corner cut the chat short;
+  make_anchors.py keeps a pixel that is the same grey at every place within 12, as well as the same after evening
+  out each place's brightness, which had dropped the corner's frame line); the row or column an anchor is looked for at keeps its measured
+  distance from the piece's nearer edge (a taller chat still finds its lower corner). A side found no way ends where
+  a framed window begins across its way, if no farther than the size measured: the piece's visible part, the window
+  covering the rest (the user's screenshot of 2026-11-12: Chat and Messages were lost where the Character Status
+  window covered their right corners). A main anchor's hit well inside a framed window makes no piece (the
+  Inventory's scroll arrows made a false Messages).
+Pieces inside others are left out. ui.txt and its pictures are read again within a second of changing; while it
+cannot be read, the one before goes on (with none, only framed windows are found) and the reason shows under the
+flag. F3 adds "UI found 10/s, N ms each (finding N)". Measured 2026-11-12 with `observex_bench --ui CLIP` on 8 clips
+(2026-11-11 and -12, the camera turning, the user moving, resizing, opening and closing windows): Chat, Messages,
+Hotbar, Status and Bar on every frame, the target window and the menu on the frames checked by eye, framed windows
+too, nothing on the world; a find takes 3.2-5.2 ms on average (9 at most) on the CPU. Live (`--find-ui`): 10 images a
+second, 5.8 ms each, finding 4.7 of them, on a desktop (22 ms on a desktop full of icons); the recogniser's looks
+unchanged within noise (3.38-3.85 ms with it, 3.34-3.60 without). After the overlap rules (same day, the 8 clips
+again): the same pieces on every frame, except Messages ending where the Character Status window covers it. Two small
+false windows on the hotbar's bottom row (the frames of its end slots; inside the hotbar, so harmless). After the
+user's second screenshot (same day, 10 clips, 11,535 frames): the false window at the bottom left (on 1,806 frames,
+all with the widened chat) and the minimap not whole (1,385: the Inventory over it, bright sky behind it) on none;
+Buttons on every frame; contact sheets of 40 frames checked by eye. A find takes 4.9-9.6 ms on average (23.6 at
+most, on the clip with five windows open; with the game running alongside). After the user's third report (same
+day, clip 2026-11-12_14-21-53 around frame 521: the Inventory slid over the chat, "chat boxes go crazy"; 11 clips,
+12,740 frames): the chat cut short on 674 frames (two clips) and false windows over its text on 363, now none; the
+hotbar's box over the ground above it on 577, now none; nothing else changed but boxes covering the same together
+and the hotbar's end-slot boxes gone. A find takes 4.2-8.0 ms on average (13.6 at most). Not found
+yet: a piece whose own anchor is covered (only the covering window is marked), tooltips, party windows, buffs, a
+vertical hotbar; towns are untested; a frame line on very bright ground may be missed. The layout is the user's UI scale at 2560 x 1440: another scale or screen size
+needs its anchors cut again.
+**Ground** (the user asked, 2026-11-12: step 2 towards depth, "a green plane with opacity that rotates with the camera
+and reacts to zooms"; `show-ground`, off by default; also in a clip's Guesses popup) draws the ground as the camera sees
+it: filled see-through lime (`theme::kGround`) cells 1.5 own heights wide on the ground's own map, fainter farther out,
+a ring round the own character's feet and the horizon line; half as strong until the pitch is measured. The camera
+(`core/Ground`: it circles a point 0.856 of the own character's height above its feet at the screen's middle, focal 1700
+pixels at 2560 wide; pitch, distance, yaw and the feet on the map) is followed by `heuristics/GroundFollower` (from
+observex_heuristics.dll: it reloads while the app runs, see the heuristics below), live in
+`engine/GroundFinder` (below-normal priority, own GPU device, 15 images a second from the pipeline's ground channel,
+only the quarter and eighth sizes read back, 0.3 MB, and 60 x 60 full-size pixels round the minimap's cone; runs
+only while the flag is on) and on a clip in
+`engine/ClipGround`. On a clip the flag draws the guesser's grid (the user asked, 2026-11-12: "Recorded option should
+ALWAYS show what the player saw in live play"; fixes are tried on Today, made again by the DLL's hot reload):
+Recorded's is the grid the app drew live, saved with the clip as clip.txt's `ground` lines (`App::noteGroundInClip`:
+a line each time what it drew changed, a new preview image, a new camera from the finder, or nothing drawn any more;
+the camera as drawn, written exactly), each frame showing the last line at or before it, so it steps as live did;
+clips saved before have none and the Guesses popup says so. Today's is the ground followed again over the video with
+today's heuristics (`ClipGround`, once when first asked for and again when the DLL reloads: on the frames of the
+images live followed, or 15 a second on older clips). `observex_bench --ground CLIP` prints Today against Recorded
+(pitch, yaw and distance off on the frames both drew). Not the same even with unchanged heuristics: Today starts
+afresh at the clip's first frame (live had followed for a while) and reads the compressed video. Checked 2026-11-12
+in a hidden snapshot on the desktop screen (lines written, saved and read back; no character there, so nothing was
+drawn); a clip of the game with Ground on is still to be looked at. Each image: the own character's
+box gives the distance (only while the box is as tall as the character would be there, and while the camera looks down
+less than 69 degrees: steeper, the box's bottom hardly moves with the distance and is not the feet);
+`heuristics/GroundMotion` finds how the ground moved: 60 patches on a grid below the horizon, leaving out the interface
+(the UI finder's pieces) and the characters, learned on one image and looked for on the next moved as the ground would
+move: first a search on the eighth size, all patches at once, over how far the camera turned, tilted, turned again (a
+tilt taken for a turn is never undone otherwise), slid and zoomed (and, while the pitch is unknown, its pitch: a camera
+looking steeply down moves the ground otherwise), then each patch a few pixels round there on the quarter size; then
+`GroundFit` fits the pitch, distance, turn and slide to the patches found (Levenberg-Marquardt, robust). A camera turn
+turns the ground round the feet by up to 0.4 radians and 270 pixels between two images, blurred: a patch merely shifted
+(as the snapper finds things) is then no match, which is why the patches are moved through the camera. Where too few
+patches match (the fastest turns), the search's own motion moves the camera; a motion neither fitted nor searched stops
+the camera (its speeds, which foretell the next search, zeroed); nothing followed for 0.6 s (looking straight down), the
+camera is forgotten and found again. Where the camera looks comes from the minimap (`heuristics/MinimapCone`, late
+2026-11-12, the user asked: the yaw drifted, and tilts were taken for turns): its light view cone, 92 degrees wide from
+the own arrow on the north-up map, turns with the camera whatever its pitch. Its tip is found once in the minimap's
+window (a UI finder piece: the window's middle below its 18-pixel top strip, give or take 5 pixels, where the cone's
+edges are sharpest), then only round it is read; the heading is half way between the steepest rise and fall of the
+grey 10-28 pixels from the tip, 92 degrees apart, every half degree. It matched the ground's yaw to 4 degrees over 260
+degrees of turns with no lag at 15 images a second. The search then looks only 0.04 radians either way of the turn the
+cone says (so a tilt is never taken for a turn), the fit has a soft prior on that turn, and the yaw is set to the
+cone's (all of the way while the camera holds still, a 0.3 share of the difference while it moves). Measured with
+`observex_bench --ground CLIP --frames` (`--out` writes frames with the grid and a camera line each; `--heuristics
+DLL` follows through that observex_heuristics.dll, the same frame for frame), late 2026-11-12 with the minimap: clip
+2026-11-11_22-10-08 (fast turns, 250 degrees each way) 133 fitted and 15 searched of 153, pitch 18-23 degrees
+throughout (before the minimap each step's turn matched SIFT on the far ground to 0.01-0.03 radians); clip
+2026-11-12_11-34-03 (tilted from level to straight down and back, zoomed) 99 fitted and 49 searched of 152; clip
+2026-11-12_15-50-36 (frames 352-426 tilted to nearly level, 641-889 from level to straight down with no turn) 118
+fitted and 29 searched of 153: pitch 24 down to 5.5 degrees over 345-433 with the yaw steady to 0.2 degrees, then 8.5
+up to 83 degrees by 833 and about 81 after, the yaw following the cone's real 5-degree turn; the cone seen on every
+frame of all three. 13-14.6 ms an image on the CPU. F3 adds "Ground N/s, ... fitted N% (searched N%), ... pitch,
+distance, minimap N%" (the images the cone was seen on). Late 2026-11-12, on the user's clip 2026-11-12_17-43-14
+(fighting wolves, the camera nearly level; "starting at frame 424 is completely fucked until 972"), the user asked to
+loop on the grid until the whole recording looks right: above the horizon (0.06 of the screen up), patches on far things
+(trees, buildings, the far ground: `GroundMotion`'s far patches) are looked for where the minimap's turn takes them as
+if infinitely far, and their middle rise is the tilt (divided by 1 - distance / 50, as the camera circles the feet),
+which the search starts from, the fit is held to (0.02 radians), and a blurred search (matching under 0.6) takes;
+without them a blurred search tilts none. Looking nearly level a tilt moves the ground's patches as no flat ground does,
+so before them tilts were missed or invented. The search also tries standing still, and the patches are looked for 6
+pixels round where 3 found too few. The own character's box's top counts a third of its bottom (looking down 20 to 35
+degrees it is not the head's top as modelled: it held a 24-degree tilt to 15), and a box twice or half as tall as the
+last one taken is another thing's (the tracker gave the own id to a wolf, and the camera went 33 away). Measured against
+the far band's shift between every two video frames (a scratch probe, its depth corrected the same way, anchored where
+the sky shows the level): pitch off 0.7 degrees on average and 1.9 at most from 0.6 to 7 s (before: 2.5 and 6.2; 21.6
+and 56 before the far patches), and 7 to 9 s 25 to 37 degrees down as the band says once the steps it lost in the
+fastest tilts are added back. Fitted and searched of about 150 then: clip 2026-11-11_22-10-08 137 and 10,
+2026-11-12_11-34-03 112 and 37, 2026-11-12_15-50-36 130 and 22, 2026-11-12_17-43-14 114 and 24 (any small change moves a
+count by 2). Still off: that clip's first 0.6 s (the camera tilting up 25 degrees from about 34, the fit starting at
+26). Not done yet: hills and stairs (the ground is one plane), a minimap set to turn with the camera (its cone then
+always points up and the heading is wrong; the user's is north-up), and a truth for the other clips (fitted is not
+right).
 
-Recording (step 1 of the training loop): **Record** (or Ctrl+Alt+R, a system-wide hotkey that works while the game
-has focus or observex is minimized) saves the observed screen into a new folder named by date and time, e.g.
+Recording (step 1 of the training loop): **Record** (no hotkey: the system-wide Ctrl+Alt+R, Ctrl+Alt+M and Ctrl+Alt+C
+were removed on 2026-11-12, the user asked) saves the observed screen into a new folder named by date and time, e.g.
 `recordings/2026-10-31_23-05-12/000001.jpg`, 1 image every 3 seconds (fixed, `kRecordingInterval` in App.cpp: the
 user asked for no rate settings, then for 1 every 3 s instead of skipping near-copy images in the review,
 2026-11-01). Only images the screen actually updated are saved. The Record button first asks "What do we record?"
 (the user asked, 2026-11-02; `RecordKind` in core/Recordings.h):
 - **Every 3 s**.
-- **Only unsure**. When an image is due the pipeline asks (`core/Question`, `Pipeline::question`,
+- **Only unsure**: since 2026-11-12 (the user asked) it records for one minute (`kUnsureSeconds`), an image due every
+  second (`kUnsureEvery`) and saved only when the model is unsure of it: at most one a second, none while it is sure
+  of everything (before, at most one every 3 s until 110 images). When an image is due the pipeline asks (`core/Question`, `Pipeline::question`,
   `setRecordOnlyQuestions`); the recogniser looks at its next image once more, mirrored left to right
   (`Detector::detect(..., mirrored)`: the squeeze shader writes the columns backwards, the boxes are turned back),
   after handing the UI what it found (about 5 ms, once per 3 s), and answers yes when `mirrorDisagreement`
@@ -121,7 +273,7 @@ user asked for no rate settings, then for 1 every 3 s instead of skipping near-c
   mirrored image more alike (median 0.255 → 0.197) and 0.17 saved only 118 (56%), so the cut-off became 0.11: 138
   (65%), holding 81% of its mistakes and 19 of its 20 wrong kinds (the user wants more unsure images, not fewer). `--images` below prints how many each
   would save; a one-category model answers exactly as before (same median and count on the eighth's held-out
-  images). Yes saves the next new image; no skips that 3 s step. So about two thirds of the steps save with the
+  images). Yes saves the next new image; no skips that step. So about two thirds of the steps save with the
   ninth, about 13 images a minute (half with the eighth). On its held-out images the eighth's kept half held 71% of the
   model's mistakes (a random half 52%, the half with the most things 30 to 65% sure 68%) and 60% of its false
   alarms 65% sure or more (43%): the mirror test also catches mistakes it is sure of (consistency-based active
@@ -130,8 +282,9 @@ user asked for no rate settings, then for 1 every 3 s instead of skipping near-c
   cut-off from real recordings. (The first Only unsure, built earlier on 2026-11-02, saved after looks with 2 or
   more things 30 to 65% sure; replaced the same day.)
 
-Both stop by themselves after 110 images (the user asked, 2026-11-03; `kRecordImages`, `recordingDone`: the main
-loop stops by the saved count, marks included, and a label then says it is done), or when the user stops them.
+Every 3 s stops by itself after 110 images (the user asked, 2026-11-03; `kRecordImages`), only unsure after its minute
+(`recordingDone`: the main loop checks the saved count or the time, and a label then says it is done), or when the
+user stops them.
 Auto (60 images every 3 s, then 50 only unsure, then it stopped; 2026-11-02) was removed then, as the user asked: on
 the user's first new place (2026-11-02_23-46-18) the eighth's mirror test would have kept 38 of the 60 every-3 s
 images, and those held all 23 of its false alarms, 31 of its 35 misses and 15 of the 18 with nothing seen; the 22
@@ -139,8 +292,8 @@ skipped were quiet (2.3 characters each against 4.7). So per image to review, on
 of mistake; it only takes longer to walk (110 images in about 8 minutes instead of 5.5). Every 3 s stays for an
 unbiased look now and then: what only unsure skips is never saved, so only those show whether it is still quiet.
 
-While reviewing, recognition is off, so only unsure saves nothing then. Ctrl+Alt+R starts the kind picked last
-(`record-kind` in observex.cfg); with the model failed it records every 3 s. Starting and stopping writes
+While reviewing, recognition is off, so only unsure saves nothing then (its minute runs on). Starting and stopping
+writes
 `recording.observex` into the folder (`core/Recordings`: `key=value` lines `started`, `seconds`, `screen`, `size`,
 `every`, `kind` (`every` or `unsure`; `auto`, the removed kind, reads as `unsure`; the first Only unsure ones say
 `unsure=1`), `images`, and `reviewed-<category>` once a review changed answers (see Review), written through a
@@ -150,9 +303,8 @@ folders that have one (the user asked, 2026-11-01:
 choosing a folder felt unnatural). The 11 recordings made before got theirs from a one-off script (`started` from
 the folder name, the rest from the images and the live log).
 While recording, the button reads "Stop", the time, "38 of 110 images" and about how long is left ("about 4 min
-left", `recordingSecondsLeft`: exact for every 3 s; for only unsure at its own pace once it has 5 images, before that
-at a new place's, two of three due images saved), with a progress bar along the button's bottom
-(`BarButton::progress`), so the user knows how much more to walk around. Its tooltip gives the size on disk (the
+left", `recordingSecondsLeft`), or for only unsure the images so far and the seconds left ("12 images · 37 s
+left"), with a progress bar along the button's bottom (`BarButton::progress`, `recordingProgress`: images or time), so the user knows how much more to walk around. Its tooltip gives the size on disk (the
 Recorder sums each file's size; shown in 1024s, as File Explorer does). JPEG quality 85: about 0.7 MB per 2560 x 1440 Lineage 2
 image, so about 0.85 GB per hour. **Settings** (gear) holds the recordings folder (default: `recordings` next to
 observex.exe; folder picker, Open, Use default) and the live log flag (below). Settings live in `observex.cfg` next to the exe. Both it and
@@ -165,14 +317,12 @@ sure with its box; the app draws 30% and up), for a model with kinds a `kinds` l
 2026-11-08: each thing's two surest kinds and how sure of each, in the look's order; the format is `core/LiveLines`,
 shared by the writer and `--track`), `saved` lines tying each saved JPEG to its screen image number,
 `mirror` lines (each Only unsure answer: image number and how differently it saw it mirrored; with kinds, also how
-close any thing's two surest kinds were), and `mark` lines. **Ctrl+Alt+M** (second system-wide hotkey) marks a moment: a numbered `mark` line, and the image on
-screen is saved right then (`Pipeline::recordNow`; the 3 s rhythm counts on from it); the Record button shows the
-mark count. The user then says "at mark 3 ..." and Claude reads the log: follow each thing from look to look
+close any thing's two surest kinds were), and `mark` lines (until 2026-11-12 **Ctrl+Alt+M** marked a moment: a numbered `mark` line, and the image on screen
+saved right then, `Pipeline::recordNow`; the hotkey is gone, the bench still marks once halfway). Claude reads the log: follow each thing from look to look
 (match boxes), plot its sureness over time, find one-look blips, and line them up with the saved images. About 85
 MB per hour; lines are formatted outside a lock and buffered (1 MB), marks flushed. The file's header explains the
 lines. A Settings checkbox, "Log what the model sees while recording" (`live-log` in observex.cfg, on by
-default; the user asked for it), turns the log off from the next recording; with it off Ctrl+Alt+M does nothing
-and the Record tooltip only mentions images. Image numbers come from `ImageStamp` (the pipeline's count and the time the screen showed it), which every
+default; the user asked for it), turns the log off from the next recording (no grey text under it since 2026-11-12). Image numbers come from `ImageStamp` (the pipeline's count and the time the screen showed it), which every
 `ImageChannel` hand-over now carries.
 
 Review (step 2 of the training loop, `app/Review`): **Review** lists the recordings (the recordings folder's
@@ -554,14 +704,159 @@ overlap scores (AP75, AP50:95) favour whichever model pre-answered the review, s
 model's box: on the 18 orc images the sixth matched its own boxes at 98% overlap; compare models by AP50 and found /
 false alarms at 50%.
 
-Tracker (`core/Tracker`, built 2026-11-01; the user saw sureness swing and one-image blips, see the live log):
+Tracker (`heuristics/Tracker`, built 2026-11-01; the user saw sureness swing and one-image blips, see the live log):
 follows what the model finds from look to look, so each character keeps one steady box and an identity (id, speed).
 A new thing starts being followed only from a box at least 60% sure (`kStartSure`; 50% until 2026-11-08) and counts once found on 3
 looks in a row; once followed, boxes from 30% keep it (pairs with a sure box are matched first). One that is not
 found is held where its
 speed takes it, as long as it was seen, up to 150 ms; matching is nearest-first to where each is heading (reach
 grows 0.5 sides per 100 ms unseen), or a box lying 80% inside the other (cut by the screen edge); `sure` is smoothed
-over about 60 ms. On the user's fight log (17.5 s, `observex_bench --track`): boxes appearing or vanishing 21.1 ->
+over about 60 ms; its kind, how sure of it and its second kind come from per-kind scores smoothed over about 300 ms
+(each look counts the model's surest kind and its second, so on a steady answer they are the model's). Until
+2026-11-11 the kind's sureness and the second stayed as the first look had them: a wolf first seen 58% sure of
+monster showed "Character?" for the 9 s it was followed, while the model said monster 80% on average; the fix
+re-tagged 614 of the 10898 boxes shown in that clip (`--clip-guesses`), moved none. **Boxes are handed out where
+their thing is by the time they are on the screen** (2026-11-11; the user saw every box shifted in a camera turn
+and said box precision is SUPER important, the bot will click box middles): until then a box was where the thing
+was on the image looked at, about 12 ms before it showed (9.5 ms to look, then until the screen's next image), so
+in a turn (3-4 px/ms) boxes trailed 30-50 px. Now its speed is a least-squares line through where it was found
+over the last 20 ms (`kSpeedMs`, at least two looks; it was the speed so far followed by 30% of each step, which
+lagged a turn), and each box is led along it by `kLeadMs` 12 ms. On the 12:10 clip (`--clip-guesses`, against the
+model's boxes on each frame's own image): boxes of things moving fast off 26.5 -> 11.1 px on average, middles
+outside the thing 63.5% -> 24.2%, in its middle half 14.8% -> 47.8%; all boxes outside 6.9% -> 2.9%; boxes
+coming or going 5.9 -> 5.3 a second. What is left is the game's own unevenness (an orc in a steady turn moved
+51, 5, 51, 15, 30 px on images 8, 4, 8, 4, 8 ms apart), which nothing in the looks foretells, so a bot should
+click when the camera is still or slow. No ABI change: it reloads. Foretelling cannot do better: on frame 361
+(a turn speeding up, 16, 40, 55, 70, 119 px a look within 50 ms) boxes still trail 35-50 px, and six more ways
+(shorter line, speeding-up terms, the faster of line and last steps) all left more fast boxes outside their things
+(22-33%). **Boxes snapped onto every new screen image** (`heuristics/SnapRules` and `heuristics/Snapper`, live since
+2026-11-11; the user asked for boxes snapped to the characters, since in camera turns foretold boxes still miss):
+each look teaches how each thing looks (its box on the look's own image), and on every new screen image
+(`engine/BoxSnapper`) each box is looked for near where its speed takes it (zero-mean normalised cross-correlation,
+coarse to fine over halvings, to a fraction of a pixel; 0.6 the least match, 0.7 or 0.8 were worse: blur lowers real
+matches; reach 20 px plus all its speed took it since), its speed then a line through where it was snapped over 30
+ms, and handed out 6 ms ahead (`SnapRules::kLeadMs`, about until the next image). Things not found stay where their
+speed takes them (held). While it runs the UI draws its boxes, not the recogniser's; clips record them (`snapped`
+lines) and Recorded shows them from the first one on. On the 12:10 clip (`--clip-guesses --snap`): on the image
+snapped, fast boxes 2.4 px off, 3.2% of middles outside their things (Today: 11.1 px, 24%), all 0.7 px; 94% snapped.
+As shown until the next image: fast boxes 9.1 px off, 15.5% outside. What is left is the game moving things
+unevenly between images (moved on by exactly the time to the next image, which is not known live: 7.6 px, 11.7%),
+so a bot clicking a box should lead it by when its click lands. A thing behind the minimap snaps onto the minimap.
+**Game hitches** (fixed the evening of 2026-11-11; the user, on the 19:08 clip, frames 490-491: a box well off the
+nearest orc, then a second box beside it, boxes sliding right): the game showed no new image for 50 ms (the one gap
+over 20 ms in both clips), things then 16 px on instead of the 340 their speed said, and 4 ms later the camera caught
+up 120-160 px and stopped. The tracker had foretold the whole 50 ms, lost everything and followed it again as new
+things, while holding the old ones where their speed took them (the sliding second boxes); the snapper took those
+held guesses over its own (right) places, and looked as far as the speed went, so that one image took it 30 ms
+(boxes from before the hitch shown meanwhile: frame 490's offset). Now both foretell at most 20 ms
+(`Tracker::kMaxAheadMs`), start a thing's speed line again where it jumps off it by over 60 px
+(`Tracker::kJumpPixels`; normally within 20, 10 of 27,970 finds farther), the snapper keeps its own place for a thing
+the look holds, drops a held box snapped onto another's (the same thing twice), and hands out nothing found by neither
+the looks nor the images for 60 ms (`SnapRules::kGoneMs`; boxes on nothing 1141 -> 637 on that clip, 570 -> 427 on
+12:10; 30 ms more, but boxes come and go more). Left: far small characters jump more than the tracker reaches (it
+matches within about their own size), so for up to 60 ms a ghost of one stays where it was; the orc's box is off for
+one image (the one before any look of the moved scene is done).
+**Today snaps too, and on a new clip it is Recorded exactly** (the evening of 2026-11-11; the user: whenever we record
+something new and open it the first time, Recorded and Today should show the exact same thing, so we can iterate on
+heuristics). The clip screen shows the heuristics' own sets at once, then `engine/ClipSnapper` (its own thread at
+below-normal priority and its own GPU device; about 5 s for a 10 s clip) snaps them onto the clip's video as the
+snapper thread does live (`core/ClipGuesses` snapGuesses), on the recorded schedule: which images were snapped, when
+each set was done and which look's things it had taken in (`snapped` and `finds` lines; a clip without them: every
+new frame, done 2 ms after it). The video is not the screen bit for bit (compressed, and without the images the
+encoder had no time for), so live the snapper notes each search it makes (`core/Heuristics` SnapFind: the finder's
+version, the thing, the image and box it learned it from, where it looked and how far, what it found and how well),
+clips keep them (`finds` lines), and the replay takes the recorded result of a search that is the same
+(`SnapFind::sameSearch`: the same finder and learned image, the rest within 1 px) instead of searching the video. So
+until the heuristics change Today is Recorded; a changed rule makes other searches, and those search the video.
+**Bump `Snapper::kFinderRevision` whenever its learn or find change**, or results of the old finder are taken for the
+new one. `observex_bench --clip-guesses` says at how many sets Today is drawn as Recorded, and when the first differs (the
+Guesses popup said it, and the snapping's progress, until 2026-11-12); for a clip saved before the `finds` lines it
+cannot be exact (the 19:46 clip: 22% of the sets). Checked by a unit test running the live rules and snapper on made-up images, writing the clip
+lines and replaying them on other pixels (every set the same, and not without the `finds` lines), and on the first
+three clips recorded with them (22:07, 22:10 and 22:37 of 2026-11-11: 1507, 1498 and 1195 snapped sets, all the
+same). Needed ABI 3 (`kObservexHeuristicsAbi`).
+**A lost thing in a camera turn** (the evening of 2026-11-11; the user, on the 19:46 clip, frames 917-923: a
+"Character? 51%" box above a wolf next to a player, standing still on the screen until 922, then gone, and the wolf
+without a box): a monster lost 130 ms before in a fast turn was held (standing still after its 20 ms) and took a 47%
+box the model found on a pale shape above the wolf (once followed, any box counts); the snapper never found that on
+the images after and held it, also standing still after 20 ms, for its 60 ms. The wolf itself the model found only
+12-52% sure in the turn and 16-27% after it (below the 30% the recogniser hands over), so no rule boxes it; only a
+model that sees it better would. Now a thing moving 0.8 px/ms or faster is held at most 100 ms
+(`Tracker::kFastHoldMs`; on the 31 live logs at their 2,399 answered images, `--track`: boxes on nothing marked 2149
+-> 2040, characters shown 10514 -> 10505 of 14526, boxes appearing or vanishing 3.706 -> 3.710 a second; on the four
+clips, snapped: boxes on nothing the model found 5-9% fewer, its things without a box +1.5%), and the snapper holds a
+box on along its speed from image to image (at most 20 ms a step, so a hitch still counts 20 ms): as near and as many
+as before, but moving with the turn. Tried and left out: the tracker moving held things on look by look (fewer
+characters, jumpier, even for fast ones alone); a thing without its own speed also matched where the camera moves
+things (the median speed of those followed: 10-13% fewer of the model's things without a box in turns, but more
+flicker there, and in this clip it boxed the pale shape); held things taking only sure boxes after a while (fewer
+false boxes, but fewer characters and jumpier).
+**A thing the snapping lost in a turn** (late evening of 2026-11-11; the user, frame 159 of the 22:10 clip: boxes beside
+their monsters while the camera turned at 8 px/ms): the snapping had its own speed for a thing once it had snapped it
+twice, and a look moved its box but never told it the speed. One lost as the turn sped up (looked for 47 px from
+where it was, 34 px around) was then looked for at the speed it had then (1.1 px/ms against the tracker's 7-9) and
+never found again; between looks its box slid on too slowly, up to 100 px behind (78 of that clip's 1077 frames). Now
+a look that finds one the snapping could not find on its last image puts it there with the tracker's speed and
+starts its line again (`SnapRules::merge`). On the 22:37 clip, each set against the model's boxes on the image it was
+snapped onto (lead taken back): boxes on nothing 552 -> 519, the model's things without a box 550 -> 506, fast boxes
+on their things 817 -> 881 at 2.4 -> 2.7 px off; in its turns held boxes 2 px/ms or more off the others 220 -> 148.
+Not judged on the older clips: their videos lack images (below). The rest of that moment is the tracker's: small
+monsters (18-22 px) jumped farther than their own size between looks as the turn sped up, so it lost them or swapped
+their ids, and held the lost ones where they were for up to 150 ms (their speed was still slow, so not
+`kFastHoldMs`); the scene's shift below takes some of that.
+**A camera jump** (night of 2026-11-11; the user, frame 178 of the 22:37 clip: "huge offset on boxes"): the game stood
+still 27 ms, then the scene was 76 and then 183 pixels on in two images (the player's own character, the camera's
+pivot, stayed; a large monster close to the camera went the other way). The tracker matches each thing near where it
+is heading (its larger side), so the small monsters were all lost and followed again as new ones, and the snapping,
+looking 20 px around, lost them too: on frame 178 their boxes were 114-250 px off, held where they had been. Two
+changes, both in the heuristics DLL:
+- The tracker pairs by the scene's shift (`Tracker::sceneShift`): when things not found near where they were heading
+  have boxes about as far off as each other (`kShiftNear` of their side; at least `kShiftSupport`, and at least half of
+  those just lost), each is also paired where that shift takes it, and one paired so over `kJumpPixels` away starts its
+  line again. The shift is the mean of theirs weighted by how small they are; things that stayed where they were
+  heading (the player's own character) do not count. Its tolerance first grew with the shift (a quarter of it): in the
+  22:10 clip's crowds three lost things then paired others with boxes across the screen (speeds of 150 px/ms). On the
+  five clips of 2026-11-11, Today not snapped against the model's boxes on each frame's own image (boxes on nothing,
+  the model's things without a box): 22:37 996 -> 915, 532 -> 362; 22:07 464 -> 446, 109 -> 84; 19:46 1908 -> 1884,
+  793 -> 569; 12:10 456 -> 440, 137 -> 128; 22:10 1683 -> 1762, 1035 -> 746. On the 31 live logs (`--track`) characters
+  shown 10505 -> 10518, boxes on nothing 2040 -> 2048, coming or going 3.710 -> 3.668 a second.
+- The snapping looks wide after a jump (`SnapRules`, `kJumpReach` 250 px): when most of the things it expected to find
+  (and at least 3) were lost on one image at once, it looks for them that far around on the next one, takes the finds
+  only where at least `kJumpSupport` (2) say alike how far the scene went (within their side and `kJumpShare` of it:
+  over 200 px the monsters' shifts spread by 25 px), looks for the others near there, and holds the ones not found
+  there; a wide find starts its line again (one with no line of two yet got 34 px/ms through the jump). On the 22:37
+  clip it looked wide on 14 of 1795 images. Looked for 250 px around, two of the five small monsters were found on
+  lookalikes and one not at all (motion blur lowered real matches to 0.65-0.9), hence the vote.
+On the 22:37 clip, each set on its own image (`--today-out`, lead taken back), against the snapping fix before: boxes on
+nothing 519 -> 562, the model's things without a box 506 -> 379, fast boxes on their things 881 -> 989 at 2.7 -> 2.6
+px off (nine in ten under 5.1 -> 4.3, middles outside 3.7 -> 3.1%), held boxes in its turns 2 px/ms or more off the
+others 148 -> 100. Frame 178 now: four small monsters' boxes 1-5 px off, the fifth 24 px (held where the jump took it;
+not found, blurred), the far one at the screen's edge as before. Frame 177 still shows the image before's boxes (the
+jump came between the two images; nothing could foretell it). Still wrong there: the large monster at the bottom left,
+behind the see-through chat window: its box is mostly the window, which does not move, so the snapping "finds" it in
+place (0.78, where its real matches were 0.89-0.96) while it went 133 px left; the next look puts it right (frame 180).
+That needs the snapping to leave out what does not move (the chat window), not done. On the 150-a-second clips the
+snapped replay counts more boxes on nothing (22:10 1377 -> 1694; their videos lack images, above).
+**The game limited to 120 images a second** (the user, 22:37 clip, NVIDIA Control Panel Max Frame Rate 120, global,
+on a 240 Hz screen): a look 8.2 -> 4.6 ms (the GPU no longer draws 150 game images a second beside the model; 4.5 ms
+on the bench without a game), no image waits for the look before (3.5 -> 0 ms), image to its boxes 11.8 -> 4.6 ms,
+every image looked at (looks 118 -> 119 a second), and 95% of the images 8.3 ms apart (before: 49% 4.2, 40% 8.3, 11%
+12.5). Its clips' videos hold 117 of the 119 images a second (at 150 a second they held 107: the clip recorder takes
+about 4.3 ms a frame). That matters for judging a rule change on a clip: a search not recorded live searches the
+video, and for an image the video lacks the frame before stands in (`SnapImages`), so a thing is "found" at the
+same place on two images, its speed 0, and stuck (the snapping fix above, on the 22:10 clip: more boxes on nothing,
+1310 -> 1377). So judge changes on clips recorded at 120. The clip screen shows each frame as its image came, when the
+boxes of the image before are still up (its own come about 2 ms later; at 120, 99% of the frames), so `--clip-guesses`'
+precision there counts those; Today dumped by `--today-out` can be judged on each set's own image instead.
+The grey images (`engine/GreyMaker`) are made on the GPU, from the channel's image itself (copying it cost the model
+0.15 ms a look), and the last 8 stay there; only the parts the snapping says it reads (`Snapping::learnAreas`,
+`snapAreas`) come back: 7.3% of each image on that clip, 350 KB. Reading whole images back (4.9 MB) slowed the
+model's looks from 3.2 to 5.1 ms, as the copies hold up the GPU it runs on (the shaders cost it nothing; a lower GPU
+thread priority did not help; through CUDA's copy engine the copies waited behind the model's whole look, so the
+boxes came 7 ms late); the parts: 3.2 -> 3.9 ms. Live (bench, parts as large as the clip's): 0.9 ms an image, boxes
+there 1.1 ms after the screen showed the image, every image at 240 a second. The bench checks the parts: snapping on
+them and on whole images hands out the same boxes (and a unit test turns all else over). Needed ABI 2 (the app
+rebuilt). On the user's fight log (17.5 s, `observex_bench --track`): boxes appearing or vanishing 21.1 ->
 3.8 a second, none shown for a single look, 99.6% of what the model saw still covered, a new character shows at most
 ~20 ms later at 100 looks/s; 0.2 microseconds per look. The rules were picked by replaying the live logs in Python
 (Python and C++ give identical numbers); calm logs barely change (they were already steady). Remaining churn is
@@ -596,17 +891,21 @@ ring buffer saved on request, a bench replay of a clip with per-look numbers, an
 and smooth, later like Unreal's Rewind Debugger: per look what the model saw, what the tracker and rules decided).
 **Clips: built 2026-11-11** (the user asked, 2026-11-10: the last 10 s, exactly what they see, nothing drawn on it,
 every guess and anything interesting as text, so the same seconds can be compared after a heuristics change; Review
-asks "recordings or clips?", clips listed with miniatures like recordings; reviewing a clip only plays it for now,
-the user will say what comes next). The clip buffer (`engine/ClipRecorder`, see Architecture) always runs while a
+asks "recordings or clips?", clips listed with miniatures like recordings; reviewing a clip first only played it, then came
+the second step below). The clip buffer (`engine/ClipRecorder`, see Architecture) always runs while a
 screen is observed. A clip is a folder in `<recordings folder>/clips/`, named by when it was saved: `clip.mp4`
 (H.264, a frame each time the screen changed, at the time the screen showed it), `clip.txt` (`core/ClipLines` and
 `core/LiveLines`, header explains: `frame FRAME IMAGE TIME` ties each video frame to the screen image number the
 looks use; `look`/`kinds` as in the live log, down to 10% sure; `shown IMAGE DONE ...` what the app showed after
-each look: the tracker's things with id, sureness, kinds, box, speed, held; `note TIME TEXT`), `picture.jpg` (the
+each look: the tracker's things with id, sureness, kinds, box, speed, held; `snapped IMAGE TIME DONE LEAD ...` the
+snapper's boxes on each image, the same fields; after each, since the evening of 2026-11-11, `finds IMAGE LOOK FINDER
+...`: which look's things it had taken in, and each search it made on that image (see Today below); since
+2026-11-12 `ground IMAGE TIME FOLLOWED KNOWN MEASURED PITCH DISTANCE FOCAL MIDDLEX MIDDLEY YAW FEETX FEETY`: the grid
+the Ground flag drew (see Ground); `note TIME TEXT`), `picture.jpg` (the
 screen at the save, the list's miniature) and `clip.observex` (`ClipInfo`: saved, seconds, frames, looks, screen,
 size, model). `observex_bench --track <clip>/clip.txt` replays its looks through the tracker as for a live log.
-In the app: **Save last 10 s** (top bar, left of Record, or the system-wide Ctrl+Alt+C, shown in Settings with the
-other hotkeys) saves what the buffer holds, then says "Saved 10.3 s" for a moment; it is greyed out (with why, on
+In the app: **Save last 10 s** (top bar, left of Record; Ctrl+Alt+C did it too until 2026-11-12; its tooltip is one
+sentence) saves what the buffer holds, then says "Saved 10.3 s" for a moment; it is greyed out (with why, on
 hover) until the buffer holds frames or while a save is written. **Review** first asks "What do we review?":
 recordings (as before) or clips; the clips list ("Play a clip") shows each clip's `picture.jpg` with when, seconds,
 frames, looks and screen, newest first. A clip opens on the clip screen (`app/ClipView`, the frame as large as fits,
@@ -615,10 +914,74 @@ time ("0:05.9 / 0:10.1"), the frame number (the `frame` lines' numbers) and Clos
 own times (`engine/ClipPlayer`: GPU decode through Media Foundation's source reader, with its frame-rate conversion
 turned off, `MF_XVP_DISABLE_FRC`, or it repeats and skips frames of a video whose frame rate varies; the CPU decoder
 if the GPU's fails; paced by a waitable timer). Opening one takes about 0.1 s on the UI thread. The app's own notes go
-into `clip.txt` as `note` lines: clip saved, save last 10 s (button or hotkey), recording started/stopped, mark,
+into `clip.txt` as `note` lines: clip saved, save last 10 s, recording started/stopped, mark (until 2026-11-12),
 review and clip opened/closed, kind update made, show Characters/Kinds on/off. The clip buffer pauses while a review
-is open (the finder gets the GPU) and repeats the last image meanwhile. Checked 2026-11-11: every decoded frame's time
+or a clip is open (with recognition) and repeats the last image meanwhile. Checked 2026-11-11: every decoded frame's time
 matches its `frame` line within 0.06 ms; colours within about 0.7 of 255 per channel of `picture.jpg`.
+**Clip screen, second step (2026-11-11, the user asked: switch while reviewing between the guesses that came with the
+clip, exactly the boxes and mistakes seen while playing, and what changed heuristics make of the same seconds; a
+slider and a frame back/on, for the later rewind debugger; an X to remove a clip saved by mistake; a recording's
+size).** The heuristics (what the recogniser does with the model's things) have a fixed side, `core/Heuristics` (an
+interface: the model's `Detection`s in, `Tracked` things out), and the rules themselves in `src/heuristics` (`Rules`:
+keep those at least 30% sure, then the `Tracker`), used by `engine/Recognizer` live and by the replay. **They reload
+while the app runs** (the user asked, 2026-11-11: to see a heuristics fix on an open clip by picking Today, without
+closing the app): `src/heuristics` is built on its own as `observex_heuristics.dll` (next to the exe; the Release one
+in the project folder with `observex.exe`), which `engine/HeuristicsLibrary` loads from a copy in
+`%TEMP%\observex-heuristics` (so the build can overwrite the file), looks at every 250 ms and loads again once it
+stayed unchanged 400 ms. Then the recogniser makes new heuristics between two looks (the tracker starts over), an
+open clip's Today is made again from its recorded looks (milliseconds), the clip screen says "Today's heuristics
+loaded again: observex_heuristics.dll, built 13:05:22" for 4 s, and a note goes into the clip buffer. The Guesses
+popup says (in red) why the newest DLL did not load if it did not. **To change the
+heuristics while the user has the app open: edit `src/heuristics`, then build only
+`cmake --build build/vs2022 --config Release --target observex_heuristics`** (under a second for one file; the exe is
+locked while it runs and is not relinked). A change to what they hand each other (`core/Heuristics`, `Detection`,
+`Tracked`, `heuristics/Abi`) needs the app rebuilt and `kObservexHeuristicsAbi` bumped: the app refuses a DLL whose
+ABI or struct sizes differ and keeps the ones it has. Without the DLL, or while it does not load, the app uses the
+rules built into it (`observex_rules`, as of its own build). Checked 2026-11-11 in hidden snapshots: rebuilding only
+the DLL with a test rule (only boxes 85% sure and up; 0.8 s to build) while a clip was open on Today changed its
+boxes by itself, and back again once the rule was restored; the built-in and DLL heuristics replay a clip the same.
+Following the ground reloads too (ABI 4, 2026-11-12, the user asked: changes to the grid without closing the app):
+the DLL makes `heuristics/GroundFollower` (core/Ground's `Grounding`; `GroundMotion`, `MinimapCone` and core/Ground's
+`GroundFit` are built into the DLL with it), the live ground finder makes a new one at its next image (the camera is
+found again from the start), and an open clip whose ground was followed follows it again with the new one. Its plain
+structs (`GroundCamera`, `GroundHints`, `GroundNote`) cross the ABI like `Detection` and are checked the same way.
+Checked 2026-11-12: the bench through the DLL follows the 3 clips frame for frame as the built-in; and in a hidden
+snapshot with a clip open and Ground on, rebuilding only the DLL with a test change (the camera's yaw 0.8 radians
+more; 2 s to build) turned the clip's grid by itself, and the restored DLL follows as before. The live finder's reload
+is the same version check as the snapper's; not tried on a live screen. `core/ClipGuesses` reads a
+whole `clip.txt` back (`readClipText`) and makes the guessers: **Recorded** (`recordedGuesses`, the `shown` lines,
+then from the first `snapped` line's done time on the `snapped` ones: what the app showed) and **Today** (`heuristicGuesses`: the recorded looks through today's `core/Heuristics`, each
+set shown from when the recorded look's was, so only the heuristics differ; then snapped, see above). At a frame each shows its last set from
+at or before the frame's time. On the clip screen the **Guesses** button (top bar, right of the screen button; it says
+Recorded, Today or Hidden) opens a popup with the live view's flags: Characters (key 3 turns it off and on; the user
+asked, 2026-11-12: before, a third guesser "Nothing" did that and there was no Characters flag) and under it the two
+guessers, one sentence each (keys 1 Recorded, 2 Today, which also turn Characters on; since 2026-11-12, the user asked: before,
+longer text and their numbers), and the Kinds and UI checkboxes (the live view's flags, all three saved with it; UI draws what the clip's own
+UI finder found on the frame shown, or one at most 0.1 s before it while playing); boxes and tags are drawn by `app/Overlay`
+exactly as while observing. Below the frame a timeline (click or drag to any frame; it pauses while dragging, ticks
+for the notes with their text on hover), and in the top bar the first frame, a frame back, play/pause, a frame on and the
+last (also Home, Left/Right held to repeat, End; first and last asked for later the same day), the time, and the
+frame number in a field to type another into (Enter goes there, Escape leaves it, Ctrl+G types into it; the user
+asked the same day); in a narrow window the word "Frame", then "of 1,066", some space, the clip's length and last the time make room. `ClipPlayer::seek` (engine): the next frame comes within a millisecond (the decoder has it),
+any other is decoded from the key frame before it (about 6 ms for the key frame and 1.3 ms for each frame after it at
+1440p): 4-5 ms in clips saved since 2026-11-11 12:20 (a key frame every 0.1 s), 40 ms on average and 90 at most in
+older ones (every 0.5 s). A seek finishes the one in progress, then goes to the newest one asked for (sooner, if that
+frame is on its way), so a timeline drag shows the exact frame under the mouse as fast as frames decode, both ways
+(`observex_bench --clip-seek`: 40-50 pictures a second in new clips, 20-40 in old ones). The user asked, 2026-11-11,
+for a fluent drag (seeing an effect while dragging matters): first a new seek cancelled the one in progress, so a
+drag back showed nothing until it stopped; then it showed only key frames while dragging, which was not fluent
+enough. The knob follows the mouse. Steps go from the frame shown, so a held key waits for each. The clips list has an X on each clip (red on hover): it asks first ("Remove this clip?" with when, seconds,
+frames and size; Remove in red, Cancel the default, Escape cancels; the user asked the same day), then moves the clip's
+folder to the Recycle Bin (`SHFileOperationW`, `FOF_ALLOWUNDO`), closing it first if open. A recording's row shows its size
+(its images summed, "5.1 MB"); a clip's row shows its size on a second line, with its screen ("81.2 MB · Odyssey
+G61SH": its folder's files summed; the user asked, 2026-11-11, once clips got bigger). **For Today to equal Recorded when nothing changed** (checked 2026-11-11 with
+`observex_bench --clip-guesses` on the 11:02 clip's looks rewritten the new way: 100% of the sets drawn the same at
+every start tried), clips since then write every number exactly (`ExactNumber`, the shortest text that reads back
+as the same float or double: before, sureness had 2 decimals, which the tracker's smoothing turned into 1% off on
+1 tag in 10, boxes whole pixels and times 1 decimal) and keep the looks from `kClipWarmUpSeconds` (5 s) before the
+first frame, at negative times (a replay from nothing at the first frame drew some boxes differently for up to 3.7 s
+on that fight); since the evening of 2026-11-11 the `snapped` and `finds` lines too. Older clips: Today differs from Recorded on most sets (by a percent or a "?" on a box or two, from
+that rounding and the cold start), so compare guessers on clips saved from now on.
 Targets, from the 2026-11-09 measurement above: steady false alarms (UI panels, minimap, pillars, name tags) and
 boxes around 2+ characters, which no rule over time removes, and kinds that change from look to look.
 
@@ -643,7 +1006,8 @@ captures only the screens on that GPU):
   recogniser gets it at once), into the preview `ImageChannel` while the UI shows it, and into the recording
   `ImageChannel` when a recording image is due (`setRecordingInterval`, seconds between images; `recordNow` for a
   mark). Each hand-over carries an `ImageStamp` (image number, time shown). React will run here. Once a second it
-  hands `PipelineStats` to the UI.
+  hands `PipelineStats` to the UI. Also into the clip `ImageChannel` while observing, the snap one while the
+  snapper runs, and the ui one ten times a second while the UI finder runs.
 - **Recogniser thread** (`engine/Recognizer`, above-normal priority, while a screen is observed): waits on the
   recognition channel's event, copies the newest image into the `Detector`'s input texture and runs it: a compute
   shader squeezes the image to the model's size (1024 x 1024) into a buffer shared with CUDA, TensorRT runs the network,
@@ -651,12 +1015,24 @@ captures only the screens on that GPU):
   first look (one launch instead of hundreds: 5.56 -> 4.68 ms per image on recording files, same guesses; the
   Finder gets it too). TensorRT's highest builder optimisation level (5) was tried: slower (4.86 ms) and 141 s to
   prepare, so the default stays. Those at least 30% sure go through the `Tracker` (timed by when the
-  screen showed the image). Hands `Found` (what it follows, surest first) and `RecognizerStats` to the UI.
+  screen showed the image). Hands `Found` (what it follows, surest first) and `RecognizerStats` to the UI, and each
+  look's things to the snapper.
+- **Snapper thread** (`engine/BoxSnapper`, highest priority, while the recogniser runs): on each new image of the
+  snap channel (used in place, `ImageReader::useNewImage`) makes its grey levels on the GPU (`GreyMaker`), reads back
+  the parts the snapping needs of it and of the newest look's image, learns from the look and snaps the boxes onto the
+  image (core/Heuristics' `Snapping`, from observex_heuristics.dll, made again when it reloads). Hands `Found` and
+  `SnapperStats` (images a second, ms each, how late, share snapped) to the UI and each image's boxes to the clip
+  buffer.
   TensorRT is loaded at run time from `deps/` (no import libraries); the engine for this GPU is built once per new
   model.onnx and cached as `model.engine` (one Detector loads or builds at a time; a second waits, then loads it).
   Paused while reviewing (the pipeline stops handing it images). While recording it also writes each look into the
   live log (`setLog`), down to 10% sure. When the UI sets its reload flag (`reloadKinds`), it reads the kind update
   at the top of its next look and hands it to its Detector.
+- **UI finder thread** (`engine/UiFinder`, below-normal priority, while a screen is observed, paused with the
+  recogniser; a second one with an open clip, on its frames): on each image of the ui channel (used in place) makes its grey levels on the GPU (`GreyMaker`, one
+  kept), reads back only the full-size one and finds the game's interface on it (`core/UiLayout`). Hands `UiPieces`
+  and `UiFinderStats` (images a second, ms each, finding ms, why ui.txt could not be read) to the UI; checks once a
+  second whether `models/ui` changed and reads it again.
 - **Finder thread** (`engine/Finder`, below-normal priority, only while a review needs guesses): its own GPU device
   and `Detector`; reads the recording's JPEGs and writes `<category>-guesses.txt`.
 - **Refresher thread** (`engine/Refresher`, while a review is open and its finder is done): lists the other reviewed
@@ -674,20 +1050,24 @@ captures only the screens on that GPU):
   synchronously: a frame each time the screen changed, timed by when the screen showed it, at least a frame gap apart
   (1/144 s, or what H.264 level 5.2 allows at the screen's size). Within a gap it copies nothing; the image the screen
   shows when the gap ends is the next frame, timed a moment later (under a gap) if the screen showed it sooner, so the
-  video keeps to its level (a 240 Hz screen gives about 120 frames a second: every other image). No B-frames, a key frame at least every 0.5 s (a still screen's
-  last image is repeated as one), constant quality 22 within 120 Mbit/s, BT.709 limited range. It keeps the
+  video keeps to its level (a 240 Hz screen gives about 120 frames a second: every other image). No B-frames, a key frame at least every 0.1 s (`kKeyEvery`, since
+  2026-11-11 for the clip screen's timeline drag; was 0.5 s) and a still screen's last image repeated as one every
+  0.5 s (`kRepeatEvery`), constant quality 22 within 120 Mbit/s, BT.709 limited range. It keeps the
   compressed frames, cut at key frames, back to the last key frame at or before 10 s ago, plus every look the
   recogniser hands it (`Recognizer::setClip`: what it found down to 10% sure and what the tracker followed, through a
   fixed 64-look queue that never waits; drops are counted) and the UI's notes. `save` hands a copy of all that (the
   frames shared, not copied) to a writer thread: `clip.mp4` (Media Foundation's sink writer, the frames as they are,
   no second encode; MP4 timescale 144000, so the frame times stay exact), `clip.txt`, `picture.jpg` (the newest
-  image) and `clip.observex` last. A clip is 10.0 to 10.5 s. Measured 2026-11-11 (Release bench, 2560 x 1440 at 240
+  image) and `clip.observex` last. A clip is 10.0 to 10.1 s (up to 10.5 on a still screen). Measured 2026-11-11 (Release bench, 2560 x 1440 at 240
   Hz, pulse, `--model models/character`, 4 runs each with and without `--clip`): 120 frames a second at about 4.3 ms
   each, capture unchanged (239.8 images/s), the recogniser 3.28 -> 3.57 ms a look (239 -> 238 a second), a save takes
-  under 0.1 s; the plain desktop makes about 7 MB a clip. (Before the gap rule it copied every image, 240 a second,
+  under 0.1 s; the plain desktop makes about 7 MB a clip (with a key frame
+  every 0.5 s; every 0.1 s makes two 10 s Lineage 2 clips about 25% and 60% bigger, 93 -> 115 MB and 50 -> 80 MB, from
+  their frames' sizes: a key frame is about 400 KB, the others 40-85 KB). (Before the gap rule it copied every image, 240 a second,
   and encoded 150-160 frames a second, over the level: 0.8 ms more a look.)
-- **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window, swap chain, system-wide hotkeys: Ctrl+Alt+R, Ctrl+Alt+M, Ctrl+Alt+C), ImGui, `Theme`
-  (fonts, colours, logo, the boxes and tags drawn over screen images, shared by the review and the live view), `Widgets` (`BarButton`, the top-bar button look), `ScreenPicker` (the miniatures),
+- **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window, swap chain), ImGui, `Theme`
+  (fonts, colours, logo, the boxes and tags drawn over screen images, shared by the review and the live view), `Widgets` (`BarButton`, the top-bar button look; since 2026-11-12 an open one, its popup up or recording, lights up
+  under the mouse too, so a click reads as closing it), `ScreenPicker` (the miniatures),
   `ScreenImage` (a screen image the UI can draw at any size: it keeps a mip chain so shrunken views look smooth, and
   draws opaque), `Thumbnails` (the Review list's pictures), `Settings` (observex.cfg, folder picker) and `Review` (the review screen; it reads each image with
   `engine/ImageFile` on the UI thread, 11 to 17 ms for a 2560 x 1440 JPEG, and keeps marks in `core/Marks`).
@@ -697,8 +1077,9 @@ The threads share data only through lock-free hand-overs, so the UI and the reco
 - `TripleBuffer<T>` (core): newest-value hand-over for stats.
 - `ImageChannel` / `ImageReader` (engine): three shared GPU textures rotated by a TripleBuffer; keyed mutexes order
   the two devices' GPU work. The reader copies each new image out right away and hands the texture straight back.
-  One channel for the UI preview, one for the recorder, one for the recogniser and one for the clip buffer (their
-  readers also wait on an event, so they sleep until an image arrives).
+  One channel for the UI preview, one for the recorder, one for the recogniser, one for the clip buffer, one for
+  the snapper and one for the UI finder (their readers also wait on an event, so they sleep until an image arrives;
+  the snapper's and the UI finder's read their image in place).
 - Atomics for state, the preview and recognition on/off flags, the recording rate and the model preparing progress.
 
 Lifecycle: the UI thread owns the pipeline. Picking a screen starts it on that screen; a display mode change restarts
@@ -710,7 +1091,9 @@ and made again after, numbering on in the same folder). Picking a screen, a disc
 ends it. The `Recognizer` lives with the observed screen: made in `App::observe`, destroyed in `stopObserving`
 before the pipeline frees its channel (its destructor also cancels preparing a model). So does the `ClipRecorder`
 (made in `observe` and handed to the recogniser; destroyed after the recogniser, finishing a save still being
-written), so the clip buffer starts empty on each pipeline start.
+written), so the clip buffer starts empty on each pipeline start. So do the snapper and the `UiFinder` (made in
+`observe`, destroyed in `stopObserving` before the pipeline stops). The clip screen's `UiFinder` goes with its
+`ClipView`, before the channel it reads (on the UI's device, written on the UI thread).
 
 Planned next, inside `engine/`: a reactor (`SendInput`) and a knowledge file; see
 [docs/training-loop.md](docs/training-loop.md).
@@ -745,18 +1128,47 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   folder: it shows the screen) and says what it wrote; `observex_bench --track FOLDER/clip.txt` replays its looks.
   `observex_bench --clip-frames CLIP --out FOLDER [--every N]` decodes a clip as the player does and writes
   `frames.txt` ("FRAME TIME_MS" per frame) and a JPEG of frame 1, every Nth and the last, to look at a clip's frames
-  (1.7 ms a frame on the GPU at 1440p). `--unsure` records like Record's "Only unsure" (needs `--model`; its answers are the log's `mirror`
+  (1.7 ms a frame on the GPU at 1440p). `observex_bench --clip-seek CLIP` checks the clip player's seek on a clip (every
+  frame's number, pixels and time; frame 1, last, random, +1/-1 steps, keyframes, 50 in a row, drags across the clip
+  as the timeline does them, play after a seek, seeks while playing and after the end) and prints how long each kind
+  took. `observex_bench --clip-guesses CLIP [--heuristics DLL]` (Today from that observex_heuristics.dll, loaded as
+  the app loads it, instead of the bench's own) compares the
+  clip screen's guessers on a clip box by box (Recorded against Today: sets drawn the same, boxes only one draws, tags
+  that differ, boxes moved, when they differ), the way to check a heuristics change or that nothing changed, and
+  how precise each guesser's boxes are (`core/ClipGuesses` boxPrecision, 2026-11-11): at each frame whose own image
+  was looked at, its boxes against what the model found on that image (50% and up; paired by image, as a frame's
+  time can be a moment after its image's): middles off on average and for nine in ten, in the model's box's middle
+  half or outside it, for all boxes and those moving 0.8 px/ms or faster, boxes on nothing, and how many of the
+model's things have no box. For a clip with `snapped` lines (or with `--snap`) also Today snapped as the clip screen
+does (`engine/ClipSnapper`), against Recorded and how precise; with `--today-out FILE` (2026-11-11) those sets written
+  into FILE as `shown` lines (the image each was snapped onto, 0 before the first) and after each snapped one a
+  `finds` line of its searches, for the same scripts as a clip's lines; with `--looks-out FILE` Today's own set after
+  each look (the tracker's, not snapped) as a `shown` line with the image looked at. No GPU but for that. With
+  `--snap` (2026-11-11) it decodes the clip's video and snaps Today's boxes onto each frame as the snapper does live
+  (the grey images on the GPU, only the parts read back; the looks learned once done, from their own frames): whether
+  the GPU's grey images are the CPU's, how much was read back and whether snapping on whole images hands out the same
+  boxes (it must), how many snapped and how long a frame took, the snapped boxes at once and coming or going a
+  second (as for Recorded and Today), then the same precision for the snapped boxes on
+  their own frame and, as handed out, on the screen's next image with leads of 0 to 12 ms and "to next";
+  `--out FOLDER --at FRAME` (repeatable) writes those frames as PNGs around the boxes, Today's red, snapped green
+  (to look at with your own eyes). Live, `--model FOLDER --snap` runs the snapper beside the recogniser as the app
+  does and adds its numbers (snapped/s, ms an image, how late, share snapped); on the desktop nothing is snapped, so
+  nothing is read back.
+  `--unsure` records like Record's "Only unsure" (needs `--model`; its answers are the log's `mirror`
   lines).
   Its "pulse" is an invisible 2 x 2 pixel, click-through, never-focused window in the screen's corner that presents
   every refresh like a game, so the screen has something to capture. `--record` saves images like the Record button
   does (into a scratch folder, never the repo), so its cost shows in the numbers; with `--model` too it writes the
   live log like the app and marks once halfway (the way to test the log headless). `--model models/character` runs the
-  recogniser too and prints its numbers (recognised/s, ms per image, found). `observex_bench --model FOLDER --images
+  recogniser too and prints its numbers (recognised/s, ms per image, found; with `--snap` the snapper's too). `observex_bench --model FOLDER --images
   FOLDER --out FILE` runs the C++ detector over a folder of JPEGs and writes its guesses in the marks format, kinds
   included (to compare with Python's `guess.py`), and each image's mirror test to `FILE.mirror.txt` (prints the median and how
   many Only unsure would save; for a kinds model also how many are unsure which kind something is, and the total). `observex_bench --track LOG` replays a live log (a recording's
   `character-live.txt`) through the C++ tracker and prints boxes appearing or vanishing per second with and without
-  it, things followed, and its cost per look; for a log with `kinds` lines also how often a thing's kind changes per
+  it, things followed, and its cost per look; for a recording with answers (2026-11-11), at each answered image the
+  boxes handed out right after the look at it against the characters marked (overlapping 30% and up): characters
+  shown (and by the model alone, 60% and up) and boxes on nothing marked, the way to judge a tracker change on the
+  user's answers; for a log with `kinds` lines also how often a thing's kind changes per
   second (the model alone: a box overlapping half of one on the look before, as another kind; followed: an identity
   shown as another kind). No GPU. Use it after any tracker change.
   `observex_bench --model FOLDER --replay RECORDING` (2026-11-08) walks a reviewed recording as the review would, its
@@ -774,10 +1186,23 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   need guesses). It writes into FOLDER and RECORDINGS, so only ever run it on scratch copies (jpgs hard-linked).
   Measured with the tenth on copies of 27 reviewed recordings: fresh in 46.1 s (25.2 ms per image, finder start
   included), 11,083 answers fitted in 485 ms; run again, "nothing new" in 0.02 s.
+  `observex_bench --ui CLIP [--layout FOLDER] [--out FOLDER [--every N] [--at FRAME]...]` (2026-11-12) finds the
+  game's interface on every frame of a clip as the UI finder does (grey made on the CPU; layout default `models/ui`),
+  prints how long a find takes, how steady the pieces are (one appearing, going or moving 4+ pixels from the frame
+  before; 0 a second on a still clip) and on how many frames each name is, and with `--out` writes `ui-found.txt`
+  (every frame's pieces) and JPEGs of frame 1, every Nth, the last and each `--at` with them outlined (framed windows
+  yellow, ui.txt's pieces blue), plus where each anchor hit on the `--at` frames. Use it after any change to ui.txt
+  or `core/UiLayout`. A picture (PNG, JPG, BMP) in place of the clip finds on it alone (`--out`: `ui-picture.jpg`);
+  for overlaps, paste a window cut from a frame (with 3 pixels of its outer shadow: frame lines need darker pixels 2
+  away) over another frame. The game's own screenshots (`Screenshot/Shot*.bmp`) are darker than the screen captured
+  (frame lines 111-124 grey against 194-253), so their framed windows are not found: use clip frames. Frames decoded
+  by OpenCV differ slightly from the GPU's (one more false small window on the hotbar). `--find-ui` in the live run adds the UI finder as the app runs it (ui/s, ms, finding ms,
+  pieces); with `--model` it shows its cost to the recogniser.
 - The app: `observex.exe` in the project folder. The Release build writes it there (gitignored). The Debug build
   stays in `build/vs2022/bin/Debug/`.
 - UI snapshot: `observex.exe --snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --right-drag X1 Y1 X2 Y2 |
-  --scroll X Y TURNS | --key [Ctrl+|Shift+]NAME]... [--mouse X Y] [--recordings FOLDER] [--wait SECONDS]`. Draws the UI in a
+  --scroll X Y TURNS | --key [Ctrl+|Shift+]NAME | --type TEXT]... [--mouse X Y] [--recordings FOLDER] [--wait SECONDS]`
+  (`--type` types text into the field with the keyboard, e.g. a frame number after `--key Ctrl+G`). Draws the UI in a
   hidden window (it never appears or takes focus), plays each input step in order about 0.6 s apart (clicks, drags,
   wheel turns at a point, positive away from the user; key presses named as ImGui names them: `Y`,
   `RightArrow`, `Delete`, ...; `Ctrl+Z` holds Ctrl with it), rests the mouse at `--mouse` for hover effects, waits
@@ -788,7 +1213,7 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   (default `recordings/` next to the PNG); point it at a copy, since answers in a review are saved. Use a build with no console window: the Release exe, or, while the user has `observex.exe` open (then the
   Release link fails), `cmake --build build/vs2022 --config RelWithDebInfo` and
   `build/vs2022/bin/RelWithDebInfo/observex.exe`. Save snapshots and test recordings outside the repo, since they
-  show the user's screens. Snapshot mode does not read or write observex.cfg, never registers the hotkey,
+  show the user's screens. Snapshot mode does not read or write observex.cfg,
   records into `recordings/` next to the PNG, and never makes the kind update (it would write into `models/`); the
   refresher does run there, so `--recordings` must be a copy.
 
@@ -800,17 +1225,34 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   `KindLearner`: re-fitting the kind classifier to the review's answers and for
   the kind update, and picking kinds with it; `Features`: the `<category>-features.bin` format and when it is fresh;
   `ModelInfo`: model.json's kinds and kind classifier, and `kinds-update.json`; `LiveLines`: the live log's `look`
-  and `kinds` lines; `ClipLines`: a clip's `frame`, `shown` and `note` lines; `ReviewLines`: the review log's words;
+  and `kinds` lines, and `ExactNumber`; `ClipLines`: a clip's `frame`, `shown`, `snapped`, `finds`, `ground` and `note` lines; `ClipGuesses`: a
+  whole `clip.txt` read back, the clip screen's guessers (Recorded, Today) and comparing them; `Heuristics`: the
+  heuristics' fixed side (the model's things in, the things shown out); `ReviewLines`: the review log's words;
   `Recordings`: the `recording.observex` file, listing recordings and their images, and `clip.observex` and listing
-  clips; `Detection`,
-  `Tracker`: following found things from look to look). No Windows or GPU headers. Unit tested.
+  clips; `Detection`: a found thing, and a `Tracked` one; `UiLayout`: where the game's interface is on a grey screen
+  image, framed windows and ui.txt's pieces, and PGM files; `Ground`: the game's camera, the ground's projection and
+  `GroundFit`, the camera fitted to the ground's motion). No Windows or GPU headers. Unit tested.
+- `src/heuristics/`: the heuristics, reloaded while the app runs (`Rules`, `Tracker`: following found things from
+  look to look; `SnapRules`: the boxes snapped onto every new image, by `Snapper`: finding a thing's look on a
+  newer image, and `GreyImage`: grey levels on the CPU, for the tests and the bench; `GroundMotion`: how the ground
+  moved between two images, `GroundFollower`, the camera followed over images, and `MinimapCone`: where the camera
+  looks, from the minimap; `Abi` and `Plugin`: the DLL's plain C entry). Built as `observex_rules` (the tests, the bench, the app's fallback) and `observex_heuristics.dll`.
+  No Windows or GPU headers. Unit tested (the tracker, the snapper, the snap rules, the ground, the minimap's cone).
 - `src/engine/`: the real-time pipeline, the recorder, the recogniser and the clip buffer (`Gpu`, `ScreenCapture`,
   `ImageChannel`, `Pipeline`, `Recorder`, `ImageFile`, `Detector`, `Recognizer`, `Finder`, `Refresher`, `KindUpdater`,
-  `ClipRecorder`, `ClipPlayer`). Windows, Direct3D 11, CUDA, TensorRT, NVENC and Media Foundation, no ImGui.
+  `ClipRecorder`, `ClipPlayer`, `HeuristicsLibrary`: loading observex_heuristics.dll and loading it again,
+  `BoxSnapper`: the snapper thread, `GreyMaker`: grey levels on the GPU, parts read back, `ClipSnapper`: a clip's
+  Today snapped onto its video, `UiFinder`: the UI finder thread, `GroundFinder`: the ground finder thread,
+  `ClipGround`: a clip's ground followed on its video). Windows, Direct3D 11,
+  CUDA, TensorRT, NVENC and Media Foundation, no ImGui.
 - `src/app/`: the window and UI (`App`, `MainWindow`, `Theme`, `Widgets`, `ScreenPicker`, `ScreenImage`, `Thumbnails`,
-  `Settings`, `Review`, `ReviewLog`, `Snapshot`, `main`), plus
+  `Settings`, `Review`, `ReviewLog`, `ClipView`, `Overlay`: boxes and tags over the screen or a clip, `Snapshot`,
+  `main`), plus
   `observex.rc.in` and `Resources.h` (icon, fonts and version info built into the exe).
 - `bench/`: `observex_bench`, the headless pipeline benchmark.
+- `tools/ui/make_anchors.py`: cuts ui.txt's anchors from clips (run with `tools/train/.venv/Scripts/python.exe`): for
+  each `anchor` line, the mean of its frames at each place named and the mask of the pixels that never changed, as
+  PGMs in `models/ui`.
 - `assets/`: the logo (`logo.svg`, `logo.png`) and the app icon (`observex.ico`), all made by `tools/make_logo.py`.
   Change the logo there and rerun it.
 - `tools/train/`: the training tool (Python: `marks.py` reads and writes the marks format of `core/Marks.h`,
@@ -818,7 +1260,7 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   `model.onnx` (live recognition; also each candidate's features), `model.json` (its kinds, score and kind
   classifier), `model.engine` (made by observex for this GPU) and `kinds-update.json` (made by observex, the kind
   update).
-- `tests/`: doctest tests for `src/core`. Add tests with any change to core.
+- `tests/`: doctest tests for `src/core` and `src/heuristics`. Add tests with any change to either.
 - `docs/`: plans that span many sessions. `training-loop.md` is how observex learns to recognise things.
 - `cmake/Dependencies.cmake`: Dear ImGui and doctest via FetchContent, and the Inter font files. Pin every dependency
   to a release and its SHA256. `cmake/TensorRT.cmake`: TensorRT and the CUDA runtime into `deps/`.

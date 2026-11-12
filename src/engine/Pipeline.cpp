@@ -3,6 +3,8 @@
 #include "core/StatWindow.h"
 #include "engine/ImageChannel.h"
 #include "engine/ScreenCapture.h"
+#include "engine/GroundFinder.h"
+#include "engine/UiFinder.h"
 
 #include <chrono>
 #include <utility>
@@ -40,6 +42,12 @@ bool Pipeline::start(const Screen& screen) {
                                                       ScreenCapture::kImageFormat);
         clip_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                ScreenCapture::kImageFormat);
+        snap_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                               ScreenCapture::kImageFormat);
+        ui_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                             ScreenCapture::kImageFormat);
+        ground_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                                 ScreenCapture::kImageFormat);
     } catch (const std::exception& e) {
         stop();
         fail(std::string("Could not start screen capture: ") + e.what());
@@ -66,6 +74,9 @@ void Pipeline::stop() {
     recording_.reset();
     recognition_.reset();
     clip_.reset();
+    snap_.reset();
+    ui_.reset();
+    ground_.reset();
     capture_.reset();
     gpu_ = {};
     state_.store(State::Stopped, std::memory_order_release);
@@ -95,6 +106,7 @@ void Pipeline::run(std::stop_token stop) {
     std::uint64_t merged = 0;
     std::int64_t windowStart = qpcNow();
     std::int64_t nextRecording = 0; // When the next image is due for recording.
+    std::int64_t nextUi = 0;        // And for the UI finder.
     ScreenCapture::Frame frame;
 
     while (!stop.stop_requested()) {
@@ -107,13 +119,23 @@ void Pipeline::run(std::stop_token stop) {
             latency.add(static_cast<float>(static_cast<double>(now - frame.presentQpc) * msPerTick));
 
             // Recognition first: the newest image goes to the recogniser the moment it arrives (it takes it on its
-            // own thread and device). React will run here too.
+            // own thread and device), and to the snapper. React will run here too.
             const ImageStamp stamp{images, frame.presentQpc};
             if (recognitionEnabled_.load(std::memory_order_relaxed)) {
                 recognition_->write(gpu_.context.Get(), frame.texture, stamp);
             }
+            if (snapEnabled_.load(std::memory_order_relaxed)) {
+                snap_->write(gpu_.context.Get(), frame.texture, stamp);
+            }
             if (clipEnabled_.load(std::memory_order_relaxed)) {
                 clip_->write(gpu_.context.Get(), frame.texture, stamp);
+            }
+            if (uiEnabled_.load(std::memory_order_relaxed) && now >= nextUi) {
+                ui_->write(gpu_.context.Get(), frame.texture, stamp);
+                nextUi = now + frequency.QuadPart / UiFinder::kImagesPerSecond;
+            }
+            if (groundEnabled_.load(std::memory_order_relaxed)) { // Every image: it reads the minimap's cone on each.
+                ground_->write(gpu_.context.Get(), frame.texture, stamp);
             }
             if (previewEnabled_.load(std::memory_order_relaxed)) {
                 preview_->write(gpu_.context.Get(), frame.texture, stamp);
@@ -127,10 +149,17 @@ void Pipeline::run(std::stop_token stop) {
                     } else {
                         // Asked when due, answered after the recogniser's next look, a few images later.
                         switch (question_.take()) {
-                        case Question::State::None: question_.ask(); break;
-                        case Question::State::Asked: break;
-                        case Question::State::Yes: record = true; break;
-                        case Question::State::No: nextRecording = now + frequency.QuadPart * recordingInterval; break;
+                        case Question::State::None:
+                            question_.ask();
+                            break;
+                        case Question::State::Asked:
+                            break;
+                        case Question::State::Yes:
+                            record = true;
+                            break;
+                        case Question::State::No:
+                            nextRecording = now + frequency.QuadPart * recordingInterval;
+                            break;
                         }
                     }
                 }

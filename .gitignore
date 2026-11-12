@@ -2,6 +2,7 @@
 build/
 out/
 /observex.exe
+/observex_heuristics.dll
 
 # The app's settings and recordings (screen images, gigabytes per hour)
 /observex.cfg

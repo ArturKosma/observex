@@ -1,10 +1,11 @@
 #pragma once
 
+#include "core/Heuristics.h"
 #include "core/Question.h"
-#include "core/Tracker.h"
 #include "core/TripleBuffer.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
+#include "engine/HeuristicsLibrary.h"
 
 #include <array>
 #include <atomic>
@@ -19,6 +20,7 @@
 
 namespace observex {
 
+class BoxSnapper;
 class ClipRecorder;
 class ImageChannel;
 class ImageReader;
@@ -52,8 +54,9 @@ public:
         Failed, // See error().
     };
 
-    // Things the model is less sure of than this are not followed (the live log goes lower, see setLog).
-    static constexpr float kMinSure = 0.3f;
+    // Things the model is less sure of than this are not followed (core/Heuristics; the live log goes lower, see
+    // setLog).
+    static constexpr float kMinSure = Heuristics::kMinSure;
     // Asked whether an image is worth recording (recording "only unsure", Pipeline::setRecordOnlyQuestions), it
     // looks at it once more mirrored left to right and answers yes when it sees it at least this differently
     // (core/Mirror). At first 0.17, the eighth model's median on its 189 held-out images (2026-11-02), so about half
@@ -69,10 +72,12 @@ public:
 
     // Starts on the images of `channel`, which come from `screen`, with the model in `modelFolder`
     // (models/<category>). Returns at once: the model loads on the recogniser's own thread. Throws on failure.
+    // What it finds goes through heuristics from `heuristics` (made again between two looks whenever it loads new
+    // ones, so a rebuilt observex_heuristics.dll is followed at once; the tracker starts over then).
     // `question`, if set, is answered after the next look once asked (see kMirrorDisagrees; the app passes
     // Pipeline::question()); it must outlive the recogniser.
     Recognizer(const Screen& screen, ImageChannel& channel, std::filesystem::path modelFolder,
-               Question* question = nullptr);
+               std::shared_ptr<const HeuristicsSource> heuristics, Question* question = nullptr);
     // Stops, also while the model is being prepared. Destroy it before the channel.
     ~Recognizer();
 
@@ -100,6 +105,12 @@ public:
     // recogniser is handing a look to it.
     void setClip(std::shared_ptr<ClipRecorder> clip) { clip_.store(std::move(clip), std::memory_order_release); }
 
+    // While set, what it shows after every look also goes to `snapper`, which puts the boxes onto every newer image.
+    // Any thread; null stops it.
+    void setSnapper(std::shared_ptr<BoxSnapper> snapper) {
+        snapper_.store(std::move(snapper), std::memory_order_release);
+    }
+
     // Loads the kind update next to the model again before its next look (on its own thread; see Detector), e.g.
     // after a new one was written, or drops it if there is no valid one any more. Any thread.
     void reloadKinds() { reloadKinds_.store(true, std::memory_order_release); }
@@ -114,6 +125,7 @@ private:
     GpuDevice gpu_;
     std::unique_ptr<ImageReader> reader_;
     std::filesystem::path modelFolder_;
+    std::shared_ptr<const HeuristicsSource> heuristics_;
     Question* question_ = nullptr;
     unsigned width_ = 0;
     unsigned height_ = 0;
@@ -121,6 +133,7 @@ private:
     TripleBuffer<RecognizerStats> stats_;
     std::atomic<std::shared_ptr<LiveLog>> log_;
     std::atomic<std::shared_ptr<ClipRecorder>> clip_;
+    std::atomic<std::shared_ptr<BoxSnapper>> snapper_;
     std::atomic<bool> reloadKinds_{false};
     std::atomic<std::size_t> kindAnswers_{0};
     std::atomic<State> state_{State::Starting};

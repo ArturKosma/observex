@@ -18,12 +18,24 @@ namespace observex {
 //                                                Kinds are numbered from 0 in the order of the model's model.json.
 // Older logs have no kinds lines; readers skip the lines they do not know.
 
-// Room for a look of up to 100 things (engine/Recognizer's Found::kMax) with its kinds.
+// Room for a look of up to 100 things (engine/Recognizer's Found::kMax) with its kinds; kExactLookChars for exact ones.
 inline constexpr std::size_t kLookChars = 8192;
+inline constexpr std::size_t kExactLookChars = 16384;
 
 // Writes the look line of `found`, and its kinds line for a model with kinds, into `out`, each ending in '\n'.
-// Returns how many characters. Leaves out the things that do not fit (both lines hold the same ones).
-std::size_t writeLook(std::span<char> out, unsigned long long image, double timeMs, std::span<const Detection> found);
+// Returns how many characters. Leaves out the things that do not fit (both lines hold the same ones). Sureness has
+// 2 decimals, boxes whole pixels and the time 1 decimal. `exact` (a clip's clip.txt, since 2026-11-11) writes every
+// number as ExactNumber, so the looks read back as exactly what the heuristics got live and a replay through them
+// (core/ClipGuesses) draws what the app drew.
+std::size_t writeLook(std::span<char> out, unsigned long long image, double timeMs, std::span<const Detection> found,
+                      bool exact = false);
+
+// The shortest text that reads back as exactly `value` (std::to_chars), e.g. "0.92" for 0.92f, "1241" for 1241.0f.
+struct ExactNumber {
+    explicit ExactNumber(float value);
+    explicit ExactNumber(double value);
+    char text[32];
+};
 
 // Reads a look line into `image`, `timeMs` and `found` (replaced; no kinds yet). False if `line` is not one.
 bool readLook(std::string_view line, unsigned long long& image, double& timeMs, std::vector<Detection>& found);

@@ -22,6 +22,11 @@ enum class Icon : std::uint8_t {
     Replay,  // A clock face with an arrow going back around it: save the last seconds.
     Play,    // A triangle pointing right.
     Pause,   // Two bars.
+    StepBack,    // A bar, then a triangle pointing left at it: one frame back.
+    StepForward, // A triangle pointing right at a bar: one frame on.
+    ToStart,     // A bar, then two triangles pointing left at it: the first frame.
+    ToEnd,       // Two triangles pointing right at a bar: the last frame.
+    Guesses,     // A box's four corners: what is drawn over a clip.
 };
 
 // A top-bar button that plainly looks clickable: a rounded border, an icon, then an optional muted caption,

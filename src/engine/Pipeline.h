@@ -29,7 +29,7 @@ struct PipelineStats {
 
 // The real-time loop: capture, then hand each image on to recognise (see Recognizer) and, still to come, react. It
 // runs on its own time-critical thread with its own GPU device, so nothing the UI does can slow it down. Talks to the
-// UI only through lock-free hand-overs (stats, preview, recording, recognition) and atomics.
+// UI only through lock-free hand-overs (stats, preview, recording, recognition, ...) and atomics.
 class Pipeline {
 public:
     enum class State : std::uint8_t {
@@ -53,7 +53,7 @@ public:
     bool start(const Screen& screen);
 
     // Stops the loop and frees its GPU resources. Destroy any reader of its channels (preview(), recording(),
-    // recognition(), clip()) first.
+    // recognition(), clip(), snap(), ui(), ground()) first.
     void stop();
 
     State state() const { return state_.load(std::memory_order_acquire); }
@@ -86,6 +86,21 @@ public:
     void setClipEnabled(bool enabled) { clipEnabled_.store(enabled, std::memory_order_relaxed); }
     ImageChannel* clip() const { return clip_.get(); }
 
+    // While on, every new image is also copied for the snapper (see BoxSnapper: the boxes put onto every image).
+    // Off costs nothing.
+    void setSnapEnabled(bool enabled) { snapEnabled_.store(enabled, std::memory_order_relaxed); }
+    ImageChannel* snap() const { return snap_.get(); }
+
+    // While on, a new image every 1 / UiFinder::kImagesPerSecond seconds is also copied for the UI finder (where the
+    // game's interface is; it moves only when the user moves it). Off costs nothing.
+    void setUiEnabled(bool enabled) { uiEnabled_.store(enabled, std::memory_order_relaxed); }
+    ImageChannel* ui() const { return ui_.get(); }
+
+    // While on, a new image every 1 / GroundFinder::kImagesPerSecond seconds is also copied for the ground finder (the
+    // camera from the ground's motion). Off costs nothing.
+    void setGroundEnabled(bool enabled) { groundEnabled_.store(enabled, std::memory_order_relaxed); }
+    ImageChannel* ground() const { return ground_.get(); }
+
     // Newest statistics. The reference stays valid until the next call or start().
     const PipelineStats& stats();
 
@@ -104,6 +119,9 @@ private:
     std::unique_ptr<ImageChannel> recording_;
     std::unique_ptr<ImageChannel> recognition_;
     std::unique_ptr<ImageChannel> clip_;
+    std::unique_ptr<ImageChannel> snap_;
+    std::unique_ptr<ImageChannel> ui_;
+    std::unique_ptr<ImageChannel> ground_;
     std::unique_ptr<TripleBuffer<PipelineStats>> stats_;
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
@@ -113,6 +131,9 @@ private:
     std::atomic<bool> recordNow_{false};
     std::atomic<bool> recognitionEnabled_{false};
     std::atomic<bool> clipEnabled_{false};
+    std::atomic<bool> snapEnabled_{false};
+    std::atomic<bool> uiEnabled_{false};
+    std::atomic<bool> groundEnabled_{false};
     std::string error_;
     unsigned width_ = 0;
     unsigned height_ = 0;

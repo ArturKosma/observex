@@ -164,6 +164,63 @@ void drawIcon(ImDrawList* drawList, Icon icon, ImVec2 centre, ImU32 color, const
                                 color, 1.0f * dpi);
         break;
     }
+    case Icon::StepBack:
+    case Icon::StepForward: {
+        const float side = icon == Icon::StepBack ? -1.0f : 1.0f;
+        const float half = std::round(5.0f * dpi);
+        const float bar = std::round(2.0f * dpi);
+        const float barX = centre.x + side * std::round(3.5f * dpi); // The bar's middle.
+        drawList->AddRectFilled(ImVec2(barX - bar * 0.5f, centre.y - half), ImVec2(barX + bar * 0.5f, centre.y + half),
+                                color, 0.5f * dpi);
+        const float tipX = barX - side * std::round(1.5f * dpi);
+        const float baseX = tipX - side * std::round(7.0f * dpi);
+        if (icon == Icon::StepBack) {
+            drawList->AddTriangleFilled(ImVec2(baseX, centre.y + half), ImVec2(tipX, centre.y),
+                                        ImVec2(baseX, centre.y - half), color);
+        } else {
+            drawList->AddTriangleFilled(ImVec2(baseX, centre.y - half), ImVec2(tipX, centre.y),
+                                        ImVec2(baseX, centre.y + half), color);
+        }
+        break;
+    }
+    case Icon::ToStart:
+    case Icon::ToEnd: {
+        // As StepBack and StepForward, with a second triangle: as far as it goes.
+        const float side = icon == Icon::ToStart ? -1.0f : 1.0f;
+        const float half = std::round(5.0f * dpi);
+        const float bar = std::round(2.0f * dpi);
+        const float width = std::round(6.0f * dpi); // Each triangle's.
+        const float barX = centre.x + side * std::round(6.5f * dpi);
+        drawList->AddRectFilled(ImVec2(barX - bar * 0.5f, centre.y - half), ImVec2(barX + bar * 0.5f, centre.y + half),
+                                color, 0.5f * dpi);
+        for (int i = 0; i < 2; ++i) {
+            const float tipX = barX - side * (std::round(1.5f * dpi) + static_cast<float>(i) * width);
+            const float baseX = tipX - side * width;
+            if (icon == Icon::ToStart) {
+                drawList->AddTriangleFilled(ImVec2(baseX, centre.y + half), ImVec2(tipX, centre.y),
+                                            ImVec2(baseX, centre.y - half), color);
+            } else {
+                drawList->AddTriangleFilled(ImVec2(baseX, centre.y - half), ImVec2(tipX, centre.y),
+                                            ImVec2(baseX, centre.y + half), color);
+            }
+        }
+        break;
+    }
+    case Icon::Guesses: {
+        // A box's four corners, as a finder marks what it found.
+        const float half = std::round(7.0f * dpi);
+        const float arm = std::round(4.0f * dpi);
+        for (const float sx : {-1.0f, 1.0f}) {
+            for (const float sy : {-1.0f, 1.0f}) {
+                const ImVec2 corner(centre.x + sx * half, centre.y + sy * half);
+                drawList->PathLineTo(ImVec2(corner.x - sx * arm, corner.y));
+                drawList->PathLineTo(corner);
+                drawList->PathLineTo(ImVec2(corner.x, corner.y - sy * arm));
+                drawList->PathStroke(color, 0, l.stroke);
+            }
+        }
+        break;
+    }
     case Icon::None:
         break;
     }
@@ -197,7 +254,10 @@ bool BarButton::draw(const char* id, const theme::Fonts& fonts) const {
     const Layout l = layout();
     const ImVec2 min = ImGui::GetCursorScreenPos();
     const bool clicked = ImGui::InvisibleButton(id, ImVec2(width(fonts), l.height)) && enabled;
-    const bool hovered = enabled && ImGui::IsItemHovered();
+    // An open button reacts to the mouse too, also while its own popup blocks the rest (a click on it then closes the
+    // popup): before, it looked the same hovered or not, so nothing said a click would close it (the user, 2026-11-12).
+    const bool hovered =
+        enabled && ImGui::IsItemHovered(open ? ImGuiHoveredFlags_AllowWhenBlockedByPopup : ImGuiHoveredFlags_None);
     const bool held = enabled && ImGui::IsItemActive();
     if (hovered) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -207,8 +267,14 @@ bool BarButton::draw(const char* id, const theme::Fonts& fonts) const {
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const float rounding = 8.0f * l.dpi;
-    const ImU32 fill = held || open ? theme::kSurfaceActive : hovered ? theme::kSurfaceHover : theme::kSurface;
-    const ImU32 border = open ? highlight : hovered ? theme::kBorderHover : theme::kBorder;
+    const ImU32 fill = open && hovered    ? theme::kSurfaceOpenHover
+                       : held || open     ? theme::kSurfaceActive
+                       : hovered          ? theme::kSurfaceHover
+                                          : theme::kSurface;
+    const ImU32 border = open && hovered ? theme::lighter(highlight, 0.45f)
+                         : open          ? highlight
+                         : hovered       ? theme::kBorderHover
+                                         : theme::kBorder;
     drawList->AddRectFilled(min, max, fill, rounding);
     drawList->AddRect(min, max, border, rounding, 0, 1.0f);
     if (progress >= 0.0f) {

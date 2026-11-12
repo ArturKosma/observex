@@ -1,11 +1,14 @@
 #include "app/App.h"
 
+#include "app/Overlay.h"
 #include "app/Snapshot.h"
 #include "app/Widgets.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
+
+#include <shellapi.h>
 
 #include <algorithm>
 #include <cctype>
@@ -26,23 +29,20 @@ constexpr ImGuiWindowFlags kFixedWindow = ImGuiWindowFlags_NoDecoration | ImGuiW
 constexpr char kPickerPopup[] = "screens";
 constexpr char kSettingsPopup[] = "settings";
 constexpr char kShowPopup[] = "show";
+constexpr char kGuessesPopup[] = "guesses";
 constexpr char kCategoryPopup[] = "What are we looking for?";
 constexpr char kRecordPopup[] = "What do we record?";
 constexpr char kRecordingsPopup[] = "recordings";
 constexpr char kReviewPopup[] = "What do we review?";
 constexpr char kClipsPopup[] = "clips";
+constexpr char kRemoveClipPopup[] = "Remove this clip?";
 constexpr char kChooseText[] = "Choose a screen to observe";
-constexpr char kHotkeyText[] = "Ctrl+Alt+R";
-constexpr char kClipHotkeyText[] = "Ctrl+Alt+C";
-constexpr int kRecordHotkey = 0; // MainWindow hotkey ids.
-constexpr int kMarkHotkey = 1;
-constexpr int kClipHotkey = 2;
 // How long Save last 10 s says "Saved 10.3 s" after a save.
 constexpr auto kSavedShownFor = std::chrono::seconds(3);
 // What live recognition looks for: its model folder, live log, Show flag and box tags.
 constexpr const Category& kLive = kCategories[0];
-// Seconds between saved images while recording (at least, recording only unsure). Neighbouring images are near
-// copies, so the user asked for one every 3 s (2026-11-01) rather than more to review. Fixed, no setting.
+// Seconds between saved images recording every 3 s. Neighbouring images are near copies, so the user asked for one
+// every 3 s (2026-11-01) rather than more to review. Fixed, no setting. Only unsure asks every kUnsureEvery.
 constexpr unsigned kRecordingInterval = 3;
 constexpr int kSnapshotStepFrames = 36; // Snapshot frames are 16 ms apart, so each step gets about 0.6 s.
 
@@ -184,6 +184,42 @@ bool pictureRow(int id, ImVec2 tileSize, Thumbnails& thumbnails, const std::file
     return clicked;
 }
 
+// A small round X with its top right corner at `corner`, as on a list row; returns true when clicked.
+bool removeButton(int id, ImVec2 corner, float dpi) {
+    const float size = std::round(24.0f * dpi);
+    const float inset = std::round(8.0f * dpi);
+    const ImVec2 min(corner.x - inset - size, corner.y + inset);
+    ImGui::SetCursorScreenPos(min);
+    ImGui::PushID(id);
+    const bool clicked = ImGui::InvisibleButton("##remove", ImVec2(size, size));
+    ImGui::PopID();
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const ImVec2 centre(min.x + size * 0.5f, min.y + size * 0.5f);
+    drawList->AddCircleFilled(centre, size * 0.5f, hovered ? theme::kRecord : theme::kSurface);
+    const float half = std::round(4.0f * dpi);
+    const ImU32 color = hovered ? theme::kText : theme::kTextMuted;
+    const float stroke = 1.5f * dpi;
+    drawList->AddLine(ImVec2(centre.x - half, centre.y - half), ImVec2(centre.x + half, centre.y + half), color, stroke);
+    drawList->AddLine(ImVec2(centre.x - half, centre.y + half), ImVec2(centre.x + half, centre.y - half), color, stroke);
+    return clicked;
+}
+
+// Moves `path` (a file or a folder) to the Recycle Bin, without asking. Returns an error message, empty if it went.
+std::string moveToRecycleBin(const std::filesystem::path& path) {
+    std::wstring from = path.wstring();
+    from.push_back(L'\0'); // A list of paths, ended by an empty one.
+    SHFILEOPSTRUCTW operation{};
+    operation.wFunc = FO_DELETE;
+    operation.pFrom = from.c_str();
+    operation.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
+    const int result = SHFileOperationW(&operation);
+    if (result != 0 || operation.fAnyOperationsAborted) {
+        return "Windows could not move it to the Recycle Bin (error " + std::to_string(result) + ")";
+    }
+    return {};
+}
+
 // When `file` was last written, in local time: "2026-11-01 09:44". "missing" if there is no such file.
 std::string fileTime(const std::filesystem::path& file) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -312,24 +348,19 @@ int App::run() {
 
     while (window_->pumpMessages()) {
         // Recording works while the window is minimized or behind a game, so this comes before drawing.
-        if (window_->takeHotkeyPress(kRecordHotkey)) {
-            toggleRecording();
-        }
-        if (window_->takeHotkeyPress(kMarkHotkey)) {
-            markMoment();
-        }
-        if (window_->takeHotkeyPress(kClipHotkey)) {
-            saveClip(kClipHotkeyText);
-        }
         if (recorder_ && recorder_->failed()) {
             recordingError_ = "Recording stopped. " + recorder_->error();
             stopRecording("recording stopped by an error");
         }
         if (recording_ && recorder_) {
             const unsigned saved = recording_->saved + recorder_->saved();
-            if (recordingDone(saved)) {
+            const double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - recording_->started).count();
+            if (recordingDone(recording_->info.kind, saved, elapsed)) {
+                const bool unsure = recording_->info.kind == RecordKind::Unsure;
                 stopRecording("recording done");
-                recordingError_ = "Recording done: " + std::to_string(saved) + " images. Record again in a new place.";
+                recordingError_ = "Recording done: " + std::to_string(saved) + (saved == 1 ? " image" : " images") +
+                                  (unsure ? " in a minute." : ". Record again in a new place.");
             }
         }
         // How the last clip save went: the button says it is saved, or the error shows at the top right.
@@ -353,6 +384,10 @@ int App::run() {
         if (closeClip_) {
             closeClip();
             closeClip_ = false;
+        }
+        if (clipToRemove_) {
+            removeClip(*clipToRemove_);
+            clipToRemove_.reset();
         }
         if (clipToOpen_) {
             openClip(*clipToOpen_);
@@ -385,23 +420,57 @@ int App::run() {
         } else if (pipeline_.state() == Pipeline::State::NeedsRestart) {
             observeAgain();
         }
-        // Recognition goes on whatever is shown, minimized too, except while reviewing (the user asked, 2026-11-01):
-        // then the review's finder gets the GPU. With no images the recogniser waits, model loaded, and picks up again
-        // the moment the review closes. Recording only unsure saves nothing meanwhile: nobody answers its questions.
-        pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed && !review_);
-        // The clip buffer pauses with it: a clip is for what the recogniser saw, and the finder gets the GPU. Meanwhile
-        // it repeats the last image, so a clip saved right after a review still plays (still, with no looks).
-        pipeline_.setClipEnabled(clipRecorder_ && clipRecorder_->state() != ClipRecorder::State::Failed && !review_);
+        // Recognition goes on whatever is shown, minimized too, except while reviewing (the user asked, 2026-11-01:
+        // the review's finder gets the GPU) or while a clip is open (the user asked, 2026-11-11: it is offline data,
+        // and the model on every image kept the GPU 66-93% busy). With no images the recogniser waits, model loaded,
+        // and picks up again the moment the review or the clip closes. Recording only unsure saves nothing meanwhile:
+        // nobody answers its questions.
+        // observex_heuristics.dll rebuilt (the user asked, 2026-11-11: to see a heuristics change without closing the
+        // app): the recogniser takes it up between two looks, and an open clip's Today is made again with it.
+        if (heuristics_->poll()) {
+            const std::string about = heuristics_->describe();
+            noteInClip("heuristics loaded again: " + about);
+            if (clipView_) {
+                clipView_->setHeuristics(*todaysHeuristics(), todaysSnapping(), todaysGround(), about);
+            }
+        }
+        const bool away = review_ || clipView_;
+        pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed && !away);
+        pipeline_.setSnapEnabled(snapper_ && snapper_->state() != BoxSnapper::State::Failed && !away);
+        // The UI finder goes on with it, the Show flag UI on or off (the user asked, 2026-11-12: the flag only draws
+        // what it found).
+        pipeline_.setUiEnabled(uiFinder_ && uiFinder_->state() != UiFinder::State::Failed && !away);
+        // The ground finder only while its flag is on (nothing else needs it yet), afresh each time it starts again.
+        const bool following =
+            groundFinder_ && groundFinder_->state() != GroundFinder::State::Failed && !away && settings_.showGround;
+        if (following && !groundFollowing_) {
+            groundFinder_->restart();
+        }
+        groundFollowing_ = following;
+        pipeline_.setGroundEnabled(following);
+        if (following) {
+            hintGround();
+        }
+        // The clip buffer pauses with it (its encoding took 21% of the video encoder): a clip is for what the
+        // recogniser saw. Meanwhile it repeats the last image, so a clip saved right after still plays (still, with no
+        // looks).
+        pipeline_.setClipEnabled(clipRecorder_ && clipRecorder_->state() != ClipRecorder::State::Failed && !away);
         if (!window_->prepareFrame()) {
             pipeline_.setPreviewEnabled(false); // Minimized: nobody sees it.
+            groundDrawn_.drawn = false;          // Nor the grid.
+            noteGroundInClip();
             picker_->close();
             Sleep(10);
             continue;
         }
-        // The review and a clip cover it. A clip leaves recognition and the clip buffer running, unlike the review.
+        // The review and a clip cover it.
         pipeline_.setPreviewEnabled(observedImage_ != nullptr && !review_ && !clipView_);
-        if (preview_ && preview_->copyNewImage(gpu_.context.Get(), observedImage_->texture())) {
+        if (ImageStamp stamp;
+            preview_ && preview_->copyNewImage(gpu_.context.Get(), observedImage_->texture(), &stamp)) {
             observedImage_->imageCopied();
+            previewMs_ = groundMs(stamp.shownQpc);
+            previewQpc_ = stamp.shownQpc;
+            previewImage_ = stamp.number;
         }
         if (clipView_) {
             clipView_->update();
@@ -419,7 +488,9 @@ int App::run() {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        groundDrawn_.drawn = false; // Until the live view draws the grid.
         drawFrame();
+        noteGroundInClip();
         ImGui::Render();
 
         window_->bindBackBuffer();
@@ -460,14 +531,12 @@ void App::init() {
         settings_ = Settings::load(settingsFile_);
     }
 
+    // observex_heuristics.dll next to the exe (the Release build puts both in the project folder).
+    heuristics_ = std::make_shared<HeuristicsSource>(appFolder() / L"observex_heuristics.dll");
+
     gpuAdapter_ = findPrimaryGpu();
     gpu_ = createGpuDevice(gpuAdapter_.Get());
     window_ = std::make_unique<MainWindow>(L"observex", gpu_.device.Get(), dpiScale_, !snapshot_);
-    if (!snapshot_) {
-        hotkeyRegistered_ = window_->registerHotkey(kRecordHotkey, MOD_CONTROL | MOD_ALT, 'R');
-        markHotkeyRegistered_ = window_->registerHotkey(kMarkHotkey, MOD_CONTROL | MOD_ALT, 'M');
-        clipHotkeyRegistered_ = window_->registerHotkey(kClipHotkey, MOD_CONTROL | MOD_ALT, 'C');
-    }
     picker_ = std::make_unique<ScreenPicker>(gpu_.device.Get(), gpuAdapter_.Get());
     thumbnails_ = std::make_unique<Thumbnails>(gpu_.device.Get());
 
@@ -538,16 +607,54 @@ void App::observe(const Screen& screen) {
     try {
         // It answers recording only unsure's questions.
         recognizer_ = std::make_unique<Recognizer>(screen, *pipeline_.recognition(), modelFolder(kLive.id),
-                                                   &pipeline_.question());
+                                                   heuristics_, &pipeline_.question());
         recognizer_->setClip(clipRecorder_); // Every look goes into the clip buffer too.
     } catch (const std::exception& e) {
         recognizerError_ = e.what();
+    }
+
+    // The snapper: the recogniser's boxes put onto every new image (the user asked, 2026-11-11: boxes snapped to
+    // the characters in a camera turn).
+    snapperError_.clear();
+    if (recognizer_) {
+        try {
+            snapper_ = std::make_shared<BoxSnapper>(screen, *pipeline_.snap(), heuristics_);
+            snapper_->setClip(clipRecorder_); // So does every image's boxes.
+            recognizer_->setSnapper(snapper_);
+            pipeline_.setSnapEnabled(true);
+        } catch (const std::exception& e) {
+            snapperError_ = e.what();
+        }
+    }
+
+    // The UI finder: where the game's interface is, for the Show flag UI (the user asked, 2026-11-12).
+    uiFinderError_.clear();
+    try {
+        uiFinder_ = std::make_unique<UiFinder>(screen.adapter.Get(), *pipeline_.ui(), modelFolder("ui"));
+    } catch (const std::exception& e) {
+        uiFinderError_ = e.what();
+    }
+
+    // The ground finder: the game's camera, for the Show flag Ground (the user asked, 2026-11-12).
+    groundFinderError_.clear();
+    groundFollowing_ = false;
+    try {
+        groundFinder_ = std::make_unique<GroundFinder>(screen.adapter.Get(), *pipeline_.ground(), heuristics_);
+    } catch (const std::exception& e) {
+        groundFinderError_ = e.what();
     }
 }
 
 void App::stopObserving() {
     pauseRecording();    // The recorder reads from the pipeline's channel; it goes first.
-    recognizer_.reset(); // So does the recogniser (it hands looks to the clip buffer, so before it).
+    recognizer_.reset(); // So does the recogniser (it hands looks to the clip buffer and the snapper, so before them).
+    pipeline_.setSnapEnabled(false);
+    snapper_.reset(); // Reads from the pipeline's snap channel.
+    pipeline_.setUiEnabled(false);
+    uiFinder_.reset(); // Reads from its ui channel.
+    pipeline_.setGroundEnabled(false);
+    groundFinder_.reset(); // Reads from its ground channel.
+    groundFollowing_ = false;
     pipeline_.setClipEnabled(false);
     clipRecorder_.reset(); // Reads from the pipeline's clip channel; a save still being written finishes first.
     clipSaving_ = false;
@@ -587,15 +694,6 @@ bool App::canRecordUnsure() const {
     return recognizer_ && recognizer_->state() != Recognizer::State::Failed;
 }
 
-void App::toggleRecording() {
-    if (recording_) {
-        stopRecording();
-    } else {
-        const RecordKind kind = settings_.recordKind; // The kind picked last.
-        startRecording(kind == RecordKind::Every || canRecordUnsure() ? kind : RecordKind::Every);
-    }
-}
-
 void App::startRecording(RecordKind kind) {
     if (recording_ || !canRecord()) {
         return;
@@ -626,7 +724,7 @@ void App::startRecording(RecordKind kind) {
     info.screen = observed_->monitor;
     info.width = pipeline_.width();
     info.height = pipeline_.height();
-    info.every = kRecordingInterval;
+    info.every = kind == RecordKind::Unsure ? kUnsureEvery : kRecordingInterval;
     info.kind = kind;
     resumeRecording();
     // The folder exists once the recorder runs. Without the file the review would not list this recording.
@@ -645,7 +743,7 @@ void App::resumeRecording() {
         recorder_ = std::make_unique<Recorder>(*observed_, *pipeline_.recording(), recording_->folder,
                                                recording_->saved + 1, recording_->log);
         pipeline_.setRecordOnlyQuestions(recording_->info.kind == RecordKind::Unsure);
-        pipeline_.setRecordingInterval(kRecordingInterval);
+        pipeline_.setRecordingInterval(recording_->info.every);
         if (recognizer_) {
             recognizer_->setLog(recording_->log);
         }
@@ -688,21 +786,12 @@ void App::stopRecording(const char* why) {
     recording_.reset();
 }
 
-void App::markMoment() {
-    if (!recording_ || !recorder_ || !recording_->log) {
-        return; // Marks go into a recording's live log.
-    }
-    recording_->log->mark(++recording_->marks);
-    pipeline_.recordNow(); // The image on screen now, to see what the mark is about.
-    noteInClip("mark " + std::to_string(recording_->marks));
-}
-
 bool App::canSaveClip() const {
     return clipRecorder_ && clipRecorder_->state() == ClipRecorder::State::Running &&
            clipRecorder_->saveState() != ClipRecorder::SaveState::Saving;
 }
 
-void App::saveClip(const char* how) {
+void App::saveClip() {
     if (!canSaveClip()) {
         return;
     }
@@ -718,7 +807,7 @@ void App::saveClip(const char* how) {
         about.model = liveModelAbout();
         about.kinds = recognizer_->kinds();
     }
-    noteInClip(std::string("save last 10 s (") + how + ")");
+    noteInClip("save last 10 s");
     clipSaveError_.clear();
     if (clipRecorder_->save(std::move(folder), std::move(about))) {
         clipSaving_ = true;
@@ -731,6 +820,21 @@ void App::noteInClip(std::string_view text) {
     if (clipRecorder_) {
         clipRecorder_->note(text);
     }
+}
+
+void App::noteGroundInClip() {
+    if (!clipRecorder_ || previewQpc_ == 0) {
+        return;
+    }
+    // A line whenever it changes: drawn over a new image or from a new camera, or no longer drawn.
+    const GroundDrawn& now = groundDrawn_;
+    if (now.drawn == groundNoted_.drawn &&
+        (!now.drawn || (now.image == groundNoted_.image && now.followed == groundNoted_.followed))) {
+        return;
+    }
+    groundNoted_ = now;
+    clipRecorder_->grounded(previewQpc_, previewImage_, now.drawn ? now.followed : 0,
+                            now.drawn ? now.camera : GroundCamera{});
 }
 
 void App::saveSettings() {
@@ -754,6 +858,12 @@ void App::readRecordings() {
         row.when = describeWhen(entry.info.started);
         const std::vector<std::string> images = listImages(entry.folder);
         row.images = images.size();
+        for (const std::string& image : images) { // UTF-8.
+            std::error_code error;
+            const std::uintmax_t size = std::filesystem::file_size(
+                entry.folder / std::u8string(reinterpret_cast<const char8_t*>(image.data()), image.size()), error);
+            row.bytes += error ? 0 : size;
+        }
         if (!images.empty()) {
             const std::string& first = images.front(); // UTF-8.
             row.firstImage = entry.folder / std::u8string(reinterpret_cast<const char8_t*>(first.data()), first.size());
@@ -781,6 +891,13 @@ void App::readClips() {
     for (ClipEntry& entry : listClips(settings_.recordingsFolder / kClipsFolder)) {
         ClipRow row;
         row.when = describeWhen(entry.info.saved);
+        std::error_code error;
+        for (const auto& file : std::filesystem::directory_iterator(entry.folder, error)) {
+            std::error_code sizeError;
+            if (const std::uintmax_t size = file.file_size(sizeError); !sizeError && file.is_regular_file(sizeError)) {
+                row.bytes += size;
+            }
+        }
         row.entry = std::move(entry);
         clips_.push_back(std::move(row));
     }
@@ -817,8 +934,33 @@ void App::closeReview() {
 void App::openClip(const ClipEntry& clip) {
     closeReview(); // One thing at a time is shown instead of the screen.
     closeClip();
-    clipView_ = std::make_unique<ClipView>(gpuAdapter_.Get(), gpu_.device.Get(), clip.folder, clip.info);
+    clipView_ = std::make_unique<ClipView>(gpuAdapter_.Get(), gpu_.device.Get(), clip.folder, clip.info,
+                                           *todaysHeuristics(), todaysSnapping(), todaysGround(), modelFolder("ui"));
     noteInClip("clip opened: " + nameOf(clip.folder));
+}
+
+std::unique_ptr<Heuristics> App::todaysHeuristics() const {
+    try {
+        return heuristics_->make();
+    } catch (const std::exception&) {
+        return HeuristicsSource().make();
+    }
+}
+
+std::unique_ptr<Snapping> App::todaysSnapping() const {
+    try {
+        return heuristics_->makeSnapping();
+    } catch (const std::exception&) {
+        return HeuristicsSource().makeSnapping();
+    }
+}
+
+std::unique_ptr<Grounding> App::todaysGround() const {
+    try {
+        return heuristics_->makeGround();
+    } catch (const std::exception&) {
+        return HeuristicsSource().makeGround();
+    }
 }
 
 void App::closeClip() {
@@ -827,6 +969,18 @@ void App::closeClip() {
     }
     noteInClip("clip closed: " + nameOf(clipView_->folder()));
     clipView_.reset();
+}
+
+void App::removeClip(const std::filesystem::path& folder) {
+    if (clipView_ && clipView_->folder() == folder) {
+        closeClip(); // Its player has the video open.
+    }
+    if (const std::string error = moveToRecycleBin(folder); !error.empty()) {
+        reviewError_ = "Could not remove the clip " + nameOf(folder) + ": " + error;
+    } else {
+        noteInClip("clip removed: " + nameOf(folder));
+    }
+    readClips();
 }
 
 bool App::playSnapshot() {
@@ -841,6 +995,12 @@ bool App::playSnapshot() {
     }
     if (step < steps) {
         const Snapshot::Step& input = snapshot_->steps[static_cast<std::size_t>(step)];
+        if (!input.text.empty()) {
+            if (frame == 1) {
+                io.AddInputCharactersUTF8(input.text.c_str());
+            }
+            return false;
+        }
         if (input.key != ImGuiKey_None) {
             if (frame == 1 || frame == 2) {
                 const bool down = frame == 1;
@@ -903,7 +1063,21 @@ void App::drawFrame() {
     if (review_) {
         review_->draw(fonts_);
     } else if (clipView_) {
-        clipView_->draw();
+        // 1 and 2 pick the guesser in the Guesses popup's order (drawing characters), 3 turns Characters off or on: to
+        // flip between them on one frame.
+        if (!ImGui::GetIO().WantTextInput) {
+            for (const auto [key, guesser] : {std::pair(ImGuiKey_1, ClipView::Guesser::Recorded),
+                                              std::pair(ImGuiKey_2, ClipView::Guesser::Today)}) {
+                if (ImGui::IsKeyPressed(key, false)) {
+                    pickGuesser(guesser);
+                }
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_3, false)) {
+                showCharacters(!settings_.showCharacters);
+            }
+        }
+        clipView_->draw(fonts_, settings_.showCharacters, settings_.showKinds, settings_.showUi, settings_.showGround,
+                        dpiScale_);
     } else if (observed_) {
         drawObservedScreen();
     } else {
@@ -955,26 +1129,29 @@ void App::drawTopBar(float height) {
     char detail[128];
     if (recording_) {
         // How far it is and how long is left, so the user knows how much more to walk around (the user asked,
-        // 2026-11-02 and 03): "02:15 · 38 of 110 images · about 4 min left".
+        // 2026-11-02 and 03): "02:15 · 38 of 110 images · about 4 min left", or for only unsure, which records for a
+        // minute, "00:23 · 12 images · 37 s left".
+        const RecordKind kind = recording_->info.kind;
         const unsigned saved = recording_->saved + (recorder_ ? recorder_->saved() : 0);
         const auto elapsed = std::chrono::steady_clock::now() - recording_->started;
+        const double elapsedSeconds = std::chrono::duration<double>(elapsed).count();
         char duration[16];
         formatDuration(duration, sizeof(duration), elapsed);
-        const double secondsLeft = recordingSecondsLeft(recording_->info.kind, kRecordingInterval, saved,
-                                                        std::chrono::duration<double>(elapsed).count());
-        char left[32];
-        if (secondsLeft < 60.0) {
-            std::snprintf(left, sizeof(left), "under a minute left");
+        const double secondsLeft = recordingSecondsLeft(kind, recording_->info.every, saved, elapsedSeconds);
+        if (kind == RecordKind::Unsure) {
+            std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u %s  \xC2\xB7  %.0f s left", duration, saved,
+                          saved == 1 ? "image" : "images", std::ceil(secondsLeft));
         } else {
-            std::snprintf(left, sizeof(left), "about %.0f min left", secondsLeft / 60.0);
+            char left[32];
+            if (secondsLeft < 60.0) {
+                std::snprintf(left, sizeof(left), "under a minute left");
+            } else {
+                std::snprintf(left, sizeof(left), "about %.0f min left", secondsLeft / 60.0);
+            }
+            std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u of %u images  \xC2\xB7  %s", duration, saved,
+                          kRecordImages, left);
         }
-        const int length = std::snprintf(detail, sizeof(detail), "%s  \xC2\xB7  %u of %u images  \xC2\xB7  %s",
-                                         duration, saved, kRecordImages, left);
-        recordButton.progress = static_cast<float>(saved) / static_cast<float>(kRecordImages);
-        if (recording_->marks > 0 && length > 0) {
-            std::snprintf(detail + length, sizeof(detail) - static_cast<std::size_t>(length), "  \xC2\xB7  %u %s",
-                          recording_->marks, recording_->marks == 1 ? "mark" : "marks");
-        }
+        recordButton.progress = recordingProgress(kind, saved, elapsedSeconds);
         recordButton.icon = Icon::Stop;
         recordButton.text = "Stop";
         recordButton.detail = detail;
@@ -983,7 +1160,6 @@ void App::drawTopBar(float height) {
     } else {
         recordButton.icon = Icon::Record;
         recordButton.text = "Record";
-        recordButton.detail = hotkeyRegistered_ || snapshot_ ? kHotkeyText : nullptr;
         recordButton.enabled = canRecord();
         recordButton.open = ImGui::IsPopupOpen(kRecordPopup);
     }
@@ -1001,21 +1177,13 @@ void App::drawTopBar(float height) {
     } else if (ImGui::IsItemHovered() && recording_) {
         char bytes[16];
         formatBytes(bytes, sizeof(bytes), recording_->savedBytes + (recorder_ ? recorder_->savedBytes() : 0));
-        char saving[200];
         if (recording_->info.kind == RecordKind::Unsure) {
-            std::snprintf(saving, sizeof(saving),
-                          "Saving an image where the model is unsure, at most one every %u s, until %u (%s so far)",
-                          kRecordingInterval, kRecordImages, bytes);
+            ImGui::SetTooltip("Saving an image when the model is unsure, at most one a second, for a minute "
+                              "(%s so far)",
+                              bytes);
         } else {
-            std::snprintf(saving, sizeof(saving), "Saving an image every %u s, until %u (%s so far)",
-                          kRecordingInterval, kRecordImages, bytes);
-        }
-        if (recording_->log) {
-            ImGui::SetTooltip("%s.\nThe log keeps what the model sees on every image it looks at.\n"
-                              "Ctrl+Alt+M marks a moment to talk about later (it saves the image shown then too).",
-                              saving);
-        } else {
-            ImGui::SetTooltip("%s.", saving);
+            ImGui::SetTooltip("Saving an image every %u s, until %u (%s so far)", kRecordingInterval, kRecordImages,
+                              bytes);
         }
     }
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap), ImGuiCond_Always,
@@ -1047,13 +1215,12 @@ void App::drawTopBar(float height) {
     } else {
         std::snprintf(saveText, sizeof(saveText), "Save last %.0f s", kClipSeconds);
         saveButton.text = saveText;
-        saveButton.detail = clipHotkeyRegistered_ || snapshot_ ? kClipHotkeyText : nullptr;
         saveButton.enabled = canSaveClip();
     }
     x -= std::round(8.0f * dpiScale_) + saveButton.width(fonts_);
     ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
     if (saveButton.draw("##saveclip", fonts_)) {
-        saveClip("the button");
+        saveClip();
     }
     if (ImGui::IsItemHovered()) {
         if (saving) {
@@ -1070,15 +1237,7 @@ void App::drawTopBar(float height) {
         } else if (clipRecorder_->state() == ClipRecorder::State::Starting) {
             ImGui::SetTooltip("The clip buffer is starting\xE2\x80\xA6");
         } else {
-            const char* hotkey = clipHotkeyRegistered_ || snapshot_
-                                     ? "Ctrl+Alt+C saves them too, even while a game is in front."
-                                     : "Ctrl+Alt+C is taken by another app, so only this button saves them.";
-            const std::string saved =
-                justSaved ? "Saved into " + toUtf8(clipRecorder_->savedFolder().c_str()) + ".\n\n" : std::string();
-            ImGui::SetTooltip("%sSaves the last %.0f s of the screen as you saw them: the video, with no boxes drawn "
-                              "on it, and as text\neverything the model found and followed on every look, so they "
-                              "can be compared after a change.\nWatch them in Review, Clips. %s",
-                              saved.c_str(), kClipSeconds, hotkey);
+            ImGui::SetTooltip("Saves the last %.0f s as a clip, to watch in Review.", kClipSeconds);
         }
     }
 
@@ -1177,6 +1336,31 @@ void App::drawTopBar(float height) {
         }
     }
 
+    // Over a clip instead: Guesses, whose guesses are drawn over it (the user asked, 2026-11-11, like Show).
+    if (clipView_) {
+        BarButton guessesButton;
+        guessesButton.icon = Icon::Guesses;
+        guessesButton.caption = "Guesses";
+        guessesButton.text = !settings_.showCharacters && !settings_.showGround   ? "Hidden"
+                             : clipView_->guesser() == ClipView::Guesser::Recorded ? "Recorded"
+                                                                                   : "Today";
+        guessesButton.arrow = true;
+        guessesButton.open = ImGui::IsPopupOpen(kGuessesPopup);
+        ImGui::SetCursorScreenPos(ImVec2(screenMax.x + std::round(8.0f * dpiScale_), buttonY));
+        if (guessesButton.draw("##guesses", fonts_)) {
+            ImGui::OpenPopup(kGuessesPopup);
+        }
+        guessesRight_ = ImGui::GetItemRectMax().x; // For the clip's buttons in the middle, next frame.
+        if (ImGui::IsItemHovered() && !guessesButton.open) {
+            ImGui::SetTooltip("What is drawn over the clip: recorded or today's characters (1, 2), or none (3)");
+        }
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + popupGap));
+        if (ImGui::BeginPopup(kGuessesPopup)) {
+            drawGuessers();
+            ImGui::EndPopup();
+        }
+    }
+
     ImGui::SetNextWindowPos(ImVec2(screenMin.x, screenMax.y + popupGap));
     if (ImGui::BeginPopup(kPickerPopup)) {
         ImGui::TextDisabled(kChooseText);
@@ -1230,30 +1414,16 @@ void App::drawSettings() {
     }
     ImGui::Dummy(ImVec2(0.0f, sectionGap));
 
-    // The live log (engine/LiveLog): what the model sees, kept with each recording to look at afterwards.
+    // The live log (engine/LiveLog): what the model sees, kept with each recording to look at afterwards. It
+    // applies from the next recording.
     if (ImGui::Checkbox("Log what the model sees while recording", &settings_.liveLog)) {
         saveSettings();
     }
-    ImGui::TextDisabled("Every box and how sure it is, on every image it looks at (about 85 MB an hour).");
-    if (recording_) {
-        ImGui::TextDisabled("Applies from the next recording.");
-    }
-    ImGui::Dummy(ImVec2(0.0f, sectionGap));
-
-    ImGui::TextDisabled(hotkeyRegistered_ || snapshot_
-                            ? "Ctrl+Alt+R starts and stops recording, even while a game is in front."
-                            : "Ctrl+Alt+R is taken by another app, so only the Record button works.");
-    ImGui::TextDisabled(markHotkeyRegistered_ || snapshot_
-                            ? "Ctrl+Alt+M marks a moment in the log while recording, to talk about later."
-                            : "Ctrl+Alt+M is taken by another app, so moments cannot be marked.");
-    ImGui::TextDisabled(clipHotkeyRegistered_ || snapshot_
-                            ? "Ctrl+Alt+C saves the last 10 s as a clip, even while a game is in front."
-                            : "Ctrl+Alt+C is taken by another app, so only the Save last 10 s button saves clips.");
 }
 
 void App::drawRecordChooser() {
     // The Record button asks what to save (the user asked, 2026-11-02): images at a steady pace, or only those the
-    // model is unsure about. Both stop after kRecordImages. The pick is kept for the hotkey.
+    // model is unsure about (for a minute, the user asked, 2026-11-12).
     const float dpi = dpiScale_;
     ImGui::PushFont(fonts_.medium, 18.0f);
     ImGui::TextUnformatted(kRecordPopup);
@@ -1272,91 +1442,209 @@ void App::drawRecordChooser() {
     if (choiceTile("every", name, description, tileSize, fonts_, dpi)) {
         picked = RecordKind::Every;
     }
-    std::snprintf(description, sizeof(description), "%u images the model is unsure about", kRecordImages);
+    static_assert(kUnsureSeconds == 60, "the tile says 1 minute");
+    std::snprintf(description, sizeof(description), "1 minute, at most an image a second, when the model is unsure");
     if (choiceTile("unsure", "Only unsure", canUnsure ? description : kNeedsModel, tileSize, fonts_, dpi, canUnsure)) {
         picked = RecordKind::Unsure;
     }
-    ImGui::Dummy(ImVec2(0.0f, 2.0f * dpi));
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + tileSize.x);
-    ImGui::TextDisabled("Both stop by themselves after %u images, or when you stop them. Unsure: when an image is due "
-                        "(every %u s), the model looks at it again mirrored, and it is saved if the model sees it "
-                        "differently, about two times in three in a new place. That finds its mistakes, also the ones "
-                        "it is sure of. %s starts the kind picked last.",
-                        kRecordImages, kRecordingInterval, kHotkeyText);
-    ImGui::PopTextWrapPos();
     if (picked) {
         ImGui::CloseCurrentPopup();
-        if (settings_.recordKind != *picked) {
-            settings_.recordKind = *picked;
-            saveSettings();
-        }
         startRecording(*picked);
     }
 }
 
 void App::drawShowFlags() {
-    // Each flag only says what is drawn: hiding characters does not stop looking for them.
+    // Each flag only says what is drawn: hiding characters does not stop looking for them. No explanations under the
+    // flags (the user asked, 2026-11-12); only why there is nothing to draw, while there is not.
     ImGui::TextDisabled("Draw over the screen");
     ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
-    if (ImGui::Checkbox(kLive.name, &settings_.showCharacters)) {
-        saveSettings();
-        noteInClip(std::string("show ") + kLive.name + (settings_.showCharacters ? " on" : " off"));
+    if (bool on = settings_.showCharacters; ImGui::Checkbox(kLive.name, &on)) {
+        showCharacters(on);
     }
 
-    // Under it, how looking for them goes.
-    char text[256];
+    char why[256] = {};
     if (!recognizer_) {
-        std::snprintf(text, sizeof(text), "%s",
+        std::snprintf(why, sizeof(why), "%s",
                       recognizerError_.empty() ? "Not looking: the screen is not captured." : recognizerError_.c_str());
     } else if (recognizer_->state() == Recognizer::State::Starting) {
         const float preparing = recognizer_->preparing();
         if (preparing > 0.0f) {
-            std::snprintf(text, sizeof(text), "Preparing the model for this GPU: %.0f%% (once per new model)",
+            std::snprintf(why, sizeof(why), "Preparing the model for this GPU: %.0f%%",
                           static_cast<double>(preparing * 100.0f));
         } else {
-            std::snprintf(text, sizeof(text), "Loading the model\xE2\x80\xA6");
+            std::snprintf(why, sizeof(why), "Loading the model\xE2\x80\xA6");
         }
     } else if (recognizer_->state() == Recognizer::State::Failed) {
-        std::snprintf(text, sizeof(text), "%s", recognizer_->error().c_str());
-    } else {
-        const RecognizerStats& stats = recognizer_->stats();
-        const int found = recognizer_->found().count;
-        std::snprintf(text, sizeof(text), "%d found  \xC2\xB7  %.0f images a second  \xC2\xB7  %.1f ms each", found,
-                      static_cast<double>(stats.imagesPerSecond), static_cast<double>(stats.workAvgMs));
+        std::snprintf(why, sizeof(why), "%s", recognizer_->error().c_str());
+    } else if (!snapper_) {
+        std::snprintf(why, sizeof(why), "Not snapped onto every image: %s", snapperError_.c_str());
+    } else if (snapper_->state() == BoxSnapper::State::Failed) {
+        std::snprintf(why, sizeof(why), "Not snapped onto every image any more: %s", snapper_->error().c_str());
     }
     const float indent = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x; // Under the flag.
-    ImGui::Indent(indent);
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
-    ImGui::TextDisabled("%s", text);
-    ImGui::PopTextWrapPos();
-    ImGui::Unindent(indent);
+    if (why[0] != '\0') {
+        ImGui::Indent(indent);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
+        ImGui::TextDisabled("%s", why);
+        ImGui::PopTextWrapPos();
+        ImGui::Unindent(indent);
+    }
 
     // Kinds (the user asked, 2026-11-02): which kind each character is, once the model has learnt them.
     const bool knowsKinds =
         recognizer_ && recognizer_->state() == Recognizer::State::Running && !recognizer_->kinds().empty();
-    ImGui::Dummy(ImVec2(0.0f, 4.0f * dpiScale_));
     ImGui::BeginDisabled(!knowsKinds || !settings_.showCharacters);
     if (ImGui::Checkbox("Kinds", &settings_.showKinds)) {
         saveSettings();
         noteInClip(settings_.showKinds ? "show Kinds on" : "show Kinds off");
     }
     ImGui::EndDisabled();
-    ImGui::Indent(indent);
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
-    if (knowsKinds) {
-        ImGui::TextDisabled("Monster, player, NPC, you or dead, each in its own colour, as in the review. "
-                            "\"Character?\" in silver: a character it cannot tell the kind of, e.g. far off.");
-        // With a kind update (engine/KindUpdater): it picks kinds with what it learned from the answers since.
-        if (const std::size_t answers = recognizer_->kindAnswers(); answers > 0) {
-            ImGui::TextDisabled("Kinds also learned from %s of your answers", formatCount(answers).c_str());
-        }
-    } else if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
-        ImGui::TextDisabled("Needs a model trained with kinds: check them in the review, then train with --kinds.");
-    } else {
-        ImGui::TextDisabled("Monster, player, NPC, you or dead, once the model is running and has learnt them.");
+
+    // UI (the user asked, 2026-11-12): the game's interface, every piece the UI finder found, to check it finds them
+    // all (a depth model is to leave them out later).
+    if (ImGui::Checkbox("UI", &settings_.showUi)) {
+        saveSettings();
+        noteInClip(settings_.showUi ? "show UI on" : "show UI off");
     }
-    ImGui::PopTextWrapPos();
+    why[0] = '\0';
+    if (!uiFinder_) {
+        std::snprintf(why, sizeof(why), "%s",
+                      uiFinderError_.empty() ? "Not looking: the screen is not captured." : uiFinderError_.c_str());
+    } else if (uiFinder_->state() == UiFinder::State::Failed) {
+        std::snprintf(why, sizeof(why), "%s", uiFinder_->error().c_str());
+    } else {
+        std::snprintf(why, sizeof(why), "%s", uiFinder_->stats().problem.data()); // Found with too little.
+    }
+    if (why[0] != '\0') {
+        ImGui::Indent(indent);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
+        ImGui::TextDisabled("%s", why);
+        ImGui::PopTextWrapPos();
+        ImGui::Unindent(indent);
+    }
+
+    // Ground (the user asked, 2026-11-12): the ground plane the camera sees, turning with it: the first step to
+    // knowing how far things are.
+    if (ImGui::Checkbox("Ground", &settings_.showGround)) {
+        saveSettings();
+        noteInClip(settings_.showGround ? "show Ground on" : "show Ground off");
+    }
+    why[0] = '\0';
+    if (!groundFinder_) {
+        std::snprintf(why, sizeof(why), "%s",
+                      groundFinderError_.empty() ? "Not looking: the screen is not captured."
+                                                 : groundFinderError_.c_str());
+    } else if (groundFinder_->state() == GroundFinder::State::Failed) {
+        std::snprintf(why, sizeof(why), "%s", groundFinder_->error().c_str());
+    }
+    if (why[0] != '\0') {
+        ImGui::Indent(indent);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
+        ImGui::TextDisabled("%s", why);
+        ImGui::PopTextWrapPos();
+        ImGui::Unindent(indent);
+    }
+}
+
+void App::showCharacters(bool on) {
+    settings_.showCharacters = on;
+    saveSettings();
+    noteInClip(std::string("show ") + kLive.name + (on ? " on" : " off"));
+}
+
+void App::pickGuesser(ClipView::Guesser guesser) {
+    clipView_->setGuesser(guesser);
+    if (!settings_.showCharacters && !settings_.showGround) {
+        showCharacters(true);
+    }
+}
+
+void App::drawGuessers() {
+    // The live view's flags (the user asked, 2026-11-12: Characters as in Show, it was a guesser "Nothing" before),
+    // with whose characters under Characters.
+    ImGui::TextDisabled("Draw over the clip");
+    ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
+    if (bool on = settings_.showCharacters; ImGui::Checkbox(kLive.name, &on)) {
+        showCharacters(on);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("3");
+
+    struct Choice {
+        ClipView::Guesser guesser;
+        const char* name;
+        const char* key;
+        const char* about; // One sentence (the user asked, 2026-11-12).
+    };
+    const Choice choices[] = {
+        {ClipView::Guesser::Recorded, "Recorded", "1", "What observex showed while you played."},
+        {ClipView::Guesser::Today, "Today's heuristics", "2", "What observex would show now, with today's heuristics."},
+    };
+    const std::string& missing = clipView_->guessesError();
+    const float indent = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x; // Under the flag.
+    const float wrap = std::round(380.0f * dpiScale_);
+    // Under Characters, off with it and Ground as Kinds in Show (keys 1 and 2 turn Characters on again): whose
+    // characters, and whose grid (Recorded's as drawn live).
+    ImGui::Indent(indent);
+    for (const Choice& choice : choices) {
+        ImGui::BeginDisabled((!settings_.showCharacters && !settings_.showGround) || !missing.empty());
+        if (ImGui::RadioButton(choice.name, clipView_->guesser() == choice.guesser)) {
+            pickGuesser(choice.guesser);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", choice.key);
+        ImGui::Indent(indent);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+        ImGui::TextDisabled("%s", choice.about);
+        if (choice.guesser == ClipView::Guesser::Today) {
+            // Only when something went wrong: Today then is not what observing would show.
+            for (const std::string* error : {&clipView_->todaySnapError(), &heuristics_->error()}) {
+                if (!error->empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, theme::kRecord);
+                    ImGui::TextUnformatted(error->c_str());
+                    ImGui::PopStyleColor();
+                }
+            }
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::Unindent(indent);
+        ImGui::Dummy(ImVec2(0.0f, 4.0f * dpiScale_));
+    }
+    if (!missing.empty()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+        ImGui::TextDisabled("%s", missing.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f * dpiScale_));
+    }
     ImGui::Unindent(indent);
+    // Kinds and UI, the same flags as the live view's (the user asked, 2026-11-12).
+    ImGui::BeginDisabled(!settings_.showCharacters);
+    if (ImGui::Checkbox("Kinds", &settings_.showKinds)) {
+        saveSettings();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::Checkbox("UI", &settings_.showUi)) {
+        saveSettings();
+    }
+    if (const std::string why = clipView_->uiProblem(); !why.empty()) { // Only why there is nothing, or too little.
+        ImGui::Indent(indent);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+        ImGui::TextDisabled("%s", why.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Unindent(indent);
+    }
+    // Ground (the user asked, 2026-11-12): the guesser's grid, Recorded's as the app drew it live.
+    if (ImGui::Checkbox("Ground", &settings_.showGround)) {
+        saveSettings();
+    }
+    if (const std::string why = clipView_->groundProblem(); !why.empty()) {
+        ImGui::Indent(indent);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+        ImGui::TextDisabled("%s", why.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Unindent(indent);
+    }
 }
 
 void App::drawReviewSteps(float height, float right) {
@@ -1420,15 +1708,34 @@ void App::drawReviewSteps(float height, float right) {
 }
 
 void App::drawClipSteps(float height, float right) {
-    // In the middle of the bar: play or pause, where the clip is ("0:03.2 / 0:10.3") and, muted, the frame shown
-    // ("Frame 38", numbered as in clip.txt). Laid out by the widest the numbers get, so nothing moves while they
-    // count; moved left of `right` (the bar's buttons on the right) in a narrow window.
+    // In the middle of the bar: the first frame, a frame back, play or pause, a frame on, the last (the user asked,
+    // 2026-11-11; the first and the last later that day), where the clip is ("0:03.2 / 0:10.3") and the frame shown,
+    // numbered as in clip.txt, in a field to type another into ("Frame [38] of 1,066": Enter goes there, Escape
+    // leaves it, Ctrl+G types into it; the user asked the same day). Laid out by the widest the numbers get, so
+    // nothing moves while they count; moved left of `right` (the bar's buttons on the right) in a narrow window, but
+    // never over the Guesses button on the left: where it still does not fit, the word "Frame" goes first, then
+    // "of 1,066", then some of the space between, then the clip's length, then the time.
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float gap = std::round(12.0f * dpiScale_);
+    float gap = std::round(12.0f * dpiScale_);
     const float textGap = std::round(8.0f * dpiScale_);
+    const float fieldGap = std::round(6.0f * dpiScale_);
+    float buttonGap = std::round(4.0f * dpiScale_);
+    const bool canPlay = clipView_->canPlay();
+    BarButton first;
+    first.icon = Icon::ToStart;
+    first.enabled = canPlay;
+    BarButton back;
+    back.icon = Icon::StepBack;
+    back.enabled = canPlay;
     BarButton play;
     play.icon = clipView_->playing() ? Icon::Pause : Icon::Play;
-    play.enabled = clipView_->canPlay();
+    play.enabled = canPlay;
+    BarButton on;
+    on.icon = Icon::StepForward;
+    on.enabled = canPlay;
+    BarButton last;
+    last.icon = Icon::ToEnd;
+    last.enabled = canPlay;
 
     char position[16];
     char length[16];
@@ -1436,21 +1743,62 @@ void App::drawClipSteps(float height, float right) {
     formatClipTime(length, sizeof(length), clipView_->seconds());
     const std::string time = std::string(position) + " / " + length;
     const std::string widestTime = zeroDigits(std::string(length) + " / " + length);
-    const std::string frame = clipView_->frame() > 0 ? "Frame " + formatCount(clipView_->frame()) : std::string();
-    const std::size_t frames = std::max<std::size_t>(clipView_->info().frames, 1000);
-    const std::string widestFrame = zeroDigits("Frame " + formatCount(frames));
+    const std::string widestPosition = zeroDigits(length); // Where it is alone, in a narrow window.
+    const std::uint64_t frames = clipView_->frames() > 0 ? clipView_->frames() : clipView_->info().frames;
+    const std::string of = "of " + formatCount(frames);
+    const std::string widestNumber = zeroDigits(std::to_string(std::max<std::uint64_t>(frames, 1000)));
 
     const float fontSize = ImGui::GetFontSize();
+    const ImVec2 fieldPadding(std::round(6.0f * dpiScale_), ImGui::GetStyle().FramePadding.y);
     const float timeWidth = fonts_.medium->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, widestTime.c_str()).x;
-    const float frameWidth = ImGui::CalcTextSize(widestFrame.c_str()).x;
-    const float total = play.width(fonts_) + gap + timeWidth + textGap + frameWidth;
-
+    const float positionWidth = fonts_.medium->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, widestPosition.c_str()).x;
+    const float labelWidth = ImGui::CalcTextSize("Frame").x;
+    const float fieldWidth = std::round(ImGui::CalcTextSize(widestNumber.c_str()).x + fieldPadding.x * 2.0f);
+    const float ofWidth = ImGui::CalcTextSize(of.c_str()).x;
+    const float buttonsWidth = first.width(fonts_) + back.width(fonts_) + play.width(fonts_) + on.width(fonts_) +
+                               last.width(fonts_);
     const ImVec2 pos = ImGui::GetWindowPos();
+    const float leftmost = guessesRight_ + std::round(8.0f * dpiScale_);
+    const float room = right - leftmost;
+    bool showLabel = true;
+    bool showOf = true;
+    bool spacious = true;   // The gaps as wide as elsewhere on the bar.
+    bool showLength = true; // "0:03.2 / 0:10.3", else "0:03.2".
+    bool showTime = true;
+    const auto totalWidth = [&] {
+        gap = std::round((spacious ? 12.0f : 8.0f) * dpiScale_);
+        buttonGap = std::round((spacious ? 4.0f : 2.0f) * dpiScale_);
+        return buttonsWidth + buttonGap * 4.0f + (showTime ? gap + (showLength ? timeWidth : positionWidth) : 0.0f) +
+               (showLabel ? textGap + labelWidth : textGap) + fieldGap + fieldWidth +
+               (showOf ? fieldGap + ofWidth : 0.0f);
+    };
+    for (bool* drop : {&showLabel, &showOf, &spacious, &showLength, &showTime}) {
+        if (totalWidth() <= room) {
+            break;
+        }
+        *drop = false;
+    }
+    const float total = totalWidth(); // Also sets the gaps.
+
     const float buttonY = pos.y + std::round((height - BarButton::kHeight * dpiScale_) * 0.5f);
     const float textY = pos.y + std::round((height - fontSize) * 0.5f);
-    float x = std::round(std::min(pos.x + (viewport->Size.x - total) * 0.5f, right - total));
-    ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
-    if (play.draw("##play", fonts_)) {
+    float x = std::round(std::max(std::min(pos.x + (viewport->Size.x - total) * 0.5f, right - total), leftmost));
+    const auto button = [&](BarButton& drawn, const char* id, const char* tooltip) {
+        ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
+        const bool clicked = drawn.draw(id, fonts_);
+        if (ImGui::IsItemHovered() && drawn.enabled && tooltip != nullptr) {
+            ImGui::SetTooltip("%s", tooltip);
+        }
+        x += drawn.width(fonts_) + buttonGap;
+        return clicked;
+    };
+    if (button(first, "##first-frame", "The first frame (Home)")) {
+        clipView_->toFirst();
+    }
+    if (button(back, "##frame-back", "One frame back (Left arrow)")) {
+        clipView_->step(-1);
+    }
+    if (button(play, "##play", nullptr)) {
         clipView_->togglePlay();
     }
     if (ImGui::IsItemHovered() && play.enabled) {
@@ -1458,12 +1806,54 @@ void App::drawClipSteps(float height, float right) {
                                 : clipView_->ended() ? "Play again from the start (Space)"
                                                      : "Play (Space)");
     }
-    x += play.width(fonts_) + gap;
+    if (button(on, "##frame-on", "One frame on (Right arrow)")) {
+        clipView_->step(1);
+    }
+    if (button(last, "##last-frame", "The last frame (End)")) {
+        clipView_->toLast();
+    }
+    x -= buttonGap;
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    drawList->AddText(fonts_.medium, fontSize, ImVec2(x, textY), play.enabled ? theme::kText : theme::kTextMuted,
-                      time.c_str());
-    x += timeWidth + textGap;
-    drawList->AddText(ImVec2(x, textY), theme::kTextMuted, frame.c_str());
+    if (showTime) {
+        x += gap;
+        drawList->AddText(fonts_.medium, fontSize, ImVec2(x, textY), canPlay ? theme::kText : theme::kTextMuted,
+                          showLength ? time.c_str() : position);
+        x += showLength ? timeWidth : positionWidth;
+    }
+    if (showLabel) {
+        x += textGap;
+        drawList->AddText(ImVec2(x, textY), theme::kTextMuted, "Frame");
+        x += labelWidth;
+    } else {
+        x += textGap;
+    }
+    x += fieldGap;
+
+    // The frame shown; typed over, Enter goes to the frame typed (clamped to the clip). While it is being typed in,
+    // the clip's keys (Space, the arrows, 1 2 3) go to the field instead.
+    ImGui::SetCursorScreenPos(ImVec2(x, pos.y + std::round((height - ImGui::GetFrameHeight()) * 0.5f)));
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (canPlay && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_G)) {
+        ImGui::SetKeyboardFocusHere();
+    }
+    ImGui::BeginDisabled(!canPlay);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, fieldPadding);
+    std::uint64_t typed = clipView_->frame();
+    if (ImGui::InputScalar("##frame", ImGuiDataType_U64, &typed, nullptr, nullptr, "%llu",
+                           ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll |
+                               ImGuiInputTextFlags_CharsDecimal)) {
+        clipView_->goTo(typed);
+    }
+    ImGui::PopStyleVar();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered() && canPlay && !ImGui::IsItemActive()) {
+        ImGui::SetTooltip("Frame %s of %s: type another and press Enter to go there (Ctrl+G)",
+                          formatCount(clipView_->frame()).c_str(), formatCount(frames).c_str());
+    }
+    if (showOf) {
+        x += fieldWidth + fieldGap;
+        drawList->AddText(ImVec2(x, textY), theme::kTextMuted, of.c_str());
+    }
 }
 
 void App::drawReviewChooser() {
@@ -1514,7 +1904,7 @@ void App::drawClips() {
 
     if (clips_.empty()) {
         ImGui::TextUnformatted("No clips yet.");
-        ImGui::TextDisabled("Observe a screen and press Save last %.0f s (%s).", kClipSeconds, kClipHotkeyText);
+        ImGui::TextDisabled("Observe a screen and press Save last %.0f s.", kClipSeconds);
         ImGui::EndPopup();
         return;
     }
@@ -1522,25 +1912,103 @@ void App::drawClips() {
     const float listHeight = std::min(static_cast<float>(clips_.size()) * (tileSize.y + spacing) - spacing,
                                       std::round(ImGui::GetMainViewport()->Size.y * 0.6f));
     ImGui::BeginChild("##clips", ImVec2(tileSize.x + ImGui::GetStyle().ScrollbarSize, listHeight));
+    bool askToRemove = false;
     for (std::size_t i = 0; i < clips_.size(); ++i) {
         const ClipRow& row = clips_[i];
-        // "10.3 s · 1,241 frames · 2,380 looks · Odyssey G61SH".
+        // "10.3 s · 1,241 frames · 2,380 looks", and under it "81.2 MB · Odyssey G61SH" (its size: the user asked,
+        // 2026-11-11, once clips got a key frame every 0.1 s and 80-115 MB a game clip; on one line it pushed the
+        // screen off the tile).
         const ClipInfo& info = row.entry.info;
         char seconds[24];
         std::snprintf(seconds, sizeof(seconds), "%.1f s", info.seconds);
-        std::string detail = std::string(seconds) + "  \xC2\xB7  " + formatCount(info.frames) +
-                             (info.frames == 1 ? " frame" : " frames") + "  \xC2\xB7  " + formatCount(info.looks) +
-                             (info.looks == 1 ? " look" : " looks");
-        if (!info.screen.empty()) {
-            detail += "  \xC2\xB7  " + info.screen;
+        const std::string detail = std::string(seconds) + "  \xC2\xB7  " + formatCount(info.frames) +
+                                   (info.frames == 1 ? " frame" : " frames") + "  \xC2\xB7  " +
+                                   formatCount(info.looks) + (info.looks == 1 ? " look" : " looks");
+        std::string where;
+        if (row.bytes > 0) {
+            char size[24];
+            formatBytes(size, sizeof(size), row.bytes);
+            where = size;
         }
-        if (pictureRow(static_cast<int>(i), tileSize, *thumbnails_, row.entry.folder / kClipPicture, row.when, {detail},
-                       fonts_, dpi)) {
+        if (!info.screen.empty()) {
+            where += (where.empty() ? "" : "  \xC2\xB7  ") + info.screen;
+        }
+        const ImVec2 rowMin = ImGui::GetCursorScreenPos();
+        ImGui::SetNextItemAllowOverlap(); // So the X over it gets its clicks.
+        if (pictureRow(static_cast<int>(i), tileSize, *thumbnails_, row.entry.folder / kClipPicture, row.when,
+                       {detail, where}, fonts_, dpi)) {
             clipToOpen_ = row.entry;
             ImGui::CloseCurrentPopup();
         }
+        const ImVec2 next = ImGui::GetCursorScreenPos();
+        // An X at its top right (the user asked, 2026-11-11: for a clip saved by mistake): to the Recycle Bin, once
+        // confirmed (asked for the same day).
+        if (removeButton(static_cast<int>(i), ImVec2(rowMin.x + tileSize.x, rowMin.y), dpi)) {
+            clipToConfirm_ = row;
+            askToRemove = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Remove this clip (to the Recycle Bin)");
+        }
+        if (i + 1 < clips_.size()) { // Back under the row for the next; after the last, the list ends.
+            ImGui::SetCursorScreenPos(next);
+        }
     }
     ImGui::EndChild();
+    if (askToRemove) { // Opened over the list, which stays open behind it.
+        ImGui::OpenPopup(kRemoveClipPopup);
+    }
+    drawRemoveClip();
+    ImGui::EndPopup();
+}
+
+void App::drawRemoveClip() {
+    // Which clip, and where it goes. Cancel is the default, so Enter or Space alone never removes one.
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + viewport->Size.y * 0.4f), ImGuiCond_Always,
+        ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal(kRemoveClipPopup, nullptr,
+                                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
+                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+        return;
+    }
+    if (!clipToConfirm_) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    const float dpi = dpiScale_;
+    const ClipInfo& info = clipToConfirm_->entry.info;
+    ImGui::PushFont(fonts_.medium, 18.0f);
+    ImGui::TextUnformatted(kRemoveClipPopup);
+    ImGui::PopFont();
+    char size[24];
+    formatBytes(size, sizeof(size), clipToConfirm_->bytes);
+    char about[240];
+    std::snprintf(about, sizeof(about), "Saved %s  \xC2\xB7  %.1f s  \xC2\xB7  %s %s  \xC2\xB7  %s",
+                  clipToConfirm_->when.c_str(), info.seconds, formatCount(info.frames).c_str(),
+                  info.frames == 1 ? "frame" : "frames", size);
+    ImGui::TextDisabled("%s", about);
+    ImGui::Dummy(ImVec2(0.0f, 4.0f * dpi));
+    ImGui::TextUnformatted("It goes to the Recycle Bin, where you can restore it.");
+    ImGui::Dummy(ImVec2(0.0f, 8.0f * dpi));
+
+    ImGui::PushStyleColor(ImGuiCol_Button, theme::kRecord);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(250, 112, 116, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(220, 70, 75, 255));
+    const bool remove = ImGui::Button("Remove");
+    ImGui::PopStyleColor(3);
+    ImGui::SameLine();
+    const bool cancel = ImGui::Button("Cancel");
+    ImGui::SetItemDefaultFocus();
+    if (remove) {
+        clipToRemove_ = clipToConfirm_->entry.folder;
+    }
+    if (remove || cancel || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        clipToConfirm_.reset();
+        ImGui::CloseCurrentPopup();
+    }
     ImGui::EndPopup();
 }
 
@@ -1563,7 +2031,7 @@ void App::drawRecordings() {
 
     if (recordings_.empty()) {
         ImGui::TextUnformatted("No recordings yet.");
-        ImGui::TextDisabled("Observe a screen and press Record (%s).", kHotkeyText);
+        ImGui::TextDisabled("Observe a screen and press Record.");
         ImGui::EndPopup();
         return;
     }
@@ -1583,6 +2051,11 @@ void App::drawRecordings() {
             detail = std::string(duration) + "  \xC2\xB7  ";
         }
         detail += std::to_string(row.images) + (row.images == 1 ? " image" : " images");
+        if (row.bytes > 0) { // All its images together (the user asked, 2026-11-11).
+            char size[24];
+            formatBytes(size, sizeof(size), row.bytes);
+            detail += std::string("  \xC2\xB7  ") + size;
+        }
         if (row.entry.info.kind == RecordKind::Unsure) {
             detail += "  \xC2\xB7  only unsure";
         }
@@ -1714,6 +2187,20 @@ void App::drawObservedScreen() {
     observedImage_->draw(drawList, min, max, rounding, theme::kBackground);
     drawList->PathRect(ImVec2(min.x - 0.5f, min.y - 0.5f), ImVec2(max.x + 0.5f, max.y + 0.5f), rounding + 0.5f);
     drawList->PathStroke(theme::kBorder, ImDrawFlags_Closed, 1.0f);
+    // The game's interface under the characters: they are in the world it covers.
+    if (settings_.showUi && uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+        if (const UiPieces& pieces = uiFinder_->found(); pieces.image > 0) {
+            drawUiPieces(drawList, fonts_.medium, min, max, static_cast<float>(pipeline_.width()),
+                         {pieces.pieces.data(), static_cast<std::size_t>(pieces.count)}, dpiScale_);
+        }
+    }
+    // The ground under them too, as the camera is on the image shown (it follows fewer images: moved on to it).
+    if (groundFollowing_ && groundFinder_->state() == GroundFinder::State::Running) {
+        if (const GroundSeen& seen = groundFinder_->seen(); seen.image > 0) {
+            groundDrawn_ = {true, previewImage_, seen.followed, groundAt(seen.camera, previewMs_)};
+            drawGround(drawList, min, max, static_cast<float>(pipeline_.width()), groundDrawn_.camera, dpiScale_);
+        }
+    }
     if (settings_.showCharacters && recognizer_ && recognizer_->state() == Recognizer::State::Running) {
         drawFound(drawList, min, max);
     }
@@ -1730,13 +2217,45 @@ void App::drawObservedScreen() {
                       "%.0f images/s  \xC2\xB7  %.2f ms latency  \xC2\xB7  %.2f ms work  \xC2\xB7  UI %.0f fps",
                       static_cast<double>(stats.imagesPerSecond), static_cast<double>(stats.latencyAvgMs),
                       static_cast<double>(stats.workAvgMs), static_cast<double>(ImGui::GetIO().Framerate));
-        char detail[128] = {};
+        char detail[512] = {};
+        std::size_t length = 0;
+        const auto add = [&](const char* format, auto... values) {
+            if (length < sizeof(detail)) {
+                const int added = std::snprintf(detail + length, sizeof(detail) - length, format, values...);
+                length = added > 0 ? std::min(length + static_cast<std::size_t>(added), sizeof(detail)) : length;
+            }
+        };
         if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
             const RecognizerStats& found = recognizer_->stats();
-            std::snprintf(detail, sizeof(detail),
-                          "%s: %.0f images/s  \xC2\xB7  %.2f ms each  \xC2\xB7  %.2f ms slowest", kLive.name,
-                          static_cast<double>(found.imagesPerSecond), static_cast<double>(found.workAvgMs),
-                          static_cast<double>(found.workMaxMs));
+            add("%s: %.0f images/s  \xC2\xB7  %.2f ms each  \xC2\xB7  %.2f ms slowest", kLive.name,
+                static_cast<double>(found.imagesPerSecond), static_cast<double>(found.workAvgMs),
+                static_cast<double>(found.workMaxMs));
+            if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+                const SnapperStats& snapped = snapper_->stats();
+                add("  \xC2\xB7  snapped %.0f/s, %.2f ms each, %.2f slowest",
+                    static_cast<double>(snapped.imagesPerSecond), static_cast<double>(snapped.workAvgMs),
+                    static_cast<double>(snapped.workMaxMs));
+            }
+        }
+        if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+            const UiFinderStats& ui = uiFinder_->stats();
+            add("%sUI found %.0f/s, %.2f ms each (finding %.2f), %.2f slowest", length > 0 ? "  \xC2\xB7  " : "",
+                static_cast<double>(ui.imagesPerSecond), static_cast<double>(ui.workAvgMs),
+                static_cast<double>(ui.findAvgMs), static_cast<double>(ui.workMaxMs));
+        }
+        if (groundFollowing_ && groundFinder_->state() == GroundFinder::State::Running) {
+            const GroundFinderStats& ground = groundFinder_->stats();
+            const GroundCamera& camera = groundFinder_->seen().camera;
+            add("%sGround %.0f/s, %.2f ms each (fitting %.2f), fitted %.0f%% (searched %.0f%%), %.0f of %.0f patches "
+                "agree (%.1f px off), pitch %.0f\xC2\xB0 distance %.1f, minimap %.0f%%, turned by it %.0f/s (%.2f ms)",
+                length > 0 ? "  \xC2\xB7  " : "", static_cast<double>(ground.imagesPerSecond),
+                static_cast<double>(ground.workAvgMs), static_cast<double>(ground.fitAvgMs),
+                static_cast<double>(ground.fitted * 100.0f), static_cast<double>(ground.searched * 100.0f),
+                static_cast<double>(ground.agreeing),
+                static_cast<double>(ground.matches), static_cast<double>(ground.missPixels),
+                static_cast<double>(camera.pitch * 57.29578f), static_cast<double>(camera.distance),
+                static_cast<double>(ground.headed * 100.0f), static_cast<double>(ground.headsPerSecond),
+                static_cast<double>(ground.headAvgMs));
         }
         theme::drawLabel(drawList, ImVec2(min.x + inset, max.y - inset), ImVec2(0.0f, 1.0f), text,
                          detail[0] != '\0' ? detail : nullptr);
@@ -1744,44 +2263,40 @@ void App::drawObservedScreen() {
 }
 
 void App::drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
-    const Found& found = recognizer_->found();
-    const std::vector<std::string>& kinds = recognizer_->kinds();
-    const bool showKinds = settings_.showKinds && !kinds.empty();
-    // The "can't tell" kind, for a model that learnt it from the review's answers.
-    const auto unknown = std::find(kinds.begin(), kinds.end(), kUnknownKind);
-    const int unknownKind = unknown != kinds.end() ? static_cast<int>(unknown - kinds.begin()) : -1;
-    const float scale = (max.x - min.x) / static_cast<float>(pipeline_.width());
-    const float thickness = 1.5f * dpiScale_;
-    drawList->PushClipRect(min, max, true);
-    for (int i = found.count - 1; i >= 0; --i) { // Surest last, so it is on top.
-        const Detection& thing = found.things[static_cast<std::size_t>(i)];
-        const ImVec2 boxMin(std::round(min.x + thing.x * scale), std::round(min.y + thing.y * scale));
-        const ImVec2 boxMax(std::round(min.x + (thing.x + thing.width) * scale),
-                            std::round(min.y + (thing.y + thing.height) * scale));
-        // With kinds: the kind's name and colour as the review shows them ("Monster", green); one the review does
-        // not know by its word in model.json. One the model cannot tell the kind of (e.g. far off): "Character?",
-        // silver.
-        const char* name = kLive.yes;
-        const char* unsure = "";
-        ImU32 color = theme::kAccent;
-        if (showKinds && cantTellKind(thing, unknownKind)) {
-            unsure = "?";
-            color = theme::kUnknown;
-        } else if (showKinds && thing.kind < kinds.size()) {
-            name = kinds[thing.kind].c_str();
-            for (const Kind& kind : kLive.kinds) {
-                if (kind.id == kinds[thing.kind]) {
-                    name = kind.name;
-                    color = kind.color;
-                }
+    // The snapper's boxes while it runs (on the newest image), else the recogniser's.
+    const Found* found = &recognizer_->found();
+    if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+        if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+            found = &snapped;
+        }
+    }
+    drawThings(drawList, fonts_.medium, min, max, static_cast<float>(pipeline_.width()),
+               {found->things.data(), static_cast<std::size_t>(found->count)}, recognizer_->kinds(),
+               settings_.showKinds, dpiScale_);
+}
+
+void App::hintGround() {
+    // What is shown now (as drawFound draws it): the own character's box gives the camera's distance, and the
+    // characters and the interface are left out of the ground's motion.
+    std::span<const Tracked> things;
+    int ownKind = -1;
+    if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+        const Found* found = &recognizer_->found();
+        if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+            if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+                found = &snapped;
             }
         }
-        theme::drawBox(drawList, boxMin, boxMax, color, thickness);
-        char tag[48];
-        std::snprintf(tag, sizeof(tag), "%s%s %.0f%%", name, unsure, static_cast<double>(thing.sure * 100.0f));
-        theme::drawTag(drawList, fonts_.medium, boxMin, boxMax, thickness, min, max, tag, color, theme::kBackground);
+        things = {found->things.data(), static_cast<std::size_t>(found->count)};
+        const std::vector<std::string>& kinds = recognizer_->kinds();
+        const auto own = std::find(kinds.begin(), kinds.end(), "own");
+        ownKind = own != kinds.end() ? static_cast<int>(own - kinds.begin()) : -1;
     }
-    drawList->PopClipRect();
+    const UiPieces* pieces = nullptr;
+    if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+        pieces = &uiFinder_->found();
+    }
+    groundFinder_->hint(things, ownKind, pieces);
 }
 
 } // namespace observex
