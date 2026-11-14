@@ -185,6 +185,19 @@ bool readGround(std::string_view line, unsigned long long& image, double& timeMs
     return true;
 }
 
+void appendDepth(std::string& out, unsigned long long image, double timeMs, unsigned long long map) {
+    appendf(out, "depth %llu %s %llu\n", image, ExactNumber(timeMs).text, map);
+}
+
+bool readDepth(std::string_view line, unsigned long long& image, double& timeMs, unsigned long long& map) {
+    std::string_view rest;
+    if (!after(line, "depth", rest)) {
+        return false;
+    }
+    std::istringstream words{std::string(rest)};
+    return static_cast<bool>(words >> image >> timeMs >> map);
+}
+
 void appendNote(std::string& out, double timeMs, std::string_view text) {
     appendf(out, "note %.1f ", timeMs);
     for (const char c : text) {
@@ -205,6 +218,24 @@ bool readNote(std::string_view line, double& timeMs, std::string& text) {
     }
     text = space == std::string_view::npos ? std::string() : std::string(rest.substr(space + 1));
     return true;
+}
+
+void appendLog(std::string& out, double timeMs, const LogLine& line) {
+    appendf(out, "log %.1f ", timeMs);
+    appendLogLine(out, line);
+}
+
+bool readLog(std::string_view line, double& timeMs, LogLine& out) {
+    std::string_view rest;
+    if (!after(line, "log", rest)) {
+        return false;
+    }
+    const std::size_t space = rest.find(' ');
+    if (space == std::string_view::npos) {
+        return false;
+    }
+    std::istringstream words{std::string(rest.substr(0, space))};
+    return static_cast<bool>(words >> timeMs) && readLogLine(rest.substr(space + 1), out);
 }
 
 } // namespace observex

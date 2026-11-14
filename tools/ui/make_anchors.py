@@ -7,6 +7,10 @@ and NAME-mask.pgm (255 where it never changed by more than the video's own noise
 the world showed through). Use frames where the piece stays put and the camera moves, or several places with
 different backgrounds, so the world under it changes. Also writes models/ui/anchors.png to look them over.
 
+A place may end with `unlike FIRST LAST`: frames of the same clip before the piece showed (the cast bar, which shows
+only while casting, over a camera that hardly moves); a pixel within SAME_GREY of what was there then is the world's,
+so it is left out of the mask.
+
     python tools/ui/make_anchors.py [--ui models/ui] [--clips recordings/clips]
 """
 import argparse
@@ -41,22 +45,33 @@ def main():
     ui = pathlib.Path(args.ui)
 
     sizes = {}  # name -> (w, h), in file order
-    cuts = {}  # (clip, first, last) -> [(name, place, x, y)]
+    cuts = {}  # (clip, first, last) -> [(name, place, x, y)]; place ("unlike", n) for place n's frames before
     places = {}  # name -> one slot per place
+    unlikes = {}  # name -> the places that have unlike frames
     for line in (ui / "ui.txt").read_text(encoding="utf-8").splitlines():
         words = line.split()
-        if len(words) < 11 or words[0] != "anchor" or words[5] != "from" or (len(words) - 5) % 6 != 0:
+        if len(words) < 11 or words[0] != "anchor" or words[5] != "from":
             continue
         name, w, h = words[1], int(words[3]), int(words[4])
         sizes[name] = (w, h)
-        for at in range(5, len(words), 6):
+        at = 5
+        while at < len(words):
+            if words[at] != "from" or at + 6 > len(words):
+                raise SystemExit(f"{name}: expected from CLIP FIRST LAST X Y [unlike FIRST LAST]")
             clip = words[at + 1]
             first, last, x, y = map(int, words[at + 2:at + 6])
             place = len(places.setdefault(name, []))
             places[name].append(None)
             cuts.setdefault((clip, first, last), []).append((name, place, x, y))
+            at += 6
+            if at < len(words) and words[at] == "unlike":
+                before_first, before_last = int(words[at + 1]), int(words[at + 2])
+                cuts.setdefault((clip, before_first, before_last), []).append((name, ("unlike", place), x, y))
+                unlikes.setdefault(name, set()).add(place)
+                at += 3
 
     sums = {name: [[0.0, 0.0, 0] for _ in places[name]] for name in sizes}
+    before = {name: {place: [0.0, 0.0, 0] for place in unlikes.get(name, ())} for name in sizes}
     for (clip, first, last), anchors in cuts.items():
         video = cv2.VideoCapture(str(pathlib.Path(args.clips) / clip / "clip.mp4"))
         index = 0
@@ -71,19 +86,24 @@ def main():
             for name, place, x, y in anchors:
                 w, h = sizes[name]
                 part = g[y:y + h, x:x + w]
-                s = sums[name][place]
+                s = before[name][place[1]] if isinstance(place, tuple) else sums[name][place]
                 s[0] = s[0] + part
                 s[1] = s[1] + part * part
                 s[2] += 1
     sheet = []
     for name, (w, h) in sizes.items():
         means, steady, frames = [], np.ones((h, w), bool), 0
-        for total, squares, count in sums[name]:
+        for place, (total, squares, count) in enumerate(sums[name]):
             if count == 0:
                 raise SystemExit(f"{name}: no frames found at one of its places")
             mean = total / count
             std = np.sqrt(np.maximum(squares / count - mean * mean, 0.0))
             steady &= std <= STEADY
+            if place in before[name]:
+                total_before, _, count_before = before[name][place]
+                if count_before == 0:
+                    raise SystemExit(f"{name}: no unlike frames found at one of its places")
+                steady &= np.abs(mean - total_before / count_before) > SAME_GREY
             means.append(mean)
             frames += count
         if len(means) > 1:

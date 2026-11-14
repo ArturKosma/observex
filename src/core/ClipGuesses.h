@@ -3,6 +3,7 @@
 #include "core/Detection.h"
 #include "core/Ground.h"
 #include "core/Heuristics.h"
+#include "core/Log.h"
 
 #include <atomic>
 #include <cstddef>
@@ -56,6 +57,13 @@ struct ClipGroundLine {
     GroundCamera camera;             // As drawn (its timeMs: timeMs); not known: nothing drawn from then on.
 };
 
+// The depth map the Show flag Depth drew over one screen image live (since 2026-11-12; core/ClipLines' depth line).
+struct ClipDepthLine {
+    unsigned long long image = 0; // The screen image it was drawn over,
+    double timeMs = 0.0;          // which the screen showed then.
+    unsigned long long map = 0;   // The depth finder's map of this screen image (in depth.bin); 0: nothing drawn.
+};
+
 struct ClipText {
     std::vector<std::string> kinds; // The model's kinds by number, e.g. "monster" (from the header); empty: none.
     std::vector<double> frameMs;    // frameMs[n - 1]: when the screen showed the image of video frame n (or a moment
@@ -65,6 +73,10 @@ struct ClipText {
     std::vector<ClipSnap> snaps;    // Likewise; none before 2026-11-11 or without the snapper.
     std::vector<ClipNote> notes;
     std::vector<ClipGroundLine> grounds; // In time order; none before 2026-11-12.
+    std::vector<ClipDepthLine> depths;   // Likewise.
+    // observex's log lines made while it was recorded (since 2026-11-13), and when, in time order.
+    std::vector<LogLine> logs;
+    std::vector<double> logMs;
 };
 
 // Skips the lines it does not know and malformed ones.
@@ -76,6 +88,9 @@ bool readKindNames(std::string_view line, std::vector<std::string>& kinds);
 // The grid the app drew live when the screen showed the image of `timeMs` (Recorded's ground): the last line at or
 // before it (the last of those at the same time); not known before the first or where nothing was drawn.
 GroundCamera recordedGround(std::span<const ClipGroundLine> lines, double timeMs);
+// The depth map the app drew live when the screen showed the image of `timeMs` (Recorded's depth): the map of the last
+// line at or before it; 0 before the first or where nothing was drawn.
+unsigned long long recordedDepth(std::span<const ClipDepthLine> lines, double timeMs);
 // The screen images the live ground finder followed, in order: the ones following it again over the clip (Today's
 // ground) follows, so it does what live did. Empty for a clip without ground lines.
 std::vector<unsigned long long> followedImages(const ClipText& clip);

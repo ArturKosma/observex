@@ -1,5 +1,7 @@
 #include "heuristics/GroundMotion.h"
 
+#include "heuristics/DepthTilt.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -530,6 +532,57 @@ int GroundMotion::find(const GreyView& image, const GroundCamera& camera, double
     return static_cast<int>(out.size());
 }
 
+GroundMotion::Turned GroundMotion::findTurn(const GreyView& image, const GroundCamera& camera, double timeMs,
+                                            float stopped, float onward, float reach) const {
+    if (learnedCount_ == 0 || !camera.known) {
+        return {};
+    }
+    // Tilted on along the camera's speed, but not slid: the slide a blurred follow foretold moved a camera that stood
+    // still 0.7 degrees after a turn stopped (clip 2026-11-12_18-58-01, frames 594 to 601).
+    const auto gapMs = static_cast<float>(timeMs - learnedMs_);
+    Motion motion{onward, 0.0f, 0.0f, learnedCamera_.pitch,
+                  std::clamp(learnedCamera_.pitch + camera.pitchSpeed * gapMs, kLowestTilt, kHighestPitch),
+                  std::log(camera.distance / learnedCamera_.distance)};
+    const auto scored = [&](float turn) {
+        motion.turn = turn;
+        return score(image, camera, motion);
+    };
+    // Steps over the reach, then fine steps round the best, then a parabola through the best fine one and its two.
+    Turned best{onward, -2.0f};
+    const float lowest = std::min(stopped, onward) - reach;
+    const int steps = static_cast<int>(std::ceil((std::fabs(onward - stopped) + 2.0f * reach) / kTurnStep));
+    for (int i = 0; i <= steps; ++i) {
+        const float turn = lowest + kTurnStep * static_cast<float>(i);
+        if (const float match = scored(turn); match > best.match) {
+            best = {turn, match};
+        }
+    }
+    if (best.match <= -2.0f) {
+        return {onward, -1.0f};
+    }
+    constexpr int kFine = static_cast<int>(kTurnStep / kFineTurnStep + 0.5f);
+    std::array<float, 2 * kFine + 1> fine{};
+    int bestAt = kFine;
+    const float middle = best.turn;
+    for (int i = -kFine; i <= kFine; ++i) {
+        const auto at = static_cast<std::size_t>(i + kFine);
+        fine[at] = i == 0 ? best.match : scored(middle + kFineTurnStep * static_cast<float>(i));
+        if (fine[at] > fine[static_cast<std::size_t>(bestAt)]) {
+            bestAt = static_cast<int>(at);
+        }
+    }
+    best = {middle + kFineTurnStep * static_cast<float>(bestAt - kFine), fine[static_cast<std::size_t>(bestAt)]};
+    if (bestAt > 0 && bestAt < 2 * kFine) {
+        const float left = fine[static_cast<std::size_t>(bestAt - 1)];
+        const float right = fine[static_cast<std::size_t>(bestAt + 1)];
+        if (const float curve = left - 2.0f * best.match + right; curve < -1e-6f) {
+            best.turn += kFineTurnStep * std::clamp(0.5f * (left - right) / curve, -0.5f, 0.5f);
+        }
+    }
+    best.match = std::max(best.match, 0.0f);
+    return best;
+}
+
 namespace {
 
 std::span<const GreyArea> spanOf(const GreyArea* areas, int count) {
@@ -545,6 +598,8 @@ void GroundFollower::begin(double timeMs, int width, int height, const GroundHin
     } else {
         fit_.unseen(timeMs);
     }
+    const std::span<const GreyArea> avoid = spanOf(hints.avoid, hints.avoidCount);
+    avoid_.assign(avoid.begin(), avoid.end());
     motion_.place(fit_.camera(), width, height, spanOf(hints.avoid, hints.avoidCount));
     coneAreaCount_ = static_cast<std::size_t>(cone_.areas(timeMs, spanOf(hints.windows, hints.windowCount),
                                                           coneAreas_.data(), static_cast<int>(coneAreas_.size())));
@@ -585,19 +640,31 @@ bool GroundFollower::end(const GreyView& image) {
     bool fitted = false;
     learnedBefore_ = motion_.learnedCount();
     followed_ = motion_.learned();
-    // How far the camera turned since the image the patches were learned on, if the minimap showed it on both.
+    // How far the camera turned since the image the patches were learned on, if the minimap showed it on both; or
+    // on as the ground turned on the images between (head()), which the cone, redrawn only every 25 to 42 ms, lags in
+    // a fast turn (searched only kKnownTurnReach either way of a stale cone's turn, the ground was lost: clip
+    // 2026-11-11_22-10-08, 0.47 and 0.93 s), within the cone's reach of it as there.
+    constexpr float kPi = 3.14159265f;
     const bool headed = cone_.read(image.levels[0]); // Reads only the parts fullAreas() gave.
+    noteCone(headed, timeMs_);
+    const float coneLag = std::fabs(coneSpeed_) * static_cast<float>(kConeLagMs);
     std::optional<float> turn;
-    if (headed && learnedHeaded_) {
-        constexpr float kPi = 3.14159265f;
-        turn = std::remainder(cone_.heading() - learnedHeading_, 2.0f * kPi);
+    if (headed) {
+        turn = coneTurn(fit_.camera());
+    }
+    const bool onScreen = lastByScreen_ && lastTurnMs_ > motion_.learnedMs();
+    if (onScreen) {
+        const float onward = lastTurn_ + lastTurnSpeed_ * static_cast<float>(timeMs_ - lastTurnMs_);
+        turn = turn ? std::clamp(onward, *turn - kConeSlack - coneLag, *turn + kConeSlack + coneLag) : onward;
     }
     if (followed_) {
         motion_.find(image, fit_.camera(), timeMs_, turn, matches_);
+        const bool pitchHeld =
+            depthTaken_ && timeMs_ - depthSaidMs_ < kDepthHeldMs && depthWeight_ >= kDepthHeldWeight;
         const GroundFit::Start found{motion_.searchFirstPitch(),    motion_.searchPitch(),
                                      motion_.searchFirstDistance(), motion_.searchDistance(),
                                      turn.has_value(),              turn.value_or(0.0f),
-                                     motion_.farPitch().has_value()};
+                                     motion_.farPitch().has_value(), pitchHeld};
         fitted = fit_.motion(matches_, motion_.learnedMs(), timeMs_, found);
         const GroundFit::Motion how = fit_.lastMotion();
         if ((how == GroundFit::Motion::FewMatches || how == GroundFit::Motion::FewAgreeing) &&
@@ -608,6 +675,9 @@ bool GroundFollower::end(const GreyView& image) {
             }
             fit_.searched(motion_.searchTurn(), motion_.searchSlideRight(), motion_.searchSlideAway(), searched,
                           motion_.learnedMs(), timeMs_);
+        }
+        if (!fitted && fit_.lastMotion() != GroundFit::Motion::Searched && turn) {
+            fit_.turned(*turn, onScreen ? lastTurnSpeed_ : 0.0f, timeMs_); // As the images between, or the cone, said.
         }
         if (fitted || (fit_.lastMotion() == GroundFit::Motion::Searched &&
                        motion_.searchMatch() >= GroundMotion::kSureSearch)) {
@@ -622,13 +692,25 @@ bool GroundFollower::end(const GreyView& image) {
         matches_.clear();
     }
     if (headed) {
-        fit_.head(cone_.heading(), fitted || (followed_ && fit_.lastMotion() == GroundFit::Motion::Searched));
+        // Towards the cone only beyond how far it may lag (none while it holds still).
+        const float yaw = fit_.camera().yaw;
+        const float off = std::remainder(cone_.heading() - yaw, 2.0f * kPi);
+        const float beyond = std::copysign(std::max(std::fabs(off) - coneLag, 0.0f), off);
+        fit_.head(yaw + beyond, fitted || (followed_ && fit_.lastMotion() == GroundFit::Motion::Searched));
     }
     motion_.learn(image, fit_.camera(), timeMs_);
     learnedHeaded_ = headed;
     learnedHeading_ = cone_.heading();
+    learnedHeld_ = headed && coneHeld(timeMs_);
+    held_ = false;
     between_ = false;
+    lastTurn_ = 0.0f;
+    lastTurnMs_ = timeMs_;
+    lastTurnSpeed_ = fit_.camera().yawSpeed;
+    lastByScreen_ = false;
     fitted_ = fitted;
+    pullDepth(timeMs_);
+    notePitch(timeMs_);
     return fitted;
 }
 
@@ -638,17 +720,180 @@ int GroundFollower::headAreas(double timeMs, const GroundHints& hints, GreyArea*
 }
 
 bool GroundFollower::head(const GreyView& image) {
-    constexpr float kPi = 3.14159265f;
     const GroundCamera& followed = fit_.camera();
     between_ = true;
     betweenCamera_ = groundAt(followed, headMs_);
+    pullDepth(headMs_);
+    notePitch(headMs_); // Tilted on along the follow's speed, whatever turns it.
     const bool seen = cone_.read(image.levels[0]); // Reads only the parts headAreas() gave (none: nothing).
-    if (seen && learnedHeaded_ && followed.known) {
-        // Turned as far as the cone, and held there: not on along the follow's speed, which goes on after a turn stops.
-        betweenCamera_.yaw = followed.yaw + std::remainder(cone_.heading() - learnedHeading_, 2.0f * kPi);
-        betweenCamera_.yawSpeed = 0.0f;
+    if (!followed.known) {
+        return false;
     }
-    return seen;
+    const double sinceMs = headMs_ - lastTurnMs_;
+    const GroundMotion::Turned turned = motion_.findTurn(
+        image, followed, headMs_, lastTurn_, lastTurn_ + lastTurnSpeed_ * static_cast<float>(sinceMs), kHeadTurnReach);
+    noteCone(seen, headMs_);
+    const bool byScreen = turned.match >= GroundMotion::kMinSearch;
+    float turn = 0.0f;
+    float speed = 0.0f;
+    const float toCone = coneTurn(followed);
+    if (byScreen) {
+        turn = turned.turn;
+        if (seen && coneHeld(headMs_)) {
+            if (!held_) {
+                held_ = true;
+                heldTurn_ = lastTurn_;
+            }
+            turn = std::clamp(turn, heldTurn_ - kConeSlack, heldTurn_ + kConeSlack);
+        } else if (seen) {
+            held_ = false;
+            const float lag = kConeSlack + std::fabs(coneSpeed_) * static_cast<float>(kConeLagMs);
+            turn = std::clamp(turn, toCone - lag, toCone + lag);
+        } else {
+            held_ = false;
+        }
+        speed = sinceMs > 0.0 ? static_cast<float>((turn - lastTurn_) / sinceMs) : lastTurnSpeed_;
+    } else if (seen) {
+        // As far as the cone, and held there: not on along the follow's speed, which goes on after a turn stops.
+        turn = toCone;
+        held_ = false;
+    } else {
+        return false; // On along the follow's speeds.
+    }
+    betweenCamera_.yaw = followed.yaw + turn;
+    betweenCamera_.yawSpeed = speed;
+    lastTurn_ = turn;
+    lastTurnMs_ = headMs_;
+    lastTurnSpeed_ = speed;
+    lastByScreen_ = byScreen;
+    return byScreen;
+}
+
+GroundDepthNote GroundFollower::depth(const DepthInput& map, double timeMs) {
+    GroundDepthNote note;
+    const GroundCamera& camera = fit_.camera();
+    if (!camera.known) {
+        return note;
+    }
+    const DepthLine line = measureDepthLine(map, avoid_);
+    if (!line.known) {
+        return note;
+    }
+    note.straight = line.straight;
+    // The camera's lens on the map's screen (the same as the follower's but for a test's).
+    const float scale = static_cast<float>(map.screenHeight) / (2.0f * camera.middleY);
+    note.seen = std::atan((camera.middleY * scale - line.zeroRow) / (camera.focal * scale));
+    const DepthPitch said = depthPitch(note.seen);
+    note.pitch = said.pitch;
+    const std::optional<float> then = pitchAt(timeMs);
+    if (line.straight > kDepthStraight || !then) {
+        return note;
+    }
+    note.measured = true;
+    note.then = *then;
+    note.pulled = said.pitch - *then;
+    depthSaidMs_ = timeMs;
+    depthWeight_ = said.weight;
+    if (!camera.pitchMeasured && !depthTaken_) {
+        tiltAll(note.pulled);
+        depthLeft_ = 0.0f;
+    } else {
+        depthLeft_ = note.pulled;
+        depthRate_ = std::max(said.weight, kDepthLeast) / kDepthMs;
+    }
+    depthTaken_ = true;
+    return note;
+}
+
+void GroundFollower::pullDepth(double timeMs) {
+    const double sinceMs = std::max(timeMs - depthMs_, 0.0);
+    depthMs_ = timeMs;
+    if (depthLeft_ == 0.0f) {
+        return;
+    }
+    const float by = depthLeft_ * (1.0f - std::exp(-depthRate_ * static_cast<float>(sinceMs)));
+    depthLeft_ -= by;
+    tiltAll(by);
+}
+
+void GroundFollower::tiltAll(float by) {
+    fit_.tilt(by);
+    motion_.tilt(by);
+    if (between_) {
+        betweenCamera_.pitch += by;
+    }
+    for (Pitched& kept : pitched_) {
+        kept.pitch += by;
+    }
+}
+
+void GroundFollower::notePitch(double timeMs) {
+    const GroundCamera& camera = between_ ? betweenCamera_ : fit_.camera();
+    if (!camera.known) {
+        pitchedCount_ = 0;
+        pitchedNext_ = 0;
+        depthTaken_ = false;
+        depthLeft_ = 0.0f;
+        return;
+    }
+    pitched_[static_cast<std::size_t>((pitchedNext_ + pitchedCount_) % kPitched)] = {timeMs, camera.pitch};
+    if (pitchedCount_ < kPitched) {
+        ++pitchedCount_;
+    } else {
+        pitchedNext_ = (pitchedNext_ + 1) % kPitched;
+    }
+}
+
+std::optional<float> GroundFollower::pitchAt(double timeMs) const {
+    if (pitchedCount_ == 0) {
+        return std::nullopt;
+    }
+    const auto at = [&](int i) -> const Pitched& {
+        return pitched_[static_cast<std::size_t>((pitchedNext_ + i) % kPitched)];
+    };
+    if (timeMs < at(0).timeMs) {
+        return std::nullopt;
+    }
+    for (int i = 1; i < pitchedCount_; ++i) {
+        const Pitched& before = at(i - 1);
+        const Pitched& after = at(i);
+        if (timeMs <= after.timeMs) {
+            const double gap = after.timeMs - before.timeMs;
+            const double share = gap > 0.0 ? (timeMs - before.timeMs) / gap : 1.0;
+            return before.pitch + static_cast<float>(share) * (after.pitch - before.pitch);
+        }
+    }
+    return at(pitchedCount_ - 1).pitch; // Newer than all kept: as on the newest.
+}
+
+void GroundFollower::noteCone(bool seen, double timeMs) {
+    constexpr float kPi = 3.14159265f;
+    if (!seen) {
+        return;
+    }
+    const float heading = cone_.heading();
+    if (!coneKnown_) {
+        coneKnown_ = true;
+        coneMs_ = timeMs;
+        coneHeading_ = heading;
+        coneSpeed_ = 0.0f;
+        return;
+    }
+    const double sinceMs = timeMs - coneMs_;
+    if (const float moved = std::remainder(heading - coneHeading_, 2.0f * kPi); std::fabs(moved) >= kConeMoved) {
+        // After it held still, the turn began within its last redraw.
+        coneSpeed_ = static_cast<float>(moved / (sinceMs > kConeGapMs ? kConeRedrawMs : std::max(sinceMs, kConeRedrawMs)));
+        coneMs_ = timeMs;
+        coneHeading_ = heading;
+    } else if (sinceMs > kConeGapMs) {
+        coneSpeed_ = 0.0f; // Held still since.
+    }
+}
+
+float GroundFollower::coneTurn(const GroundCamera& followed) const {
+    constexpr float kPi = 3.14159265f;
+    const float from = learnedHeaded_ && learnedHeld_ ? learnedHeading_ : followed.yaw;
+    return std::remainder(cone_.heading() - from, 2.0f * kPi);
 }
 
 void GroundFollower::clear() {
@@ -657,8 +902,18 @@ void GroundFollower::clear() {
     cone_.clear();
     coneAreaCount_ = 0;
     learnedHeaded_ = false;
+    learnedHeld_ = false;
+    held_ = false;
     between_ = false;
+    coneKnown_ = false;
+    coneSpeed_ = 0.0f;
     matches_.clear();
+    avoid_.clear();
+    pitchedCount_ = 0;
+    pitchedNext_ = 0;
+    depthTaken_ = false;
+    depthLeft_ = 0.0f;
+    depthMs_ = 0.0;
     lostSinceMs_ = -1.0;
     followed_ = false;
     fitted_ = false;

@@ -27,6 +27,8 @@ enum class Icon : std::uint8_t {
     ToStart,     // A bar, then two triangles pointing left at it: the first frame.
     ToEnd,       // Two triangles pointing right at a bar: the last frame.
     Guesses,     // A box's four corners: what is drawn over a clip.
+    Plus,        // Add something.
+    Folder,      // A folder's outline with its tab: open a saved file (the State tile's Load).
 };
 
 // A top-bar button that plainly looks clickable: a rounded border, an icon, then an optional muted caption,
@@ -50,5 +52,10 @@ struct BarButton {
     // Draws the button at the cursor. Returns true when clicked. `id` must be unique in the window.
     bool draw(const char* id, const theme::Fonts& fonts) const;
 };
+
+// A tab in the strip under the top bar, showing or hiding its tile (the user asked, 2026-11-12: Live, State and Stats):
+// `text` in medium weight, muted while off, underlined in the accent colour while on. Drawn at the cursor, `height`
+// high. Returns true when clicked.
+bool drawTab(const char* id, const char* text, bool on, float height, const theme::Fonts& fonts);
 
 } // namespace observex

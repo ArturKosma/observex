@@ -32,8 +32,12 @@ struct GroundFinderStats {
     float agreeing = 0.0f;        // of them agreeing with the camera fitted,
     float missPixels = 0.0f;      // how far off those were.
     float headed = 0.0f;          // Of the images, the share the minimap's cone was seen on (heuristics/MinimapCone).
-    float headsPerSecond = 0.0f;  // Images between them it only read the cone on (Grounding::head),
+    float headsPerSecond = 0.0f;  // Images between them it only turned the camera on (Grounding::head),
     float headAvgMs = 0.0f;       // taking this long each.
+    float depthPerSecond = 0.0f;  // Depth maps given the follower (Grounding::depth),
+    float depthMeasured = 0.0f;   // of them the share that said the pitch,
+    float depthOffDegrees = 0.0f; // how far the camera's was from it on average,
+    float depthAvgMs = 0.0f;      // and how long each took.
 };
 
 // The camera as the ground finder knows it on the newest image it took.
@@ -51,9 +55,9 @@ double groundMs(std::int64_t qpc);
 // follows the camera, the first step of the depth plan). kImagesPerSecond: a camera turn moves the ground 20-60
 // pixels between them, within the patches' reach; more would only cost more. Each goes grey on the GPU
 // (engine/GreyMaker), and only its quarter and eighth sizes and the minimap's cone (60 x 60 full-size pixels,
-// heuristics/MinimapCone) come back. On every image between them only the cone comes back, and the camera turns with it
-// (Grounding::head): at 15 a second alone the grid stood still for the first 75 ms of a turn and went on turning 75 ms
-// after it stopped (clip 2026-11-12_18-58-01, frames 561 to 604). The following itself (core/Ground's Grounding) is
+// heuristics/MinimapCone) come back. On every image between them only the eighth size and the cone come back, and the
+// camera turns as the ground did (Grounding::head): at 15 a second alone the grid stood still for the first 75 ms of a
+// turn and went on turning 75 ms after it stopped (clip 2026-11-12_18-58-01, frames 561 to 604). The following itself (core/Ground's Grounding) is
 // today's observex_heuristics.dll's, made again whenever the app loads a rebuilt one (HeuristicsSource::version), so a
 // change to it shows without closing the app.
 //
@@ -85,8 +89,10 @@ public:
     const std::string& error() const { return error_; } // Valid once state() is Failed.
 
     // For one writer thread (the UI): what is on the screen now: the things shown (the model's kind `ownKind` being
-    // the own character's; -1: none) and the interface's pieces (`ui`, null: not known).
-    void hint(std::span<const Tracked> things, int ownKind, const UiPieces* ui);
+    // the own character's; -1: none), the interface's pieces (`ui`, null: not known) and the depth finder's newest
+    // map (null: none; engine/DepthFinder::made), which tilts the camera (Grounding::depth) once, before the next image.
+    void hint(std::span<const Tracked> things, int ownKind, const UiPieces* ui,
+              std::shared_ptr<const DepthMade> depth = nullptr);
     // Forgets the camera, e.g. when the Show flag goes on again.
     void restart() { restart_.store(true, std::memory_order_relaxed); }
 
@@ -105,6 +111,7 @@ private:
         std::array<GreyArea, kMaxAvoid> avoid{};
         int windowCount = 0; // The interface's pieces alone (the minimap among them).
         std::array<GreyArea, UiPieces::kMax> windows{};
+        std::shared_ptr<const DepthMade> depth;
     };
 
     void run(std::stop_token stop);

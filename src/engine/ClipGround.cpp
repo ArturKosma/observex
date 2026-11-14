@@ -1,6 +1,7 @@
 #include "engine/ClipGround.h"
 
 #include "engine/ClipPlayer.h"
+#include "engine/DepthStore.h"
 #include "engine/GreyMaker.h"
 #include "engine/GroundFinder.h"
 
@@ -8,7 +9,10 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <filesystem>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace observex {
 
@@ -54,10 +58,48 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
     std::vector<GreyArea> windows;
     std::array<GreyArea, 8> full{};
     const int firstLevel = follower.firstLevel();
-    const GreyView nothingRead{};
     std::vector<GroundCamera> cameras;
     Stats counted;
     double nextMs = -1e300;
+    // The depth maps made live, in image order, each with its image's time; given the follower before the frame after
+    // its image (none on a clip saved without them).
+    std::vector<DepthRecord> depths;
+    if (std::error_code error; std::filesystem::exists(video.parent_path() / kClipDepth, error)) {
+        depths = readDepthFile(video.parent_path() / kClipDepth);
+    }
+    std::sort(depths.begin(), depths.end(), [](const DepthRecord& a, const DepthRecord& b) { return a.image < b.image; });
+    std::unordered_map<unsigned long long, double> imageMs;
+    for (std::size_t i = 0; i < clip.frameImage.size() && i < clip.frameMs.size(); ++i) {
+        imageMs.try_emplace(clip.frameImage[i], clip.frameMs[i]);
+    }
+    std::size_t nextDepth = 0;
+    DepthPacker packer;
+    std::vector<std::uint16_t> unpacked;
+    const auto giveDepths = [&](unsigned long long image) {
+        for (; nextDepth < depths.size() && depths[nextDepth].image < image; ++nextDepth) {
+            const DepthRecord& record = depths[nextDepth];
+            const auto at = imageMs.find(record.image);
+            if (at == imageMs.end() || !packer.unpackMap(record, unpacked)) {
+                continue;
+            }
+            DepthInput input;
+            input.map = unpacked.data();
+            input.width = record.width;
+            input.height = record.height;
+            input.screenWidth = record.screenWidth;
+            input.screenHeight = record.screenHeight;
+            input.ignore = record.ignore.data();
+            input.ignoreCount = static_cast<int>(record.ignore.size());
+            const GroundDepthNote note = follower.depth(input, at->second);
+            ++counted.depths;
+            counted.depthsMeasured += note.measured ? 1 : 0;
+            if (notes) {
+                counted.depthNotes.push_back({at->second, note});
+            }
+        }
+    };
+
+
     double nextUiMs = -1e300;
     const std::size_t frames = reader.times().size();
     ClipReader::Frame frame;
@@ -67,6 +109,9 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
         }
         const std::size_t index = static_cast<std::size_t>(frame.number) - 1;
         const double timeMs = index < clip.frameMs.size() ? clip.frameMs[index] : frame.seconds * 1000.0;
+        if (index < clip.frameImage.size()) {
+            giveDepths(clip.frameImage[index]);
+        }
         bool due = false;
         if (!followed.empty()) {
             const unsigned long long image = index < clip.frameImage.size() ? clip.frameImage[index] : 0;
@@ -79,26 +124,28 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
             nextMs = std::max(nextMs + kGapMs, timeMs);
         }
         if (!due) {
-            // Between follows: only the minimap's cone, as live (engine/GroundFinder).
+            // Between follows: only the eighth size and the minimap's cone, as live (engine/GroundFinder).
+            const auto headStart = std::chrono::steady_clock::now();
             GroundHints hints;
             hints.windows = windows.data();
             hints.windowCount = static_cast<int>(windows.size());
             const int count = follower.headAreas(timeMs, hints, full.data(), static_cast<int>(full.size()));
-            const GreyView* grey = &nothingRead;
+            context->CopySubresourceRegion(greys.input(), 0, 0, 0, 0, frame.texture, frame.subresource, nullptr);
+            greys.make(context.Get(), frame.number);
             if (count > 0) {
-                context->CopySubresourceRegion(greys.input(), 0, 0, 0, 0, frame.texture, frame.subresource, nullptr);
-                greys.make(context.Get(), frame.number);
                 greys.read(context.Get(), frame.number, {full.data(), static_cast<std::size_t>(count)}, 1);
-                greys.wait(context.Get());
-                grey = greys.find(frame.number);
             }
-            if (grey != nullptr) {
+            greys.read(context.Get(), frame.number, {&whole, 1}, GreyView::kLevels, follower.headFirstLevel());
+            greys.wait(context.Get());
+            if (const GreyView* grey = greys.find(frame.number)) {
                 ++counted.heads;
-                counted.headsSeen += follower.head(*grey) ? 1 : 0;
+                counted.headsTurned += follower.head(*grey) ? 1 : 0;
                 GroundCamera camera = follower.camera();
                 camera.timeMs = timeMs;
                 cameras.push_back(camera);
             }
+            counted.headMs +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - headStart).count();
             continue;
         }
         const auto start = std::chrono::steady_clock::now();
@@ -186,6 +233,9 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
         if (counted.images > 0) {
             stats->matches /= counted.images;
             stats->workMs /= counted.images;
+        }
+        if (counted.heads > 0) {
+            stats->headMs /= counted.heads;
         }
         if (counted.fitted > 0) {
             stats->agreeing /= counted.fitted;

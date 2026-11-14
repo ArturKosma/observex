@@ -3,6 +3,7 @@
 #include "core/Detection.h"
 #include "core/Ground.h"
 #include "core/Heuristics.h"
+#include "core/Log.h"
 
 #include <span>
 #include <string>
@@ -43,7 +44,13 @@ namespace observex {
 //                            seen live): the camera drawn (core/Ground's GroundCamera, already moved on to the image:
 //                            groundAt), from the ground finder's camera on image FOLLOWED. KNOWN 0: nothing drawn from
 //                            then on (the flag off, the camera not known, or the live view not shown).
+//   depth IMAGE TIME MAP     the depth map the Show flag Depth drew over screen image IMAGE, which the screen showed at
+//                            TIME (since 2026-11-12, the user asked: a clip's Recorded shows the depth exactly as it
+//                            was seen live): the depth finder's map of screen image MAP, kept in the clip's depth.bin
+//                            (engine/DepthStore) as shown. MAP 0: nothing drawn from then on.
 //   note TIME TEXT           something the app did then, e.g. "recording started" or "mark 2".
+//   log TIME WHEN  TEXT      a line of observex's log made then (since 2026-11-13, the user asked: the last 10 s keep
+//                            the log too; core/Log): its local time and text, as the log file has them.
 
 void appendFrame(std::string& out, unsigned frame, unsigned long long image, double timeMs);
 bool readFrame(std::string_view line, unsigned& frame, unsigned long long& image, double& timeMs);
@@ -70,8 +77,14 @@ void appendGround(std::string& out, unsigned long long image, double timeMs, uns
 bool readGround(std::string_view line, unsigned long long& image, double& timeMs, unsigned long long& followed,
                 GroundCamera& camera);
 
+void appendDepth(std::string& out, unsigned long long image, double timeMs, unsigned long long map);
+bool readDepth(std::string_view line, unsigned long long& image, double& timeMs, unsigned long long& map);
+
 // Line ends in `text` become spaces, so the note stays one line.
 void appendNote(std::string& out, double timeMs, std::string_view text);
 bool readNote(std::string_view line, double& timeMs, std::string& text);
+
+void appendLog(std::string& out, double timeMs, const LogLine& line);
+bool readLog(std::string_view line, double& timeMs, LogLine& out);
 
 } // namespace observex

@@ -221,6 +221,32 @@ void drawIcon(ImDrawList* drawList, Icon icon, ImVec2 centre, ImU32 color, const
         }
         break;
     }
+    case Icon::Plus: {
+        const float half = std::round(5.5f * dpi);
+        drawList->AddLine(ImVec2(centre.x - half, centre.y), ImVec2(centre.x + half, centre.y), color, l.stroke);
+        drawList->AddLine(ImVec2(centre.x, centre.y - half), ImVec2(centre.x, centre.y + half), color, l.stroke);
+        break;
+    }
+    case Icon::Folder: {
+        // Its outline from the bottom left, up, along the tab and its slope, then round; the front flap's line.
+        const float halfWidth = std::round(8.0f * dpi);
+        const float halfHeight = std::round(6.0f * dpi);
+        const float left = centre.x - halfWidth;
+        const float right = centre.x + halfWidth;
+        const float top = centre.y - halfHeight;
+        const float bottom = centre.y + halfHeight;
+        const float tab = std::round(2.0f * dpi);
+        drawList->PathLineTo(ImVec2(left, bottom));
+        drawList->PathLineTo(ImVec2(left, top));
+        drawList->PathLineTo(ImVec2(left + std::round(5.0f * dpi), top));
+        drawList->PathLineTo(ImVec2(left + std::round(5.0f * dpi) + tab, top + tab));
+        drawList->PathLineTo(ImVec2(right, top + tab));
+        drawList->PathLineTo(ImVec2(right, bottom));
+        drawList->PathStroke(color, ImDrawFlags_Closed, l.stroke);
+        drawList->AddLine(ImVec2(left, top + tab + std::round(3.0f * dpi)),
+                          ImVec2(right, top + tab + std::round(3.0f * dpi)), color, l.stroke);
+        break;
+    }
     case Icon::None:
         break;
     }
@@ -327,6 +353,34 @@ bool BarButton::draw(const char* id, const theme::Fonts& fonts) const {
         drawList->PathLineTo(ImVec2(x + l.arrowWidth * 0.5f, middle + tip * 0.5f));
         drawList->PathLineTo(ImVec2(x + l.arrowWidth, middle - tip * 0.5f));
         drawList->PathStroke(lit ? theme::kText : theme::kTextMuted, 0, l.stroke);
+    }
+    return clicked;
+}
+
+bool drawTab(const char* id, const char* text, bool on, float height, const theme::Fonts& fonts) {
+    const Layout l = layout();
+    const float padding = std::round(14.0f * l.dpi);
+    const float width = std::round(textWidth(fonts.medium, text) + padding * 2.0f);
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    const ImVec2 max = ImGui::GetItemRectMax();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    if (hovered) {
+        drawList->AddRectFilled(ImVec2(min.x, min.y + std::round(6.0f * l.dpi)), ImVec2(max.x, max.y - 1.0f),
+                                theme::kSurfaceHover, 6.0f * l.dpi, ImDrawFlags_RoundCornersTop);
+    }
+    const float fontSize = ImGui::GetFontSize();
+    const float textY = std::round((min.y + max.y) * 0.5f - fontSize * 0.5f + 1.0f * l.dpi);
+    drawList->AddText(fonts.medium, fontSize, ImVec2(min.x + padding, textY),
+                      on || hovered ? theme::kText : theme::kTextMuted, text);
+    if (on) {
+        const float thickness = std::round(2.0f * l.dpi);
+        drawList->AddRectFilled(ImVec2(min.x + std::round(padding * 0.5f), max.y - thickness),
+                                ImVec2(max.x - std::round(padding * 0.5f), max.y), theme::kAccent);
     }
     return clicked;
 }

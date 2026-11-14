@@ -3,10 +3,14 @@ build/
 out/
 /observex.exe
 /observex_heuristics.dll
+/observex_stats.dll
 
 # The app's settings and recordings (screen images, gigabytes per hour)
 /observex.cfg
 /recordings/
+# The profiles (state trees and skills, saved on every change) and the log
+/brains/
+/observex.log
 
 # IDEs
 .vs/

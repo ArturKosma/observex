@@ -3,8 +3,10 @@
 #include "core/Detection.h"
 #include "core/Ground.h"
 #include "core/Heuristics.h"
+#include "core/Log.h"
 #include "core/Recordings.h"
 #include "core/TripleBuffer.h"
+#include "engine/DepthStore.h"
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
 
@@ -29,6 +31,7 @@ struct ClipRecorderStats {
     double seconds = 0.0;      // How much it holds now (up to a little over kClipSeconds).
     std::uint64_t bytes = 0;   // The compressed video it holds.
     std::uint64_t dropped = 0; // Looks and snapped images it had no room for since it started (never waits).
+    std::uint64_t depthBytes = 0; // The depth maps it holds, packed (while the Show flag Depth is on).
 };
 
 // What a saved clip says about where it came from (clip.observex and the head of clip.txt).
@@ -44,7 +47,8 @@ struct ClipAbout {
 // seconds). The screen is kept as the GPU's video encoder compresses it (NVENC, H.264, a frame each time the screen
 // changed), so keeping it costs the game and the model almost nothing; with it, what the recogniser saw and followed on
 // every look (looked()) and notes from the UI (note()). Saving writes, in the background: clip.mp4 (nothing drawn on
-// it), clip.txt, picture.jpg and clip.observex (see core/Recordings).
+// it), clip.txt, picture.jpg, depth.bin (the depth maps shown, if any: engine/DepthStore) and clip.observex (see
+// core/Recordings).
 //
 // It works on its own thread with its own GPU device, reading the pipeline's clip channel (Pipeline::setClipEnabled),
 // so it never holds up capture; images that arrive while it is busy replace each other.
@@ -88,10 +92,18 @@ public:
 
     // A line about this moment for the clip's text, e.g. "recording started" or "mark 2". UI thread.
     void note(std::string_view text);
+    // A line of observex's log (core/Log) made at `qpc` (now or a moment before), for the clip's text. UI thread.
+    void logged(std::int64_t qpc, const LogLine& line);
     // UI thread, whenever what the Show flag Ground draws changes: the grid `drawn` over screen image `image` (shown at
     // `shownQpc`), from the ground finder's camera on image `followed`; `drawn` not known: nothing drawn from then on.
     // So a clip's Recorded shows the grid exactly as it was seen (core/ClipLines' ground line).
     void grounded(std::int64_t shownQpc, std::uint64_t image, std::uint64_t followed, const GroundCamera& drawn);
+    // For the depth finder's thread (engine/DepthFinder), after each map: the map, packed, and how it was shown.
+    void depthed(std::shared_ptr<const DepthRecord> record);
+    // UI thread, whenever the depth map the Show flag Depth draws changes: map `map` (DepthRecord::image) drawn over
+    // screen image `image` (shown at `shownQpc`); 0: nothing drawn from then on. So a clip's Recorded shows the depth
+    // exactly as it was seen (core/ClipLines' depth line); the clip keeps only the maps drawn.
+    void depthShown(std::int64_t shownQpc, std::uint64_t image, std::uint64_t map);
 
     // UI thread: saves what it holds (the last kClipSeconds) into `folder` (created), in the background. False if a
     // save is still being written, it holds nothing yet or it is not running (state()).

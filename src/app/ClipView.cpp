@@ -6,6 +6,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <exception>
@@ -36,9 +37,10 @@ void formatTime(char* out, std::size_t size, double seconds) {
 
 ClipView::ClipView(IDXGIAdapter1* gpu, ID3D11Device* device, std::filesystem::path folder, ClipInfo info,
                    Heuristics& today, std::unique_ptr<Snapping> snapping, std::unique_ptr<Grounding> ground,
-                   std::filesystem::path uiFolder)
+                   std::unique_ptr<Depthing> depth, std::filesystem::path uiFolder,
+                   std::shared_ptr<const StatsSource> stats)
     : folder_(std::move(folder)), info_(std::move(info)), uiFolder_(uiFolder), gpu_(gpu),
-      grounding_(std::move(ground)) {
+      grounding_(std::move(ground)), depthing_(std::move(depth)) {
     device->GetImmediateContext(&context_);
     try {
         player_ = std::make_unique<ClipPlayer>(gpu, folder_ / kClipVideo);
@@ -54,12 +56,18 @@ ClipView::ClipView(IDXGIAdapter1* gpu, ID3D11Device* device, std::filesystem::pa
         try {
             uiImages_ = std::make_unique<ImageChannel>(device, player_->width(), player_->height(),
                                                        ScreenCapture::kImageFormat);
-            uiFinder_ = std::make_unique<UiFinder>(gpu, *uiImages_, std::move(uiFolder));
+            uiFinder_ = std::make_unique<UiFinder>(gpu, *uiImages_, std::move(uiFolder), std::move(stats));
         } catch (const std::exception& e) {
             uiFinder_.reset(); // Before its channel.
             uiImages_.reset();
             uiError_ = std::string("The interface is not looked for: ") + e.what();
         }
+    }
+
+    // The numbers read from the game's interface while it was recorded.
+    if (std::ifstream statsFile(folder_ / kClipStatsFile, std::ios::binary); statsFile) {
+        const std::string statsText{std::istreambuf_iterator<char>(statsFile), std::istreambuf_iterator<char>()};
+        recordedStats_ = readClipStats(statsText);
     }
 
     // The guesses: what the app showed then, and the same looks through today's heuristics.
@@ -73,11 +81,13 @@ ClipView::ClipView(IDXGIAdapter1* gpu, ID3D11Device* device, std::filesystem::pa
     recorded_ = recordedGuesses(*text_);
     recordedGrid_ = std::any_of(text_->grounds.begin(), text_->grounds.end(),
                                 [](const ClipGroundLine& line) { return line.camera.known; });
+    recordedDepth_ = std::any_of(text_->depths.begin(), text_->depths.end(),
+                                 [](const ClipDepthLine& line) { return line.map != 0; });
     makeToday(today, std::move(snapping));
 }
 
 void ClipView::setHeuristics(Heuristics& today, std::unique_ptr<Snapping> snapping, std::unique_ptr<Grounding> ground,
-                             std::string about) {
+                             std::unique_ptr<Depthing> depth, std::string about) {
     heuristicsNotice_ = "Today's heuristics loaded again: " + about;
     noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(4);
     if (textError_.empty()) {
@@ -90,6 +100,64 @@ void ClipView::setHeuristics(Heuristics& today, std::unique_ptr<Snapping> snappi
         groundError_.clear();
         groundAsked_ = false;
         followGround();
+    }
+    // Today's depth shaded with them from the next frame drawn.
+    depthing_ = std::move(depth);
+    depthTodayError_.clear();
+    depthStale_ = true;
+}
+
+const GameStats* ClipView::recordedStats() const {
+    if (frame_ < 1 || frame_ > text_->frameImage.size()) {
+        return nullptr;
+    }
+    const ClipStats* line = statsAt(recordedStats_, text_->frameImage[frame_ - 1]);
+    return line != nullptr ? &line->stats : nullptr;
+}
+
+const GameStats* ClipView::todayStats() {
+    if (!uiFinder_ || uiFinder_->state() != UiFinder::State::Running) {
+        return nullptr;
+    }
+    const GameStats& stats = uiFinder_->gameStats();
+    return stats.image > 0 ? &stats : nullptr;
+}
+
+std::string ClipView::statsProblem() {
+    if (!uiFinder_) {
+        return uiError_.empty() ? "The video cannot be played." : uiError_;
+    }
+    if (uiFinder_->state() == UiFinder::State::Failed) {
+        return uiFinder_->error();
+    }
+    return uiFinder_->stats().statsProblem.data();
+}
+
+std::uint64_t ClipView::findMiniatures() {
+    if (!uiFinder_ || uiFinder_->state() != UiFinder::State::Running) {
+        return 0;
+    }
+    uiBehind_ = true; // The frame shown, looked at again: a paused one gets its answer too.
+    return uiFinder_->findMiniatures();
+}
+
+const UiMiniatures* ClipView::miniatures() {
+    if (!uiFinder_ || uiFinder_->state() != UiFinder::State::Running) {
+        return nullptr;
+    }
+    return &uiFinder_->miniatures();
+}
+
+void ClipView::statsReloaded(const std::string& about) {
+    heuristicsNotice_ = "Today's stats reading loaded again: " + about;
+    noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    uiBehind_ = true; // The frame shown, read again (by a new reader: the finder sees the DLL changed).
+}
+
+void ClipView::setSkills(std::vector<SkillToFind> skills) {
+    if (uiFinder_) {
+        uiFinder_->setSkills(std::move(skills));
+        uiBehind_ = true;
     }
 }
 
@@ -179,6 +247,113 @@ std::string ClipView::groundProblem() const {
     return groundError_;
 }
 
+std::string ClipView::depthProblem() const {
+    if (!player_) {
+        return {}; // draw() says why.
+    }
+    if (!textError_.empty()) {
+        return "This clip has no clip.txt, so nothing says what depth was drawn.";
+    }
+    if (!recordedDepth_) {
+        return "No depth was drawn while this clip was recorded (Depth was off, or the clip was saved before clips "
+               "kept the depth).";
+    }
+    if (!depthError_.empty()) {
+        return depthError_;
+    }
+    if (guesser_ == Guesser::Today) {
+        return depthing_ ? depthTodayError_ : std::string("No shading of depth to shade it with.");
+    }
+    return {};
+}
+
+void ClipView::loadDepth() {
+    // Once, the first time the flag Depth wants it (a 10 s clip's maps are about 100 MB, read in a fraction of a
+    // second).
+    if (depthAsked_ || !recordedDepth_) {
+        return;
+    }
+    depthAsked_ = true;
+    std::string error;
+    depths_ = readDepthFile(folder_ / kClipDepth, &error);
+    if (depths_.empty()) {
+        depthError_ = error.empty() ? std::string("depth.bin holds no maps.") : "Could not read depth.bin: " + error;
+        return;
+    }
+    try {
+        packer_ = std::make_unique<DepthPacker>();
+    } catch (const std::exception& e) {
+        depths_.clear();
+        depthError_ = std::string("Could not unpack the depth: ") + e.what();
+    }
+}
+
+void ClipView::drawDepth(ImDrawList* drawList, ImVec2 min, ImVec2 max, float rounding) {
+    loadDepth();
+    if (depths_.empty()) {
+        return;
+    }
+    // The map the app drew live when the screen showed this frame's image.
+    const std::uint64_t map = recordedDepth(text_->depths, frameMs(frame_));
+    const auto record = std::lower_bound(depths_.begin(), depths_.end(), map,
+                                         [](const DepthRecord& at, std::uint64_t image) { return at.image < image; });
+    if (map == 0 || record == depths_.end() || record->image != map ||
+        (guesser_ == Guesser::Today && (!depthing_ || !depthTodayError_.empty()))) {
+        return;
+    }
+    if (map != depthUploaded_ || guesser_ != depthUploadedBy_ || (guesser_ == Guesser::Today && depthStale_)) {
+        // Recorded: the levels and colours drawn then. Today: the map shaded again, the same interface left out.
+        const std::size_t count = static_cast<std::size_t>(record->width) * static_cast<std::size_t>(record->height);
+        std::array<std::uint32_t, Depthing::kPaletteSize> palette = record->palette;
+        depthLevels_.resize(count);
+        if (guesser_ == Guesser::Recorded) {
+            if (!packer_->unpackLevels(*record, depthLevels_)) {
+                depthError_ = "A depth map in depth.bin does not unpack.";
+                depths_.clear();
+                return;
+            }
+        } else {
+            if (!packer_->unpackMap(*record, depthMap_)) {
+                depthError_ = "A depth map in depth.bin does not unpack.";
+                depths_.clear();
+                return;
+            }
+            DepthInput input;
+            input.map = depthMap_.data();
+            input.width = record->width;
+            input.height = record->height;
+            input.screenWidth = record->screenWidth;
+            input.screenHeight = record->screenHeight;
+            input.ignore = record->ignore.data();
+            input.ignoreCount = static_cast<int>(record->ignore.size());
+            if (!depthing_->shade(input, depthLevels_.data(), palette.data())) {
+                depthTodayError_ = "Today's heuristics could not shade the depth.";
+                return;
+            }
+            depthStale_ = false;
+        }
+        depthPixels_.resize(count);
+        paintDepth(depthLevels_.data(), palette.data(), count, depthPixels_.data());
+        const auto width = static_cast<unsigned>(record->width);
+        const auto height = static_cast<unsigned>(record->height);
+        try {
+            if (!depthImage_ || depthImage_->width() != width || depthImage_->height() != height) {
+                ComPtr<ID3D11Device> device;
+                context_->GetDevice(&device);
+                depthImage_ = std::make_unique<ScreenImage>(device.Get(), width, height);
+            }
+        } catch (const std::exception& e) {
+            depthError_ = std::string("Could not show the depth: ") + e.what();
+            depths_.clear();
+            return;
+        }
+        depthImage_->upload(depthPixels_.data(), width * 4);
+        depthUploaded_ = map;
+        depthUploadedBy_ = guesser_;
+    }
+    depthImage_->draw(drawList, min, max, rounding, theme::kBackground);
+}
+
 std::string ClipView::uiProblem() {
     if (!uiFinder_) {
         return uiError_; // Empty if the video did not open: draw() says why.
@@ -261,6 +436,21 @@ void ClipView::goTo(std::uint64_t number) {
     seek(number);
 }
 
+std::span<const Tracked> ClipView::thingsShown() const {
+    const Guesses* shown = guesses(guesser_);
+    if (shown == nullptr || frame_ == 0) {
+        return {};
+    }
+    return shown->at(frameMs(frame_));
+}
+
+std::span<const std::string> ClipView::kinds() const {
+    if (!textError_.empty() || !text_) {
+        return {};
+    }
+    return text_->kinds;
+}
+
 const Guesses* ClipView::guesses(Guesser guesser) const {
     if (!textError_.empty()) {
         return nullptr;
@@ -272,6 +462,16 @@ const Guesses* ClipView::guesses(Guesser guesser) const {
         return &today_;
     }
     return nullptr;
+}
+
+std::size_t ClipView::logLinesBy() const {
+    // Made before the next frame came: by the last frame, all of them (the clip's own save too).
+    const std::vector<double>& times = text_->logMs;
+    const std::uint64_t next = frame_ + 1;
+    if (next > frames()) {
+        return times.size();
+    }
+    return static_cast<std::size_t>(std::lower_bound(times.begin(), times.end(), frameMs(next)) - times.begin());
 }
 
 double ClipView::frameMs(std::uint64_t number) const {
@@ -292,7 +492,7 @@ const std::string& ClipView::error() const {
 }
 
 void ClipView::draw(const theme::Fonts& fonts, bool showCharacters, bool showKinds, bool showUi, bool showGround,
-                    float dpiScale) {
+                    bool showDepth, float dpiScale) {
     if (showGround && guesser_ == Guesser::Today) {
         followGround();
     }
@@ -337,6 +537,10 @@ void ClipView::draw(const theme::Fonts& fonts, bool showCharacters, bool showKin
     const float rounding = 8.0f * ImGui::GetStyle().FontScaleDpi;
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     image_->draw(drawList, min, max, rounding, theme::kBackground);
+    // The depth instead of the frame (the flag Depth), with the interface, the ground and the guesses over it as live.
+    if (showDepth && frame_ > 0) {
+        drawDepth(drawList, min, max, rounding);
+    }
     drawList->PathRect(ImVec2(min.x - 0.5f, min.y - 0.5f), ImVec2(max.x + 0.5f, max.y + 0.5f), rounding + 0.5f);
     drawList->PathStroke(theme::kBorder, ImDrawFlags_Closed, 1.0f);
 

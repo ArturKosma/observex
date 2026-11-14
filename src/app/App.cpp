@@ -2,6 +2,7 @@
 
 #include "app/Overlay.h"
 #include "app/Snapshot.h"
+#include "app/StatsPanel.h"
 #include "app/Widgets.h"
 
 #include <imgui.h>
@@ -16,7 +17,9 @@
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
+#include <fstream>
 #include <initializer_list>
 
 namespace observex {
@@ -45,6 +48,7 @@ constexpr const Category& kLive = kCategories[0];
 // every 3 s (2026-11-01) rather than more to review. Fixed, no setting. Only unsure asks every kUnsureEvery.
 constexpr unsigned kRecordingInterval = 3;
 constexpr int kSnapshotStepFrames = 36; // Snapshot frames are 16 ms apart, so each step gets about 0.6 s.
+constexpr float kTileGap = 6.0f; // Between the tiles, before DPI scaling: their line, and room to grab it.
 
 // The category's kinds by the words its answers files use ("monster", ...), in order.
 std::vector<std::string> kindIdsOf(const Category& category) {
@@ -327,6 +331,47 @@ std::string describeWhen(const std::string& started) {
     return text;
 }
 
+std::int64_t qpcNow() {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+double qpcFrequency() {
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    return static_cast<double>(frequency.QuadPart);
+}
+
+// The local time it was at `qpc` (a QueryPerformanceCounter time, now or a moment before), as the log writes it:
+// "2026-11-13 00:06:01.234".
+std::string logTimeAt(std::int64_t qpc) {
+    FILETIME utc;
+    GetSystemTimePreciseAsFileTime(&utc);
+    ULARGE_INTEGER ticks; // 100 ns ticks.
+    ticks.LowPart = utc.dwLowDateTime;
+    ticks.HighPart = utc.dwHighDateTime;
+    const double back = std::max(0.0, static_cast<double>(qpcNow() - qpc) / qpcFrequency());
+    ticks.QuadPart -= static_cast<ULONGLONG>(back * 1e7);
+    utc.dwLowDateTime = ticks.LowPart;
+    utc.dwHighDateTime = ticks.HighPart;
+    SYSTEMTIME universal;
+    SYSTEMTIME local;
+    if (!FileTimeToSystemTime(&utc, &universal) || !SystemTimeToTzSpecificLocalTime(nullptr, &universal, &local)) {
+        GetLocalTime(&local);
+    }
+    return logTime(local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond,
+                   local.wMilliseconds);
+}
+
+// "recording done" as the start of a log line: "Recording done".
+std::string capitalized(std::string text) {
+    if (!text.empty()) {
+        text[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(text[0])));
+    }
+    return text;
+}
+
 } // namespace
 
 App::~App() {
@@ -373,6 +418,7 @@ int App::run() {
             } else if (state == ClipRecorder::SaveState::Failed) {
                 clipSaving_ = false;
                 clipSaveError_ = "Could not save the clip: " + clipRecorder_->saveError();
+                addLog(clipSaveError_);
             }
         }
 
@@ -417,6 +463,9 @@ int App::run() {
             picker_->close(); // Its capture of the chosen screen goes first; the pipeline takes over.
             observe(*chosen_);
             chosen_.reset();
+        } else if (chosenNone_) {
+            stopObservingAll();
+            chosenNone_ = false;
         } else if (pipeline_.state() == Pipeline::State::NeedsRestart) {
             observeAgain();
         }
@@ -431,9 +480,23 @@ int App::run() {
             const std::string about = heuristics_->describe();
             noteInClip("heuristics loaded again: " + about);
             if (clipView_) {
-                clipView_->setHeuristics(*todaysHeuristics(), todaysSnapping(), todaysGround(), about);
+                clipView_->setHeuristics(*todaysHeuristics(), todaysSnapping(), todaysGround(), todaysDepth(), about);
             }
         }
+        // observex_stats.dll rebuilt (the user asked, 2026-11-12: to compare new reading rules with what was
+        // recorded): the UI finder reads with it from its next image, and an open clip's frame is read again.
+        if (stats_->poll()) {
+            const std::string about = stats_->describe();
+            noteInClip("stats reading loaded again: " + about);
+            if (clipView_) {
+                clipView_->statsReloaded(about);
+            }
+        }
+        // The profile open (also while the State tile is not shown), and its skills to the readers when they changed.
+        stateTree_.ensureProfile(settings_.brainsFolder);
+        syncSkills();
+        keepStats();
+        tickBrain();
         const bool away = review_ || clipView_;
         pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed && !away);
         pipeline_.setSnapEnabled(snapper_ && snapper_->state() != BoxSnapper::State::Failed && !away);
@@ -451,14 +514,35 @@ int App::run() {
         if (following) {
             hintGround();
         }
+        // The depth finder only while a flag needs it (the user asked, 2026-11-12 late: the grid and the depth work
+        // only with their flags on): Depth draws its maps (shaded only then), Ground tilts the grid's pitch by them.
+        // Made the first time one is on while observing; with both off it is handed no images (the network stays
+        // loaded). It leaves out the interface the UI finder found.
+        const bool depthNeeded = settings_.showDepth || settings_.showGround;
+        if (depthNeeded && !away && observed_ && !depthFinder_ && depthFinderError_.empty() &&
+            pipeline_.depth() != nullptr) {
+            startDepth();
+        }
+        const bool depthRunning =
+            depthNeeded && depthFinder_ && depthFinder_->state() != DepthFinder::State::Failed && !away;
+        depthRunning_ = depthRunning;
+        depthShowing_ = depthRunning && settings_.showDepth;
+        pipeline_.setDepthEnabled(depthRunning);
+        if (depthRunning) {
+            depthFinder_->show(depthShowing_);
+            depthFinder_->hint(uiFinder_ && uiFinder_->state() == UiFinder::State::Running ? &uiFinder_->found()
+                                                                                          : nullptr);
+        }
         // The clip buffer pauses with it (its encoding took 21% of the video encoder): a clip is for what the
         // recogniser saw. Meanwhile it repeats the last image, so a clip saved right after still plays (still, with no
         // looks).
         pipeline_.setClipEnabled(clipRecorder_ && clipRecorder_->state() != ClipRecorder::State::Failed && !away);
         if (!window_->prepareFrame()) {
             pipeline_.setPreviewEnabled(false); // Minimized: nobody sees it.
-            groundDrawn_.drawn = false;          // Nor the grid.
+            groundDrawn_.drawn = false;          // Nor the grid,
             noteGroundInClip();
+            depthDrawn_ = 0; // nor the depth.
+            noteDepthInClip();
             picker_->close();
             Sleep(10);
             continue;
@@ -488,9 +572,11 @@ int App::run() {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
-        groundDrawn_.drawn = false; // Until the live view draws the grid.
+        groundDrawn_.drawn = false; // Until the live view draws the grid,
+        depthDrawn_ = 0;            // and the depth.
         drawFrame();
         noteGroundInClip();
+        noteDepthInClip();
         ImGui::Render();
 
         window_->bindBackBuffer();
@@ -526,13 +612,23 @@ void App::init() {
         settings_.recordingsFolder = !snapshot_->recordingsFolder.empty()
                                          ? snapshot_->recordingsFolder
                                          : std::filesystem::path(snapshot_->path).parent_path() / L"recordings";
+        settings_.brainsFolder = std::filesystem::path(snapshot_->path).parent_path() / L"brains";
     } else {
         settingsFile_ = appFolder() / L"observex.cfg";
         settings_ = Settings::load(settingsFile_);
+        if (!settings_.brainName.empty()) {
+            stateTree_.load(settings_.brainsFolder, settings_.brainName); // The one last saved or loaded.
+        }
     }
+    // The log: what earlier runs logged comes back.
+    log_ = std::make_unique<LogBook>((snapshot_ ? std::filesystem::path(snapshot_->path).parent_path() : appFolder()) /
+                                     L"observex.log");
+    addLog("observex started");
 
-    // observex_heuristics.dll next to the exe (the Release build puts both in the project folder).
+    // observex_heuristics.dll next to the exe (the Release build puts both in the project folder), and
+    // observex_stats.dll likewise.
     heuristics_ = std::make_shared<HeuristicsSource>(appFolder() / L"observex_heuristics.dll");
+    stats_ = std::make_shared<StatsSource>(appFolder() / L"observex_stats.dll");
 
     gpuAdapter_ = findPrimaryGpu();
     gpu_ = createGpuDevice(gpuAdapter_.Get());
@@ -556,12 +652,17 @@ void App::init() {
 }
 
 void App::shutdown() {
+    stateTree_.flush();   // A State tile field still being typed in is saved into its profile.
     refresher_.reset();   // Its finder writes nothing.
     review_.reset();      // Closing observex while reviewing makes no kind update.
     clipView_.reset();    // Its image and reader are on the UI's device, which goes below.
     kindUpdater_.reset(); // One still at work writes nothing.
     stopRecording();
     stopObserving();
+    if (log_) { // shutdown() runs twice (the destructor too): once logged.
+        addLog("observex closed");
+        log_.reset();
+    }
     picker_.reset();
     thumbnails_.reset();
     if (imguiReady_) {
@@ -582,6 +683,7 @@ void App::observe(const Screen& screen) {
     pipeline_.setPreviewEnabled(true);
     pipeline_.setRecognitionEnabled(true);
     if (!pipeline_.start(screen)) {
+        addLog("Could not observe " + screen.monitor + ": " + pipeline_.error());
         return; // The view shows pipeline_.error().
     }
     try {
@@ -601,6 +703,7 @@ void App::observe(const Screen& screen) {
     } catch (const std::exception& e) {
         clipError_ = e.what();
     }
+    addLog("Observing " + screen.monitor);
 
     // The model tools/train made.
     recognizerError_.clear();
@@ -630,7 +733,8 @@ void App::observe(const Screen& screen) {
     // The UI finder: where the game's interface is, for the Show flag UI (the user asked, 2026-11-12).
     uiFinderError_.clear();
     try {
-        uiFinder_ = std::make_unique<UiFinder>(screen.adapter.Get(), *pipeline_.ui(), modelFolder("ui"));
+        uiFinder_ = std::make_unique<UiFinder>(screen.adapter.Get(), *pipeline_.ui(), modelFolder("ui"), stats_);
+        uiFinder_->setSkills(skillsToFind()); // The profile's.
     } catch (const std::exception& e) {
         uiFinderError_ = e.what();
     }
@@ -638,6 +742,7 @@ void App::observe(const Screen& screen) {
     // The ground finder: the game's camera, for the Show flag Ground (the user asked, 2026-11-12).
     groundFinderError_.clear();
     groundFollowing_ = false;
+    depthFinderError_.clear(); // The depth finder is made when the Depth or Ground flag first needs it (startDepth).
     try {
         groundFinder_ = std::make_unique<GroundFinder>(screen.adapter.Get(), *pipeline_.ground(), heuristics_);
     } catch (const std::exception& e) {
@@ -646,15 +751,26 @@ void App::observe(const Screen& screen) {
 }
 
 void App::stopObserving() {
+    if (observed_ && pipeline_.state() != Pipeline::State::Stopped) {
+        addLog("Stopped observing " + observed_->monitor);
+    }
+    xpWatch_ = {}; // Another screen or character next: its XP only starts it.
+    liveStats_ = {};    // And nothing is read.
     pauseRecording();    // The recorder reads from the pipeline's channel; it goes first.
     recognizer_.reset(); // So does the recogniser (it hands looks to the clip buffer and the snapper, so before them).
     pipeline_.setSnapEnabled(false);
     snapper_.reset(); // Reads from the pipeline's snap channel.
     pipeline_.setUiEnabled(false);
     uiFinder_.reset(); // Reads from its ui channel.
+    statsHistory_.clear(); // A new pipeline numbers its images from 1 again.
     pipeline_.setGroundEnabled(false);
     groundFinder_.reset(); // Reads from its ground channel.
     groundFollowing_ = false;
+    pipeline_.setDepthEnabled(false);
+    depthFinder_.reset(); // Reads from its depth channel, and hands maps to the clip buffer: before it.
+    depthRunning_ = false;
+    depthShowing_ = false;
+    depthUploaded_ = 0;
     pipeline_.setClipEnabled(false);
     clipRecorder_.reset(); // Reads from the pipeline's clip channel; a save still being written finishes first.
     clipSaving_ = false;
@@ -662,6 +778,20 @@ void App::stopObserving() {
     observedImage_.reset();
     pipeline_.setRecognitionEnabled(false);
     pipeline_.stop();
+}
+
+void App::startDepth() {
+    depthFinderError_.clear();
+    try {
+        DepthFinder::Record record; // Every map into the clip buffer too, so a clip replays the depth seen.
+        if (clipRecorder_) {
+            record = [clip = clipRecorder_](std::shared_ptr<const DepthRecord> map) { clip->depthed(std::move(map)); };
+        }
+        depthFinder_ = std::make_unique<DepthFinder>(observed_->adapter.Get(), *pipeline_.depth(), heuristics_,
+                                                     modelFolder("depth"), std::move(record));
+    } catch (const std::exception& e) {
+        depthFinderError_ = e.what();
+    }
 }
 
 void App::observeAgain() {
@@ -732,9 +862,11 @@ void App::startRecording(RecordKind kind) {
         recordingError_ = "Could not write " + toUtf8((recording_->folder / kRecordingFile).c_str());
     }
     if (recording_) {
-        noteInClip(std::string("recording started: ") +
-                   (kind == RecordKind::Unsure ? "only unsure" : "every " + std::to_string(kRecordingInterval) + " s") +
-                   ", into " + nameOf(recording_->folder));
+        const std::string what =
+            (kind == RecordKind::Unsure ? "only unsure" : "every " + std::to_string(kRecordingInterval) + " s") +
+            ", into " + nameOf(recording_->folder);
+        noteInClip("recording started: " + what);
+        addLog("Recording started: " + what);
     }
 }
 
@@ -782,6 +914,8 @@ void App::stopRecording(const char* why) {
         }
         noteInClip(std::string(why) + ": " + nameOf(recording_->folder) + ", " + std::to_string(info.images) +
                    " images");
+        addLog(capitalized(why) + ": " + std::to_string(info.images) + (info.images == 1 ? " image" : " images") +
+               " in " + nameOf(recording_->folder));
     }
     recording_.reset();
 }
@@ -808,11 +942,16 @@ void App::saveClip() {
         about.kinds = recognizer_->kinds();
     }
     noteInClip("save last 10 s");
+    // Before the save, so the clip has it too.
+    addLog("Saved last 10 s as clip " + nameOf(folder));
     clipSaveError_.clear();
+    const std::filesystem::path statsFolder = folder;
     if (clipRecorder_->save(std::move(folder), std::move(about))) {
         clipSaving_ = true;
+        writeClipStats(statsFolder); // The numbers read meanwhile, beside it.
     } else {
         clipSaveError_ = "Could not save the clip: it holds nothing yet.";
+        addLog(clipSaveError_);
     }
 }
 
@@ -820,6 +959,256 @@ void App::noteInClip(std::string_view text) {
     if (clipRecorder_) {
         clipRecorder_->note(text);
     }
+}
+
+void App::addLog(std::string text, std::int64_t qpc) {
+    if (!log_) {
+        return;
+    }
+    if (qpc == 0) {
+        qpc = qpcNow();
+    }
+    LogLine line{logTimeAt(qpc), std::move(text)};
+    if (clipRecorder_) {
+        clipRecorder_->logged(qpc, line);
+    }
+    log_->add(std::move(line));
+}
+
+void App::keepStats() {
+    if (!uiFinder_ || uiFinder_->state() != UiFinder::State::Running) {
+        return;
+    }
+    if (const GameStats& newest = uiFinder_->gameStats();
+        newest.image == 0 || (!statsHistory_.empty() && statsHistory_.back().image == newest.image)) {
+        return;
+    } else {
+        liveStats_ = newest;
+    }
+    addLiveNearby(liveStats_);
+    const GameStats& stats = liveStats_;
+    statsHistory_.push_back(stats);
+    // XP got: the difference between readings (the user asked, 2026-11-13), timed when the screen showed it.
+    const double ticksPerSecond = qpcFrequency();
+    const double shownSeconds = static_cast<double>(stats.shownQpc) / ticksPerSecond;
+    if (const auto change = xpWatch_.read(stats.find("Status", "XP"), shownSeconds)) {
+        addLog(change->text, static_cast<std::int64_t>(change->seconds * ticksPerSecond));
+    }
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    const auto kept = static_cast<std::int64_t>(kStatsKeptSeconds * static_cast<double>(frequency.QuadPart));
+    while (statsHistory_.size() > 1 && stats.shownQpc - statsHistory_.front().shownQpc > kept) {
+        statsHistory_.pop_front();
+    }
+}
+
+void App::tickBrain() {
+    // A clip's frame read with today's rules, else the live reading; nothing while reviewing or not reading.
+    const GameStats* stats = nullptr;
+    if (clipView_) {
+        stats = clipStatsShown(true);
+    } else if (!review_ && uiFinder_ && uiFinder_->state() == UiFinder::State::Running && liveStats_.image > 0) {
+        stats = &liveStats_;
+    }
+    if (stats == nullptr) {
+        brainImage_ = 0;
+        stateTree_.stop();
+        return;
+    }
+    if (stats->image != brainImage_) { // One step a reading.
+        brainImage_ = stats->image;
+        stateTree_.tick(statetree::variablesOf(*stats));
+    }
+}
+
+float App::imageWorkMs(std::string* parts) {
+    // Each part's time on one screen image, on average over the last second (each finder's own numbers, refreshed once
+    // a second), added up.
+    float total = 0.0f;
+    const auto add = [&](const char* name, float ms) {
+        total += ms;
+        if (parts != nullptr) {
+            char text[64];
+            std::snprintf(text, sizeof(text), "%s%s %.2f", parts->empty() ? "" : "  \xC2\xB7  ", name,
+                          static_cast<double>(ms));
+            *parts += text;
+        }
+    };
+    if (pipeline_.state() == Pipeline::State::Running) {
+        add("Capture", pipeline_.stats().workAvgMs);
+    }
+    if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+        add(kLive.name, recognizer_->stats().workAvgMs);
+        if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+            add("Snapping", snapper_->stats().workAvgMs);
+        }
+    }
+    if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+        const UiFinderStats& ui = uiFinder_->stats();
+        add("UI", ui.workAvgMs);
+        add("Stats", ui.statsAvgMs);
+    }
+    if (groundFollowing_ && groundFinder_->state() == GroundFinder::State::Running) {
+        add("Ground", groundFinder_->stats().workAvgMs);
+    }
+    if (depthRunning_ && depthFinder_->state() == DepthFinder::State::Running) {
+        const DepthFinderStats& depth = depthFinder_->stats();
+        add("Depth", depth.networkAvgMs + depth.shadeAvgMs + depth.packAvgMs);
+    }
+    return total;
+}
+
+void App::writeClipStats(const std::filesystem::path& folder) {
+    if (statsHistory_.empty()) {
+        return;
+    }
+    LARGE_INTEGER now;
+    LARGE_INTEGER frequency;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    const double msPerTick = 1000.0 / static_cast<double>(frequency.QuadPart);
+    std::string text = "# observex " + std::string(kClipStatsFile) +
+                       ": the numbers read from the game's interface while this clip was recorded, by screen image "
+                       "(core/GameStats)\n";
+    for (const GameStats& stats : statsHistory_) {
+        // To a tenth of a millisecond ("-911.2", not "-911.1691000000001").
+        const double ms = std::round(static_cast<double>(stats.shownQpc - now.QuadPart) * msPerTick * 10.0) / 10.0;
+        appendStatsLine(text, stats.image, ms, stats);
+    }
+    // Its folder may not be made yet (the clip is written in the background).
+    std::error_code error;
+    std::filesystem::create_directories(folder, error);
+    std::ofstream out(folder / kClipStatsFile, std::ios::binary | std::ios::trunc);
+    out << text;
+    if (!out) {
+        clipSaveError_ = "Could not write the clip's " + std::string(kClipStatsFile) + " (its numbers are missing)";
+    }
+}
+
+void App::stopObservingAll() {
+    closeReview();
+    closeClip();
+    stopRecording(); // A recording is of the screen observed.
+    stopObserving();
+    observed_.reset();
+    error_.clear();
+}
+
+void App::drawGameStats() {
+    // One column (the user asked, 2026-11-12: no Recorded and Today side by side, no words on which rules read): live,
+    // what the UI finder read; on a clip, what the guesser shows (Recorded: clip-stats.txt; Today: read again on the
+    // frame shown). Below it only why nothing is read, if so.
+    const GameStats* stats = nullptr;
+    std::string empty = "Nothing read yet";
+    std::string problem;
+    if (clipView_) {
+        if (clipView_->guesser() == ClipView::Guesser::Recorded) {
+            stats = clipStatsShown(false);
+            empty = clipView_->statsRecorded() ? "Nothing read by this frame" : "Not recorded in this clip";
+        } else {
+            problem = clipView_->statsProblem();
+            stats = problem.empty() ? clipStatsShown(true) : nullptr;
+            empty = "Reading\xE2\x80\xA6";
+        }
+    } else {
+        if (!uiFinder_) {
+            empty = uiFinderError_.empty() ? "The screen is not captured." : uiFinderError_;
+        } else if (uiFinder_->state() == UiFinder::State::Failed) {
+            empty = uiFinder_->error();
+        } else {
+            if (liveStats_.image > 0) {
+                stats = &liveStats_;
+            }
+            problem = uiFinder_->stats().statsProblem.data();
+        }
+    }
+    if (problem.empty() && !stats_->error().empty()) {
+        problem = stats_->error(); // observex_stats.dll could not be loaded: the app's own rules read.
+    }
+    statsTile_.draw(fonts_, stats, empty.c_str(), problem.c_str(), stateTree_.skills(), skillIcons_, dpiScale_);
+}
+
+void App::drawSkills() {
+    // Add Skill's miniatures: on the clip's frame shown, else on the live screen.
+    MiniatureSource source;
+    if (clipView_) {
+        source.ask = [this] { return clipView_ ? clipView_->findMiniatures() : 0; };
+        source.newest = [this]() -> const UiMiniatures* { return clipView_ ? clipView_->miniatures() : nullptr; };
+    } else {
+        const auto running = [this] { return uiFinder_ && uiFinder_->state() == UiFinder::State::Running; };
+        source.ask = [this, running] { return running() ? uiFinder_->findMiniatures() : 0; };
+        source.newest = [this, running]() -> const UiMiniatures* {
+            return running() ? &uiFinder_->miniatures() : nullptr;
+        };
+    }
+    skillsView_.draw(fonts_, gpu_.device.Get(), stateTree_, skillIcons_, source, dpiScale_);
+}
+
+void App::syncSkills() {
+    // Compared only when the profile's file changed (a change saved, another profile, undo or redo).
+    if (stateTree_.savedText() == profileSeen_) {
+        return;
+    }
+    profileSeen_ = stateTree_.savedText();
+    if (stateTree_.skills() == skillsGiven_) {
+        return;
+    }
+    skillsGiven_ = stateTree_.skills();
+    skillIcons_.make(gpu_.device.Get(), skillsGiven_);
+    if (uiFinder_) {
+        uiFinder_->setSkills(skillsToFind());
+    }
+    if (clipView_) {
+        clipView_->setSkills(skillsToFind());
+    }
+}
+
+std::vector<SkillToFind> App::skillsToFind() const {
+    std::vector<SkillToFind> skills;
+    for (const statetree::Skill& skill : stateTree_.skills()) {
+        const auto pixels = static_cast<std::size_t>(skill.side) * static_cast<std::size_t>(skill.side);
+        if (skill.side <= 0 || skill.bgr.size() != pixels * 3) {
+            continue;
+        }
+        SkillToFind& to = skills.emplace_back();
+        to.name = skill.name;
+        to.cooldown = skill.cooldown;
+        to.side = skill.side;
+        to.grey.resize(pixels);
+        for (std::size_t i = 0; i < pixels; ++i) { // The grey observex uses everywhere (GreyMaker).
+            to.grey[i] = static_cast<std::uint8_t>(
+                (skill.bgr[i * 3] * 29 + skill.bgr[i * 3 + 1] * 150 + skill.bgr[i * 3 + 2] * 77) >> 8);
+        }
+    }
+    return skills;
+}
+
+void App::addLiveNearby(GameStats& stats) {
+    // What drawFound shows: the snapper's boxes while it runs, else the recogniser's.
+    const bool looking = recognizer_ && recognizer_->state() == Recognizer::State::Running;
+    std::span<const Tracked> things;
+    std::span<const std::string> kinds;
+    if (looking) {
+        const Found* found = &recognizer_->found();
+        if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+            if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+                found = &snapped;
+            }
+        }
+        things = {found->things.data(), static_cast<std::size_t>(found->count)};
+        kinds = recognizer_->kinds();
+    }
+    addNearby(stats, looking, things, kinds);
+}
+
+const GameStats* App::clipStatsShown(bool today) {
+    const GameStats* read = today ? clipView_->todayStats() : clipView_->recordedStats();
+    if (read == nullptr) {
+        return nullptr;
+    }
+    clipStats_ = *read;
+    addNearby(clipStats_, true, clipView_->thingsShown(), clipView_->kinds());
+    return &clipStats_;
 }
 
 void App::noteGroundInClip() {
@@ -835,6 +1224,15 @@ void App::noteGroundInClip() {
     groundNoted_ = now;
     clipRecorder_->grounded(previewQpc_, previewImage_, now.drawn ? now.followed : 0,
                             now.drawn ? now.camera : GroundCamera{});
+}
+
+void App::noteDepthInClip() {
+    if (!clipRecorder_ || previewQpc_ == 0 || depthDrawn_ == depthNoted_) {
+        return;
+    }
+    // A line whenever another map is drawn, or none any more.
+    depthNoted_ = depthDrawn_;
+    clipRecorder_->depthShown(previewQpc_, previewImage_, depthDrawn_);
 }
 
 void App::saveSettings() {
@@ -907,6 +1305,10 @@ void App::startReview(const Category& category) {
     try {
         review_ = std::make_unique<Review>(gpu_.device.Get(), reviewFolder_, category);
         noteInClip("review opened: " + nameOf(reviewFolder_) + ", " + category.name);
+        if (!settings_.showLive) { // It is shown in the Live tile.
+            settings_.showLive = true;
+            saveSettings();
+        }
         if (clipView_) {
             closeClip_ = true; // Between frames; the review is drawn instead meanwhile.
         }
@@ -935,8 +1337,15 @@ void App::openClip(const ClipEntry& clip) {
     closeReview(); // One thing at a time is shown instead of the screen.
     closeClip();
     clipView_ = std::make_unique<ClipView>(gpuAdapter_.Get(), gpu_.device.Get(), clip.folder, clip.info,
-                                           *todaysHeuristics(), todaysSnapping(), todaysGround(), modelFolder("ui"));
+                                           *todaysHeuristics(), todaysSnapping(), todaysGround(), todaysDepth(),
+                                           modelFolder("ui"), stats_);
+    clipView_->setSkills(skillsToFind()); // The profile's, read again on its frames.
+    ++clipsOpened_; // The Log tile's lines are this clip's now.
     noteInClip("clip opened: " + nameOf(clip.folder));
+    if (!settings_.showLive) { // It is shown in the Live tile.
+        settings_.showLive = true;
+        saveSettings();
+    }
 }
 
 std::unique_ptr<Heuristics> App::todaysHeuristics() const {
@@ -960,6 +1369,14 @@ std::unique_ptr<Grounding> App::todaysGround() const {
         return heuristics_->makeGround();
     } catch (const std::exception&) {
         return HeuristicsSource().makeGround();
+    }
+}
+
+std::unique_ptr<Depthing> App::todaysDepth() const {
+    try {
+        return heuristics_->makeDepth();
+    } catch (const std::exception&) {
+        return HeuristicsSource().makeDepth();
     }
 }
 
@@ -1053,13 +1470,197 @@ void App::drawFrame() {
     }
     picker_->setObserved(observed_ ? observed_->name : std::string(), observedImage_.get());
 
+    // The view before the bar over it: while the State tile has the keyboard, it takes the keys pressed this frame
+    // before the bar's clip steps or the Live tile read them.
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float barHeight = std::round(52.0f * dpiScale_);
-    drawTopBar(barHeight);
-
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + barHeight));
     ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, viewport->Size.y - barHeight));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::Begin("##view", nullptr, kFixedWindow);
+    ImGui::PopStyleVar();
+    const float tabsHeight = std::round(38.0f * dpiScale_);
+    drawTabs(tabsHeight);
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const ImVec2 size = ImGui::GetWindowSize();
+    // The Log tile a narrower column at the right, the others left of it.
+    const float tileGap = std::round(kTileGap * dpiScale_);
+    TileRect area{pos.x, pos.y + tabsHeight, pos.x + size.x, pos.y + size.y};
+    TileRect logTile;
+    if (settings_.showLog) {
+        TileRect others;
+        logTile = placeLog(area,
+                           settings_.showLive || settings_.showGameStats || settings_.showState || settings_.showSkills,
+                           logSplit_, tileGap, others);
+        area = others;
+    }
+    // Skills, while open, covers the column of Stats and State, whichever are on (the user asked, 2026-11-14): it goes
+    // where Stats goes, as tall as both.
+    const bool skills = settings_.showSkills;
+    const Tiles tiles = placeTiles(settings_.showLive, settings_.showGameStats || skills,
+                                   settings_.showState && !skills, area, liveSplit_, statsSplit_, tileGap);
+    // Errors stack at the top right of the Live tile, or of the view without it.
+    const float inset = std::round(12.0f * dpiScale_);
+    const auto drawErrors = [&](ImVec2 corner) {
+        for (const std::string* error : {&recordingError_, &reviewError_, &clipSaveError_}) {
+            if (!error->empty()) {
+                theme::drawLabel(ImGui::GetWindowDrawList(), corner, ImVec2(1.0f, 0.0f), error->c_str());
+                corner.y += ImGui::GetTextLineHeight() + std::round(16.0f * dpiScale_);
+            }
+        }
+    };
+    // Each tile is a window of its own, with the usual padding.
+    const auto beginTile = [](const char* id, const TileRect& tile, ImGuiWindowFlags flags) {
+        ImGui::SetCursorScreenPos(ImVec2(tile.left, tile.top));
+        ImGui::BeginChild(id, ImVec2(tile.right - tile.left, tile.bottom - tile.top),
+                          ImGuiChildFlags_AlwaysUseWindowPadding, flags);
+    };
+    if (tiles.state.shown()) { // First: see above.
+        beginTile("##state", tiles.state, ImGuiWindowFlags_HorizontalScrollbar);
+        stateTree_.draw(fonts_, settings_.brainsFolder);
+        ImGui::EndChild();
+    }
+    if (stateTree_.name() != settings_.brainName) { // Saved or loaded under another name: loaded again at start.
+        settings_.brainName = stateTree_.name();
+        saveSettings();
+    }
+    if (tiles.live.shown()) {
+        beginTile("##live", tiles.live, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        drawLive();
+        drawErrors(ImVec2(tiles.live.right - inset, tiles.live.top + inset));
+        ImGui::EndChild();
+    }
+    if (tiles.stats.shown()) {
+        beginTile(skills ? "##skills" : "##stats", tiles.stats, ImGuiWindowFlags_None);
+        if (skills) {
+            drawSkills();
+        } else {
+            drawGameStats();
+        }
+        ImGui::EndChild();
+    }
+    if (logTile.shown()) {
+        beginTile("##log", logTile, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        drawLog();
+        ImGui::EndChild();
+    }
+    drawTileLines(tiles, logTile, pos.x);
+    if (!tiles.live.shown()) {
+        drawErrors(ImVec2(pos.x + size.x - inset, pos.y + tabsHeight + inset));
+    }
+    ImGui::End();
+
+    drawTopBar(barHeight);
+}
+
+void App::drawTabs(float height) {
+    const ImVec2 pos = ImGui::GetWindowPos();
+    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(pos.x, pos.y + height - 1.0f),
+                                              ImVec2(pos.x + ImGui::GetWindowWidth(), pos.y + height), theme::kBorder);
+    // No tooltips (the user asked, 2026-11-12: too much clutter).
+    struct Tab {
+        const char* id;
+        const char* text;
+        bool* on;
+    };
+    const Tab tabs[] = {
+        {"##tab-live", "Live", &settings_.showLive},
+        {"##tab-state", "State", &settings_.showState},
+        {"##tab-stats", "Stats", &settings_.showGameStats},
+        {"##tab-skills", "Skills", &settings_.showSkills},
+        {"##tab-log", "Log", &settings_.showLog},
+    };
+    // Stats and State under Skills are not shown: drawn off, and a click on one closes Skills and shows it.
+    const auto under = [this](const bool* on) {
+        return settings_.showSkills && (on == &settings_.showGameStats || on == &settings_.showState);
+    };
+    int shown = 0;
+    for (const Tab& tab : tabs) {
+        shown += *tab.on && !under(tab.on) ? 1 : 0;
+    }
+    float x = pos.x + std::round(12.0f * dpiScale_);
+    for (const Tab& tab : tabs) {
+        const bool on = *tab.on && !under(tab.on);
+        const bool last = on && shown == 1;
+        ImGui::SetCursorScreenPos(ImVec2(x, pos.y));
+        if (drawTab(tab.id, tab.text, on, height, fonts_) && !last) {
+            if (under(tab.on) || (settings_.showSkills && !*tab.on && (tab.on == &settings_.showGameStats ||
+                                                                       tab.on == &settings_.showState))) {
+                settings_.showSkills = false;
+                *tab.on = true;
+            } else {
+                *tab.on = !*tab.on;
+            }
+            saveSettings();
+        }
+        x = ImGui::GetItemRectMax().x + std::round(2.0f * dpiScale_);
+    }
+}
+
+void App::drawTileLines(const Tiles& tiles, const TileRect& log, float left) {
+    // A line in the gap from `min` to `max` (`across`: a horizontal one); dragging it sets `share`, of `length` from
+    // `start` (where the tiles it parts begin).
+    const float gap = std::round(kTileGap * dpiScale_);
+    const auto line = [&](const char* id, ImVec2 min, ImVec2 max, bool across, float start, float length,
+                          float* share) {
+        ImGui::SetCursorScreenPos(min);
+        ImGui::InvisibleButton(id, ImVec2(max.x - min.x, max.y - min.y));
+        const bool active = ImGui::IsItemActive();
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered || active) {
+            ImGui::SetMouseCursor(across ? ImGuiMouseCursor_ResizeNS : ImGuiMouseCursor_ResizeEW);
+        }
+        if (active && length > 0.0f) {
+            const float mouse = across ? ImGui::GetIO().MousePos.y : ImGui::GetIO().MousePos.x;
+            *share = std::clamp((mouse - gap * 0.5f - start) / length, 0.15f, 0.85f);
+        }
+        const ImU32 colour = active ? theme::kAccent : hovered ? theme::kBorderHover : theme::kBorder;
+        const float middle = std::round(across ? (min.y + max.y) * 0.5f : (min.x + max.x) * 0.5f);
+        ImGui::GetWindowDrawList()->AddRectFilled(across ? ImVec2(min.x, middle) : ImVec2(middle, min.y),
+                                                  across ? ImVec2(max.x, middle + 1.0f) : ImVec2(middle + 1.0f, max.y),
+                                                  colour);
+    };
+    const TileRect& column = tiles.stats.shown() ? tiles.stats : tiles.state; // Right of Live.
+    if (tiles.live.shown() && column.shown()) {
+        line("##live-line", ImVec2(tiles.live.right, tiles.live.top), ImVec2(column.left, tiles.live.bottom), false,
+             tiles.live.left, column.right - tiles.live.left, &liveSplit_);
+    }
+    if (tiles.stats.shown() && tiles.state.shown()) {
+        line("##stats-line", ImVec2(tiles.stats.left, tiles.stats.bottom), ImVec2(tiles.stats.right, tiles.state.top),
+             true, tiles.stats.top, tiles.state.bottom - tiles.stats.top, &statsSplit_);
+    }
+    if (log.shown() && (tiles.live.shown() || tiles.stats.shown() || tiles.state.shown())) {
+        line("##log-line", ImVec2(log.left - gap, log.top), ImVec2(log.left, log.bottom), false, left,
+             log.right - left, &logSplit_);
+    }
+}
+
+void App::drawLog() {
+    // Clear at the top left (the user asked, 2026-11-13): empties the log and its file. Not for a clip's lines.
+    BarButton clear;
+    clear.text = "Clear";
+    clear.enabled = !clipView_ && log_ && !log_->lines().empty();
+    if (clear.draw("##clear-log", fonts_)) {
+        log_->clear();
+    }
+    ImGui::Dummy(ImVec2(0.0f, std::round(6.0f * dpiScale_)));
+    if (!clipView_ && log_ && !log_->error().empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextMuted);
+        ImGui::TextUnformatted(("Not saved: " + log_->error()).c_str());
+        ImGui::PopStyleColor();
+    }
+    // The lines scroll under it.
+    ImGui::BeginChild("##log-lines", ImVec2(0.0f, 0.0f));
+    if (clipView_) {
+        clipLogView_.draw(clipView_->logLines(), clipView_->logLinesBy(), clipsOpened_, "Not recorded in this clip",
+                          dpiScale_);
+    } else if (log_) {
+        logView_.draw(log_->lines(), log_->lines().size(), log_->added(), "Nothing logged yet", dpiScale_);
+    }
+    ImGui::EndChild();
+}
+
+void App::drawLive() {
     if (review_) {
         review_->draw(fonts_);
     } else if (clipView_) {
@@ -1077,22 +1678,12 @@ void App::drawFrame() {
             }
         }
         clipView_->draw(fonts_, settings_.showCharacters, settings_.showKinds, settings_.showUi, settings_.showGround,
-                        dpiScale_);
+                        settings_.showDepth, dpiScale_);
     } else if (observed_) {
         drawObservedScreen();
     } else {
         drawChooseScreen();
     }
-    // Errors stack at the top right.
-    const float inset = std::round(12.0f * dpiScale_);
-    ImVec2 corner(viewport->Pos.x + viewport->Size.x - inset, viewport->Pos.y + barHeight + inset);
-    for (const std::string* error : {&recordingError_, &reviewError_, &clipSaveError_}) {
-        if (!error->empty()) {
-            theme::drawLabel(ImGui::GetWindowDrawList(), corner, ImVec2(1.0f, 0.0f), error->c_str());
-            corner.y += ImGui::GetTextLineHeight() + std::round(16.0f * dpiScale_);
-        }
-    }
-    ImGui::End();
 }
 
 void App::drawTopBar(float height) {
@@ -1330,9 +1921,21 @@ void App::drawTopBar(float height) {
             ImGui::OpenPopup(kShowPopup);
         }
         ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + popupGap));
+        const ImVec2 showMin = ImGui::GetItemRectMin();
+        const ImVec2 showMax = ImGui::GetItemRectMax();
         if (ImGui::BeginPopup(kShowPopup)) {
             drawShowFlags();
             ImGui::EndPopup();
+        }
+        // Right of it, what observex spends on a screen image in all (the user asked, 2026-11-12).
+        std::string parts;
+        char total[32];
+        std::snprintf(total, sizeof(total), "%.1f ms", static_cast<double>(imageWorkMs(&parts)));
+        const ImVec2 size = ImGui::CalcTextSize(total);
+        const ImVec2 at(showMax.x + std::round(12.0f * dpiScale_), std::round((showMin.y + showMax.y - size.y) * 0.5f));
+        ImGui::GetWindowDrawList()->AddText(at, theme::kTextMuted, total);
+        if (ImGui::IsMouseHoveringRect(at, ImVec2(at.x + size.x, at.y + size.y)) && !parts.empty()) {
+            ImGui::SetTooltip("%s ms on each screen image, over the last second", parts.c_str());
         }
     }
 
@@ -1341,9 +1944,9 @@ void App::drawTopBar(float height) {
         BarButton guessesButton;
         guessesButton.icon = Icon::Guesses;
         guessesButton.caption = "Guesses";
-        guessesButton.text = !settings_.showCharacters && !settings_.showGround   ? "Hidden"
-                             : clipView_->guesser() == ClipView::Guesser::Recorded ? "Recorded"
-                                                                                   : "Today";
+        guessesButton.text = !settings_.showCharacters && !settings_.showGround && !settings_.showDepth ? "Hidden"
+                             : clipView_->guesser() == ClipView::Guesser::Recorded                       ? "Recorded"
+                                                                                                         : "Today";
         guessesButton.arrow = true;
         guessesButton.open = ImGui::IsPopupOpen(kGuessesPopup);
         ImGui::SetCursorScreenPos(ImVec2(screenMax.x + std::round(8.0f * dpiScale_), buttonY));
@@ -1371,6 +1974,18 @@ void App::drawTopBar(float height) {
         if (const Screen* chosen = picker_->draw(ImVec2(size.x, maxSize.y), theme::kSurface)) {
             chosen_ = *chosen;
             ImGui::CloseCurrentPopup();
+        }
+        // None: stop observing (the user asked, 2026-11-12), while a screen is observed.
+        if (observed_) {
+            ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
+            const float left = ImGui::GetCursorPosX();
+            if (ImGui::Selectable("None##observe-none", false, ImGuiSelectableFlags_AllowOverlap,
+                                  ImVec2(size.x, 0.0f))) {
+                chosenNone_ = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine(left + ImGui::CalcTextSize("None").x + 10.0f * dpiScale_);
+            ImGui::TextDisabled("stops all observation: no capture, recognition, recording or clip buffer");
         }
         ImGui::EndPopup();
     }
@@ -1411,6 +2026,32 @@ void App::drawSettings() {
     }
     if (recording_) {
         ImGui::TextDisabled("A new folder applies from the next recording.");
+    }
+    ImGui::Dummy(ImVec2(0.0f, sectionGap));
+
+    // Where the State tile saves its trees (.brain files) and loads them from (the user asked, 2026-11-12: saving
+    // asks only for a name).
+    ImGui::TextDisabled("Brains folder");
+    std::string brains = toUtf8(settings_.brainsFolder.c_str());
+    ImGui::SetNextItemWidth(width);
+    ImGui::InputText("##brains-folder", brains.data(), brains.size() + 1, ImGuiInputTextFlags_ReadOnly);
+    if (ImGui::Button("Change\xE2\x80\xA6##brains")) {
+        if (const std::optional<std::filesystem::path> picked =
+                pickFolder(window_->handle(), settings_.brainsFolder, L"Choose where state trees are saved")) {
+            settings_.brainsFolder = *picked;
+            saveSettings();
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Open##brains")) {
+        showInExplorer(settings_.brainsFolder);
+    }
+    if (settings_.brainsFolder != defaultBrainsFolder()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Use default##brains")) {
+            settings_.brainsFolder = defaultBrainsFolder();
+            saveSettings();
+        }
     }
     ImGui::Dummy(ImVec2(0.0f, sectionGap));
 
@@ -1529,20 +2170,13 @@ void App::drawShowFlags() {
         saveSettings();
         noteInClip(settings_.showGround ? "show Ground on" : "show Ground off");
     }
-    why[0] = '\0';
-    if (!groundFinder_) {
-        std::snprintf(why, sizeof(why), "%s",
-                      groundFinderError_.empty() ? "Not looking: the screen is not captured."
-                                                 : groundFinderError_.c_str());
-    } else if (groundFinder_->state() == GroundFinder::State::Failed) {
-        std::snprintf(why, sizeof(why), "%s", groundFinder_->error().c_str());
-    }
-    if (why[0] != '\0') {
-        ImGui::Indent(indent);
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
-        ImGui::TextDisabled("%s", why);
-        ImGui::PopTextWrapPos();
-        ImGui::Unindent(indent);
+    // No words under Ground and Depth (the user asked, 2026-11-12).
+
+    // Depth (the user asked, 2026-11-12): how near each pixel is, the depth network's guess, nearer brighter, over the
+    // screen instead of it.
+    if (ImGui::Checkbox("Depth", &settings_.showDepth)) {
+        saveSettings();
+        noteInClip(settings_.showDepth ? "show Depth on" : "show Depth off");
     }
 }
 
@@ -1554,7 +2188,7 @@ void App::showCharacters(bool on) {
 
 void App::pickGuesser(ClipView::Guesser guesser) {
     clipView_->setGuesser(guesser);
-    if (!settings_.showCharacters && !settings_.showGround) {
+    if (!settings_.showCharacters && !settings_.showGround && !settings_.showDepth) {
         showCharacters(true);
     }
 }
@@ -1587,7 +2221,8 @@ void App::drawGuessers() {
     // characters, and whose grid (Recorded's as drawn live).
     ImGui::Indent(indent);
     for (const Choice& choice : choices) {
-        ImGui::BeginDisabled((!settings_.showCharacters && !settings_.showGround) || !missing.empty());
+        ImGui::BeginDisabled((!settings_.showCharacters && !settings_.showGround && !settings_.showDepth) ||
+                             !missing.empty());
         if (ImGui::RadioButton(choice.name, clipView_->guesser() == choice.guesser)) {
             pickGuesser(choice.guesser);
         }
@@ -1638,12 +2273,10 @@ void App::drawGuessers() {
     if (ImGui::Checkbox("Ground", &settings_.showGround)) {
         saveSettings();
     }
-    if (const std::string why = clipView_->groundProblem(); !why.empty()) {
-        ImGui::Indent(indent);
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
-        ImGui::TextDisabled("%s", why.c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::Unindent(indent);
+    // Depth (the user asked, 2026-11-12): the guesser's depth, Recorded's exactly as the app drew it live. No words
+    // under Ground and Depth (the user asked, 2026-11-12).
+    if (ImGui::Checkbox("Depth", &settings_.showDepth)) {
+        saveSettings();
     }
 }
 
@@ -2185,6 +2818,23 @@ void App::drawObservedScreen() {
     const float rounding = 8.0f * dpiScale_;
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     observedImage_->draw(drawList, min, max, rounding, theme::kBackground);
+    // The depth instead of it (the flag Depth), the newest map; the interface, the ground and the characters over it
+    // as over the screen.
+    if (depthShowing_ && depthFinder_->state() == DepthFinder::State::Running) {
+        if (const DepthSeen& seen = depthFinder_->seen(); seen.image > 0) {
+            const auto width = static_cast<unsigned>(seen.width);
+            const auto height = static_cast<unsigned>(seen.height);
+            if (seen.image != depthUploaded_) {
+                if (!depthImage_ || depthImage_->width() != width || depthImage_->height() != height) {
+                    depthImage_ = std::make_unique<ScreenImage>(gpu_.device.Get(), width, height);
+                }
+                depthImage_->upload(seen.pixels.data(), width * 4);
+                depthUploaded_ = seen.image;
+            }
+            depthImage_->draw(drawList, min, max, rounding, theme::kBackground);
+            depthDrawn_ = seen.image;
+        }
+    }
     drawList->PathRect(ImVec2(min.x - 0.5f, min.y - 0.5f), ImVec2(max.x + 0.5f, max.y + 0.5f), rounding + 0.5f);
     drawList->PathStroke(theme::kBorder, ImDrawFlags_Closed, 1.0f);
     // The game's interface under the characters: they are in the world it covers.
@@ -2217,7 +2867,7 @@ void App::drawObservedScreen() {
                       "%.0f images/s  \xC2\xB7  %.2f ms latency  \xC2\xB7  %.2f ms work  \xC2\xB7  UI %.0f fps",
                       static_cast<double>(stats.imagesPerSecond), static_cast<double>(stats.latencyAvgMs),
                       static_cast<double>(stats.workAvgMs), static_cast<double>(ImGui::GetIO().Framerate));
-        char detail[512] = {};
+        char detail[1024] = {};
         std::size_t length = 0;
         const auto add = [&](const char* format, auto... values) {
             if (length < sizeof(detail)) {
@@ -2247,7 +2897,8 @@ void App::drawObservedScreen() {
             const GroundFinderStats& ground = groundFinder_->stats();
             const GroundCamera& camera = groundFinder_->seen().camera;
             add("%sGround %.0f/s, %.2f ms each (fitting %.2f), fitted %.0f%% (searched %.0f%%), %.0f of %.0f patches "
-                "agree (%.1f px off), pitch %.0f\xC2\xB0 distance %.1f, minimap %.0f%%, turned by it %.0f/s (%.2f ms)",
+                "agree (%.1f px off), pitch %.0f\xC2\xB0 distance %.1f, minimap %.0f%%, turned by it %.0f/s (%.2f ms), "
+                "depth %.0f/s said the pitch %.0f%% (%.1f\xC2\xB0 off, %.2f ms)",
                 length > 0 ? "  \xC2\xB7  " : "", static_cast<double>(ground.imagesPerSecond),
                 static_cast<double>(ground.workAvgMs), static_cast<double>(ground.fitAvgMs),
                 static_cast<double>(ground.fitted * 100.0f), static_cast<double>(ground.searched * 100.0f),
@@ -2255,7 +2906,18 @@ void App::drawObservedScreen() {
                 static_cast<double>(ground.matches), static_cast<double>(ground.missPixels),
                 static_cast<double>(camera.pitch * 57.29578f), static_cast<double>(camera.distance),
                 static_cast<double>(ground.headed * 100.0f), static_cast<double>(ground.headsPerSecond),
-                static_cast<double>(ground.headAvgMs));
+                static_cast<double>(ground.headAvgMs), static_cast<double>(ground.depthPerSecond),
+                static_cast<double>(ground.depthMeasured * 100.0f), static_cast<double>(ground.depthOffDegrees),
+                static_cast<double>(ground.depthAvgMs));
+        }
+        if (depthRunning_ && depthFinder_->state() == DepthFinder::State::Running) { // While Depth or Ground is on.
+            const DepthFinderStats& depth = depthFinder_->stats();
+            add("%sDepth %.0f/s, network %.2f ms (%.2f slowest), shading %.2f, packing %.2f, %.0f kB a map, %.1f%% "
+                "of the pixels changed",
+                length > 0 ? "  \xC2\xB7  " : "", static_cast<double>(depth.mapsPerSecond),
+                static_cast<double>(depth.networkAvgMs), static_cast<double>(depth.networkMaxMs),
+                static_cast<double>(depth.shadeAvgMs), static_cast<double>(depth.packAvgMs),
+                static_cast<double>(depth.packedKb), static_cast<double>(depth.changed * 100.0f));
         }
         theme::drawLabel(drawList, ImVec2(min.x + inset, max.y - inset), ImVec2(0.0f, 1.0f), text,
                          detail[0] != '\0' ? detail : nullptr);
@@ -2296,7 +2958,12 @@ void App::hintGround() {
     if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
         pieces = &uiFinder_->found();
     }
-    groundFinder_->hint(things, ownKind, pieces);
+    // And the depth finder's newest map: the camera's pitch by it.
+    std::shared_ptr<const DepthMade> depth;
+    if (depthFinder_ && depthFinder_->state() == DepthFinder::State::Running) {
+        depth = depthFinder_->made();
+    }
+    groundFinder_->hint(things, ownKind, pieces, std::move(depth));
 }
 
 } // namespace observex

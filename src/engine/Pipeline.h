@@ -53,7 +53,7 @@ public:
     bool start(const Screen& screen);
 
     // Stops the loop and frees its GPU resources. Destroy any reader of its channels (preview(), recording(),
-    // recognition(), clip(), snap(), ui(), ground()) first.
+    // recognition(), clip(), snap(), ui(), ground(), depth()) first.
     void stop();
 
     State state() const { return state_.load(std::memory_order_acquire); }
@@ -101,6 +101,11 @@ public:
     void setGroundEnabled(bool enabled) { groundEnabled_.store(enabled, std::memory_order_relaxed); }
     ImageChannel* ground() const { return ground_.get(); }
 
+    // While on, a new image every 1 / DepthFinder::kImagesPerSecond seconds is also copied for the depth finder (how
+    // near each pixel is). Off costs nothing.
+    void setDepthEnabled(bool enabled) { depthEnabled_.store(enabled, std::memory_order_relaxed); }
+    ImageChannel* depth() const { return depth_.get(); }
+
     // Newest statistics. The reference stays valid until the next call or start().
     const PipelineStats& stats();
 
@@ -122,6 +127,7 @@ private:
     std::unique_ptr<ImageChannel> snap_;
     std::unique_ptr<ImageChannel> ui_;
     std::unique_ptr<ImageChannel> ground_;
+    std::unique_ptr<ImageChannel> depth_;
     std::unique_ptr<TripleBuffer<PipelineStats>> stats_;
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
@@ -134,6 +140,7 @@ private:
     std::atomic<bool> snapEnabled_{false};
     std::atomic<bool> uiEnabled_{false};
     std::atomic<bool> groundEnabled_{false};
+    std::atomic<bool> depthEnabled_{false};
     std::string error_;
     unsigned width_ = 0;
     unsigned height_ = 0;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Depth.h"
 #include "core/Detection.h"
 #include "core/Heuristics.h"
 
@@ -186,7 +187,11 @@ public:
     // heuristics/MinimapCone: the fit's turn is held to it, kKnownTurnSpread either way), and whether the tilt is
     // known (from far things, heuristics/GroundMotion: the fit's tilt is held to it and its pitch at the first image
     // to the one given, kKnownTiltSpread either way; with the camera nearly level the ground's motion says little of
-    // the pitch, and a fit took a known 20-degree tilt for 35).
+    // the pitch, and a fit took a known 20-degree tilt for 35), and whether the pitch is held (the depth network says
+    // it, heuristics/GroundFollower::depth: the fit's pitch at the first image is held to the one given, kHeldPitchSpread
+    // either way, so the motion says mostly how it tilts; a turn, which says the pitch, still takes it about a quarter
+    // of the way. Free, the own character's box and the matches put it back where they had it at every follow, up to 3
+    // degrees off the map's, and the grid went back and forth so).
     struct Start {
         float firstPitch = 0.0f;
         float secondPitch = 0.0f;
@@ -195,15 +200,35 @@ public:
         bool turnKnown = false;
         float turn = 0.0f;
         bool tiltKnown = false;
+        bool pitchHeld = false;
     };
     static constexpr double kKnownTurnSpread = 0.01;
     static constexpr double kKnownTiltSpread = 0.02;
+    static constexpr double kHeldPitchSpread = 0.005;
     bool motion(std::span<const GroundMatch> matches, double firstMs, double secondMs, const Start& start);
     // When motion() did not fit (too few matches, or too few agreeing: in the fastest turns the image is blurred), the
     // motion heuristics/GroundMotion's search found instead: the ground turned `turn` round the feet after sliding
     // (`slideRight`, `slideAway`) of the first image's view, the camera's pitch and distance as `found`. The camera
     // turns, goes, tilts and zooms by it. Returns false (nothing done) beyond what the camera can do.
     bool searched(float turn, float slideRight, float slideAway, const Start& found, double firstMs, double secondMs);
+    // When neither motion() nor searched() said how it went: the camera turned `turn` (radians) by the image at
+    // `secondMs` and turning on at `turnSpeed` (radians a millisecond), as the images between or the minimap said
+    // (heuristics/GroundMotion's head); else it stood at the last image's yaw, and the grid jumped back up to 13
+    // degrees in a fast turn (clip 2026-11-12_17-43-14, 8.71 and 8.78 s).
+    void turned(float turn, float turnSpeed, double secondMs) {
+        if (camera_.known) {
+            camera_.timeMs = secondMs;
+            camera_.yaw += turn;
+            camera_.yawSpeed = turnSpeed;
+        }
+    }
+    // Tilts the camera `by` radians as the depth network's map says it looks (heuristics/GroundFollower::depth): the
+    // pitch the ground's motion gave was off by that much.
+    void tilt(float by) {
+        if (camera_.known) {
+            camera_.pitch += by;
+        }
+    }
     // Where the camera looks on the image last given, as the minimap shows it (radians clockwise from north,
     // heuristics/MinimapCone): its yaw goes there, so it never drifts. At once the first time (the ground's map then
     // has north up) and when the ground did not say how it turned (`moved` false: in the fastest turns nothing
@@ -276,13 +301,24 @@ struct GroundNote {
     float heading = 0.0f;     // clockwise from north).
 };
 
+// How a depth map went (Grounding::depth; F3's numbers, the bench's notes). Plain data, as GroundHints.
+struct GroundDepthNote {
+    bool measured = false; // The ground's depth fell on a straight enough line up the screen to tell the pitch:
+    float seen = 0.0f;     // where it reaches 0 (the horizon if the network's offset were 0), as a pitch (radians),
+    float pitch = 0.0f;    // the pitch that means (heuristics/DepthTilt's table),
+    float straight = 0.0f; // how far its rows were off the line (of their range),
+    float then = 0.0f;     // the camera's pitch on the map's image,
+    float pulled = 0.0f;   // and how far it was off (radians): the camera tilts there over the next images.
+};
+
 // Follows the game's camera over screen images (heuristics/GroundFollower): what the live ground finder
 // (engine/GroundFinder) and a clip's (engine/ClipGround) use, made by observex_heuristics.dll (engine/
 // HeuristicsLibrary) so that a change to following shows without closing the app (the user asked, 2026-11-12). Each
 // image: begin() with what is known of it; then its levels from firstLevel() on read whole, and fullAreas() on its
 // full size; then end(). Each image between them (the user asked, 2026-11-12: at 15 a second the grid stood still for
 // the first 75 ms of a turn, and went on turning 75 ms after it stopped): headAreas(), those read on its full size,
-// then head(). Use one from one thread.
+// and its levels from headFirstLevel() on read whole, then head(). Each depth map, as soon as it is made: depth().
+// Use one from one thread.
 class Grounding {
 public:
     virtual ~Grounding() = default;
@@ -297,10 +333,17 @@ public:
     // Between two follows, the image shown at `timeMs` (after the last end()'s; times must not go back): the
     // full-size parts head() reads, up to `max` into `out`; how many (none: nothing to read).
     virtual int headAreas(double timeMs, const GroundHints& hints, GreyArea* out, int max) = 0;
-    // That image (those parts read; with none, any): the camera followed, turned as far as the minimap's cone did
-    // since (and held there), its tilt and walk gone on along their speeds (groundAt); as followed gone on along all
-    // of them where the cone was not seen there or then. Returns whether the cone was seen.
+    // The first of an image's levels head() reads whole.
+    virtual int headFirstLevel() const = 0;
+    // That image (read as above): the camera followed, turned as far as the ground did since (or, where that is not
+    // found, the minimap's cone, held between its turns), its tilt and walk gone on along their speeds (groundAt); as
+    // followed gone on along all of them where neither says. Returns whether the ground said.
     virtual bool head(const GreyView& image) = 0;
+    // The depth network's map of the image shown at `timeMs` (one of those given before: it comes a few milliseconds
+    // after its image): the camera's pitch is pulled towards what the ground's depth in it says (the user asked,
+    // 2026-11-12: "make the grid position according to it", the pitch only came from the ground's motion and a
+    // still camera kept a wrong one). Before the next begin() or headAreas().
+    virtual GroundDepthNote depth(const DepthInput& map, double timeMs) = 0;
     // The camera as followed up to the last end(), or the last head() after it.
     virtual GroundCamera camera() const = 0;
     virtual GroundNote note() const = 0;

@@ -467,6 +467,37 @@ std::string UiLayout::describeHits() const {
     return text;
 }
 
+std::string UiLayout::whyNot(std::string_view piece) const {
+    for (const UiPiece& found : found_) {
+        if (piece == found.name.data()) {
+            return {};
+        }
+    }
+    std::string text;
+    for (const Piece& known : pieces_) {
+        if (piece != known.name.data()) {
+            continue;
+        }
+        const Anchor& anchor = anchors_[static_cast<std::size_t>(known.anchor)];
+        if (text.find(anchor.name) != std::string::npos) {
+            continue; // Two pieces on one anchor.
+        }
+        char item[128];
+        if (!anchor.hits.empty()) {
+            std::snprintf(item, sizeof(item), "%s%s at %d,%d but the piece was left out", text.empty() ? "" : ", ",
+                          anchor.name.c_str(), anchor.hits.front().x, anchor.hits.front().y);
+        } else if (anchor.nearest.score > -1.5f) {
+            std::snprintf(item, sizeof(item), "%s%s best %.2f at %d,%d, needs %.2f", text.empty() ? "" : ", ",
+                          anchor.name.c_str(), static_cast<double>(anchor.nearest.score), anchor.nearest.x,
+                          anchor.nearest.y, static_cast<double>(anchor.minScore));
+        } else {
+            std::snprintf(item, sizeof(item), "%s%s nowhere like it", text.empty() ? "" : ", ", anchor.name.c_str());
+        }
+        text += item;
+    }
+    return text;
+}
+
 int UiLayout::findFrames(const GreyLevel& grey, UiPiece* out, int max) {
     found_.clear();
     if (grey.pixels == nullptr || grey.width < 8 || grey.height < 8) {
@@ -794,6 +825,7 @@ void UiLayout::searchWindows(bool again) {
 
 void UiLayout::findAnchor(const GreyLevel& grey, Anchor& anchor) {
     anchor.hits.clear();
+    anchor.nearest = {0, 0, -2.0f};
     candidates_.clear();
     const int lastX = grey.width - anchor.width;
     const int lastY = grey.height - anchor.height;
@@ -820,6 +852,8 @@ void UiLayout::findAnchor(const GreyLevel& grey, Anchor& anchor) {
         const float correlation = static_cast<float>(cross / std::sqrt(spread * anchor.spread));
         if (correlation >= anchor.minScore && candidates_.size() < kMaxCandidates) {
             candidates_.push_back({x, y, correlation});
+        } else if (correlation > anchor.nearest.score) {
+            anchor.nearest = {x, y, correlation};
         }
     };
 

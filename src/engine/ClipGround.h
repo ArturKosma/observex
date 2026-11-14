@@ -24,8 +24,10 @@ namespace observex {
 // before them GroundFinder::kImagesPerSecond of its frames), on the frames between only the minimap's cone (the
 // camera turned with it, Grounding::head, as live), the video decoded in order once
 // (engine/ClipPlayer's ClipReader). The own character's box and the characters to leave out come from a guesser's
-// sets (as live, from what the app shows), the interface from core/UiLayout on a frame a second. It works in the
-// background, on its own thread and GPU device, and is stopped by going.
+// sets (as live, from what the app shows), the interface from core/UiLayout on a frame a second; the depth maps made
+// live (depth.bin beside the video, engine/DepthStore) each given the following on the frame after its image
+// (Grounding::depth: live it comes a few milliseconds later), its pitch by them. It works in the background, on its own
+// thread and GPU device, and is stopped by going.
 class ClipGround {
 public:
     enum class State : std::uint8_t {
@@ -61,8 +63,17 @@ public:
         double workMs = 0.0; // Reading back and fitting, on average (not decoding).
         std::array<int, GroundFit::kMotions> motions{}; // How many frames' motions went each way, by GroundFit::Motion.
         int headed = 0; // Frames the minimap's cone was seen on (heuristics/MinimapCone).
-        int heads = 0;  // Frames between, only the cone read on (Grounding::head), of them seen on headsSeen.
-        int headsSeen = 0;
+        int heads = 0;  // Frames between, only turned on (Grounding::head), of them by the ground headsTurned,
+        int headsTurned = 0;
+        double headMs = 0.0; // each taking this long on average (reading back included).
+        int depths = 0;          // Depth maps given (depth.bin's whose image is a frame's),
+        int depthsMeasured = 0;  // of them ones that said the pitch.
+        // Each depth map given (with `notes` on): its image's time and how it went.
+        struct Depth {
+            double timeMs = 0.0;
+            GroundDepthNote note;
+        };
+        std::vector<Depth> depthNotes;
         // Each frame followed (with `notes` on): its time, the patches learned on the frame before and found again on
         // it, how far they went (the middle of them, pixels) and how its motion went.
         struct Frame {

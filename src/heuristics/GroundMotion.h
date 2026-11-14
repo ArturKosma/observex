@@ -119,8 +119,25 @@ public:
     // where each went into `out` (cleared). Returns how many.
     int find(const GreyView& image, const GroundCamera& camera, double timeMs, std::optional<float> turn,
              std::vector<GroundMatch>& out);
+    // Between follows (GroundFollower::head): how far the camera turned from the image the patches were learned on to
+    // `image` (shown at `timeMs`; only its eighth size read, kCoarseLevel), `camera` being the camera they were
+    // learned with as it was going then; looked for from `reach` short of the nearer of `stopped` and `onward` to
+    // `reach` beyond the other (radians, as GroundFit's: as far as it had turned, and on at the speed it went) and to
+    // a fraction of kFineTurnStep, the rest of the motion foretold as find() foretells it. Its match is how well the
+    // patches matched there (below 0: nothing to search with).
+    struct Turned {
+        float turn = 0.0f;
+        float match = -1.0f;
+    };
+    static constexpr float kTurnStep = 0.005f;
+    static constexpr float kFineTurnStep = 0.001f;
+    Turned findTurn(const GreyView& image, const GroundCamera& camera, double timeMs, float stopped, float onward,
+                    float reach) const;
 
     bool learned() const { return learnedCount_ > 0; }
+    // The camera the patches were learned with tilted `by` radians (GroundFollower::depth: its pitch was that far off),
+    // so the next motion fits from the pitch as it is now.
+    void tilt(float by) { learnedCamera_.pitch += by; }
     int learnedCount() const { return learnedCount_; }
     double learnedMs() const { return learnedMs_; }
     // What the last find()'s search found: the turn (radians) and slide (own heights) as GroundFit's, the camera's
@@ -197,12 +214,54 @@ public:
     // How the ground moved since the image before, then the patches to follow on the next. If the motion did not fit,
     // the camera may still have turned and gone as GroundMotion's search found (GroundFit::Motion::Searched).
     bool end(const GreyView& image) override;
-    // Between follows only the minimap's cone is read (60 x 60 pixels): the camera turns with it on every image, from
-    // the image the patches were learned on, where both were known, and holds between the cone's turns (the game
-    // redraws it about 30 times a second, steps of 4 to 9 degrees in a fast turn: clip 2026-11-12_18-58-01, frames
-    // 562 to 596, against the far trees' shift; going on along a speed between them only overshot).
+    // Between follows the camera turns as the screen did: the patches learned on the image followed are looked for on
+    // the eighth size of each image, turned only (GroundMotion::findTurn, from stopped where the image before was to
+    // going on as it went, kHeadTurnReach either way: looked for only round going on, a turn that stopped went on 14
+    // degrees, clip 2026-11-11_22-10-08, frames 57 and 58). Where they do not match (GroundMotion::kMinSearch), as far
+    // as the minimap's cone turned
+    // since that image, held between its turns: the game redraws it only about 30 times a second, steps of 4 to 9
+    // degrees in a fast turn (clip 2026-11-12_18-58-01, frames 562 to 596, against the far trees' shift).
     int headAreas(double timeMs, const GroundHints& hints, GreyArea* out, int max) override;
+    int headFirstLevel() const override { return GroundMotion::kCoarseLevel; }
     bool head(const GreyView& image) override;
+    // The depth network's map (heuristics/DepthTilt): where its ground's line reaches 0 says the pitch (by the measured
+    // table); the camera on the map's image (kPitched images kept) is compared with it, and from then on the camera,
+    // the patches learned and the images kept tilt towards it on every image (pullDepth), smoothly: by the time
+    // constant kDepthMs over the map's weight (less looking steeply down, where the table is steep; at least
+    // kDepthLeast), so where it counts whole 95% of the way in 0.3 s, looking steeply down in 1.2 s. The ground's motion
+    // still says how it tilts between maps, and the next map says how far is left. It is the better pitch: the motion
+    // alone held 35 degrees where the camera looked nearly level (the horizon in the screen's middle, 5 by the map: clip
+    // 2026-11-12_20-16-13, 0.8 s), 38 where far trees stood a third down the screen (12 by it: 2026-11-12_20-09-30,
+    // 8.2 s) and 16 looking down past the screen's top (23 to 30 by it: 2026-11-12_20-16-13, 9 s). While the pitch is
+    // only kGroundStartPitch (GroundCamera::pitchMeasured) and no map has said it since the camera was found, all the
+    // way at once. Not where its rows are off their line more than kDepthStraight (the horizon in the band, a hill, a
+    // wall) or the map is older than the images kept. Within kDepthHeldMs of the last map that said it, if it weighed
+    // at least kDepthHeldWeight (said 25 degrees or less), a follow's fit keeps the pitch (GroundFit::Start::pitchHeld):
+    // its motion says how the camera tilts, not where it looks. Steeper the maps say little (the table is steep, the
+    // map's 39 degrees 60 to 82), and held so the grid lagged a fast tilt to straight down by 12 degrees (clip
+    // 2026-11-12_16-53-29, 5.6 s) and one back up by 20 (2026-11-12_15-50-36, 7.95 s): the fit has it as before.
+    GroundDepthNote depth(const DepthInput& map, double timeMs) override;
+    static constexpr float kDepthMs = 100.0f;
+    static constexpr double kDepthHeldMs = 1000.0;
+    static constexpr float kDepthHeldWeight = 0.4f;
+    static constexpr float kDepthLeast = 0.25f;
+    static constexpr float kDepthStraight = 0.02f;
+    static constexpr int kPitched = 48;
+    static constexpr float kHeadTurnReach = 0.05f;
+    // While the cone holds still (no change of kConeMoved in kConeGapMs) the camera turns at most kConeSlack (radians)
+    // from where it was when the cone stopped: looking level or up the ground's patches turned the camera 4 to 14
+    // degrees the cone did not (clip 2026-11-12_11-34-03). While the cone turns the ground's turn is free: redrawn
+    // every 25 to 42 ms, the cone lags a fast turn, and held to it the grid went on 14 degrees after a turn stopped
+    // and lagged 4 at its start (clip 2026-11-11_22-10-08, frames 48 to 58).
+    static constexpr float kConeSlack = 0.03f;
+    // How far the cone may lag a turn at a follow: as far as it turns in kConeLagMs.
+    static constexpr double kConeLagMs = 50.0;
+    // The cone's speed: how far it moved at its last change (at least kConeMoved, radians: its readings jitter by
+    // half a degree) over the time since the change before, taken as kConeRedrawMs to kConeGapMs; none once it held
+    // still longer than kConeGapMs.
+    static constexpr float kConeMoved = 0.0175f;
+    static constexpr double kConeRedrawMs = 25.0;
+    static constexpr double kConeGapMs = 60.0;
     GroundCamera camera() const override { return between_ ? betweenCamera_ : fit_.camera(); }
     GroundNote note() const override;
     void clear() override;
@@ -230,12 +289,54 @@ private:
     MinimapCone cone_;
     std::array<GreyArea, MinimapCone::kCandidates> coneAreas_{};
     std::size_t coneAreaCount_ = 0;
-    bool learnedHeaded_ = false; // The cone was seen on the image the patches were learned on: its heading.
+    bool learnedHeaded_ = false; // The cone was seen on the image the patches were learned on: its heading,
     float learnedHeading_ = 0.0f;
+    bool learnedHeld_ = false;   // and whether it held still then (else that heading was a redraw behind).
     bool between_ = false; // The last image was head()'s: the camera there.
     GroundCamera betweenCamera_;
-    double headMs_ = 0.0; // The image headAreas() was for.
+    double headMs_ = 0.0;        // The image headAreas() was for.
+    float lastTurn_ = 0.0f;      // The turn since the image followed on the last image it was known on (end()'s: 0),
+    double lastTurnMs_ = 0.0;    // that image,
+    float lastTurnSpeed_ = 0.0f; // and how fast it went then (radians a millisecond);
+    bool lastByScreen_ = false;  // whether the ground said so (head()).
+    bool held_ = false;          // The cone held still on the last image between, the camera at heldTurn_ then.
+    float heldTurn_ = 0.0f;
+    bool coneKnown_ = false;     // The cone's last change: when, its heading, and how fast it turned to it.
+    double coneMs_ = 0.0;
+    float coneHeading_ = 0.0f;
+    float coneSpeed_ = 0.0f;
+    // Takes the cone's reading on the image at `timeMs` (seen or not) into coneMs_ and the rest.
+    void noteCone(bool seen, double timeMs);
+    // Whether the cone held still up to `timeMs` (kConeGapMs and more).
+    bool coneHeld(double timeMs) const { return coneKnown_ && timeMs - coneMs_ > kConeGapMs; }
+    // How far the cone turned since the image followed (`followed` the camera there): from its heading there if it
+    // held still then, else from the yaw followed (in a turn the cone there was a redraw behind, up to 11 degrees:
+    // clip 2026-11-11_22-10-08, 0.47 s).
+    float coneTurn(const GroundCamera& followed) const;
     std::vector<GroundMatch> matches_;
+    std::vector<GreyArea> avoid_; // begin()'s hints.avoid: the characters and the interface, out of the depth too.
+    struct Pitched {
+        double timeMs = 0.0;
+        float pitch = 0.0f;
+    };
+    std::array<Pitched, kPitched> pitched_{}; // The camera's pitch on the last images (end()'s and head()'s), oldest
+    int pitchedCount_ = 0;                    // first from pitchedNext_ on.
+    int pitchedNext_ = 0;
+    bool depthTaken_ = false; // A map has said the pitch since the camera was last found.
+    float depthLeft_ = 0.0f;  // How far the last map's pitch is from the camera's still (radians),
+    float depthRate_ = 0.0f;  // the share of it to go a millisecond (its weight over kDepthMs),
+    double depthMs_ = 0.0;    // and the image pullDepth() was last for.
+    double depthSaidMs_ = 0.0; // The image of the last map that said the pitch,
+    float depthWeight_ = 0.0f; // and its weight.
+    // Tilts the camera, the patches learned and the images kept towards the last map's pitch, as far as the time since
+    // the image before says; then
+    void pullDepth(double timeMs);
+    // tilts them all `by` radians.
+    void tiltAll(float by);
+    // Keeps the camera's pitch on the image at `timeMs`; forgets them all while the camera is not known.
+    void notePitch(double timeMs);
+    // The camera's pitch on the image at `timeMs`, between the two kept round it; none if older than all.
+    std::optional<float> pitchAt(double timeMs) const;
     double timeMs_ = 0.0;       // The image begin() was for.
     double lostSinceMs_ = -1.0; // The first image not followed since the last one followed; -1: none.
     bool followed_ = false;

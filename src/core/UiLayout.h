@@ -61,6 +61,9 @@ public:
 
     // Where the last find() found each anchor, one line each ("arrow-up: 6 837 0.97, 6 1001 0.95"), for the bench.
     std::string describeHits() const;
+    // Why the last find() did not find the piece named `piece`, for a clip's why lines: each of its anchors' best
+    // place below its score, if any was near ("target-left-up 0.90 at 1076,8, needs 0.96"); empty if it was found.
+    std::string whyNot(std::string_view piece) const;
 
     // Milliseconds the last find() took for the framed windows and for the anchors and pieces.
     double framesMs() const { return framesMs_; }
@@ -100,6 +103,7 @@ private:
         double spread = 0.0;       // Sum of centred squared.
         std::vector<Pair> pairs;
         std::vector<Hit> hits; // On the last image.
+        Hit nearest{0, 0, -2.0f}; // The best place below minScore on the last image (score -2: none checked).
     };
     enum class Side : std::uint8_t { Left, Right, Top, Bottom };
     struct Stretch {

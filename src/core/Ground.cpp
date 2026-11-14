@@ -336,8 +336,9 @@ bool GroundFit::motion(std::span<const GroundMatch> matches, double firstMs, dou
     const double priorDistance = std::log(start.firstDistance);
     constexpr double kDistanceSpread = 0.02; // How far the first distance may wander then (as a log).
     // How far the fit may wander from it (radians), and the pitch change between the two images.
-    const double pitchSpread = holdPitch            ? 0.005
-                               : start.tiltKnown    ? kKnownTiltSpread
+    const double pitchSpread = holdPitch               ? 0.005
+                               : start.pitchHeld       ? kHeldPitchSpread
+                               : start.tiltKnown       ? kKnownTiltSpread
                                : camera_.pitchMeasured ? 0.15
                                                        : 0.6;
     const double pitchStep = holdPitch ? 0.005 : start.tiltKnown ? kKnownTiltSpread : 0.1;

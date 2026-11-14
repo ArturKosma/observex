@@ -27,7 +27,7 @@
 // device of its own. The compressed frames stay in memory (Impl::packets), cut at key frames to the last kClipSeconds;
 // the recogniser's looks come through a fixed queue that never waits (Impl::queue) and stay beside them. Saving hands
 // a copy of all that to a writer thread (writeClip), which muxes the frames into clip.mp4 with Media Foundation's sink
-// writer (as they are: no second encode) and writes clip.txt, picture.jpg and clip.observex.
+// writer (as they are: no second encode) and writes clip.txt, picture.jpg, depth.bin and clip.observex.
 //
 // The video has a frame each time the screen changed, at the time the screen showed it (so its frame rate varies), no
 // B-frames, and a key frame (IDR) at least every kKeyEvery, so the last kClipSeconds can be cut out at a key frame
@@ -104,6 +104,8 @@ struct Snap {
 struct Note {
     std::int64_t qpc = 0;
     std::string text;
+    bool log = false; // A line of observex's log (ClipRecorder::logged), made at `when`.
+    std::string when;
 };
 
 // The grid the Show flag Ground drew over one screen image (ClipRecorder::grounded).
@@ -112,6 +114,13 @@ struct Grounded {
     std::uint64_t image = 0;
     std::uint64_t followed = 0;
     GroundCamera camera;
+};
+
+// The depth map the Show flag Depth drew over one screen image (ClipRecorder::depthShown).
+struct DepthShown {
+    std::int64_t qpc = 0; // When the screen showed the image.
+    std::uint64_t image = 0;
+    std::uint64_t map = 0; // 0: none.
 };
 
 // A look on its way from the recogniser's thread, in a fixed slot so handing it over allocates nothing.
@@ -151,6 +160,8 @@ struct SaveJob {
     std::vector<Snap> snaps;
     std::vector<Note> notes;
     std::vector<Grounded> grounds;
+    std::vector<DepthShown> depthShows;
+    std::vector<std::shared_ptr<const DepthRecord>> depths; // The maps depthShows draw, in image order.
     std::vector<std::uint8_t> picture; // The screen at the save, BGRA, rows width * 4 bytes apart; empty: none.
 };
 
@@ -326,17 +337,23 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
             "#   image FOLLOWED: the camera as drawn (KNOWN and MEASURED 1 or 0, angles in radians, lengths in own\n"
             "#   heights, the lens and the screen's middle in pixels). KNOWN 0: nothing drawn from TIME on. The last\n"
             "#   line at or before a frame's TIME is what was seen on it.\n"
-            "# note TIME TEXT: something that happened then, e.g. a recording started.\n";
+            "# depth IMAGE TIME MAP: the depth map the Show flag Depth drew over screen image IMAGE, shown at TIME: the\n"
+            "#   one the depth finder made of screen image MAP (in depth.bin, with what was shown of it). MAP 0: nothing\n"
+            "#   drawn from TIME on. The last line at or before a frame's TIME is what was seen on it.\n"
+            "# note TIME TEXT: something that happened then, e.g. a recording started.\n"
+            "# log TIME WHEN  TEXT: a line of observex's log (its Log tab) made then: its local time and text.\n";
 
-    // Frames, looks, snapped images, grids and notes in time order; at the same time a frame comes first, then the
-    // look at its image, then the snapped one, then the grid drawn over it (several in the order drawn).
+    // Frames, looks, snapped images, grids, depth maps and notes in time order; at the same time a frame comes first,
+    // then the look at its image, then the snapped one, then the grid and the depth drawn over it (several in the order
+    // drawn).
     struct Item {
         std::int64_t qpc;
-        int order; // 0 frame, 1 look, 2 snapped, 3 note, 4 ground.
+        int order; // 0 frame, 1 look, 2 snapped, 3 note, 4 ground, 5 depth.
         std::size_t index;
     };
     std::vector<Item> items;
-    items.reserve(job.packets.size() + job.looks.size() + job.snaps.size() + job.notes.size() + job.grounds.size());
+    items.reserve(job.packets.size() + job.looks.size() + job.snaps.size() + job.notes.size() + job.grounds.size() +
+                  job.depthShows.size());
     for (std::size_t i = 0; i < job.packets.size(); ++i) {
         items.push_back({job.packets[i]->qpc, 0, i});
     }
@@ -351,6 +368,9 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
     }
     for (std::size_t i = 0; i < job.grounds.size(); ++i) {
         items.push_back({job.grounds[i].qpc, 4, i});
+    }
+    for (std::size_t i = 0; i < job.depthShows.size(); ++i) {
+        items.push_back({job.depthShows[i].qpc, 5, i});
     }
     std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
         return a.qpc != b.qpc ? a.qpc < b.qpc : a.order < b.order;
@@ -376,11 +396,19 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
                         static_cast<unsigned long long>(snap.lookImage), snap.finds);
         } else if (item.order == 3) {
             const Note& note = job.notes[item.index];
-            appendNote(text, ms(note.qpc), note.text);
-        } else {
+            if (note.log) {
+                appendLog(text, ms(note.qpc), LogLine{note.when, note.text});
+            } else {
+                appendNote(text, ms(note.qpc), note.text);
+            }
+        } else if (item.order == 4) {
             const Grounded& ground = job.grounds[item.index];
             appendGround(text, static_cast<unsigned long long>(ground.image), ms(ground.qpc),
                          static_cast<unsigned long long>(ground.followed), ground.camera);
+        } else {
+            const DepthShown& shown = job.depthShows[item.index];
+            appendDepth(text, static_cast<unsigned long long>(shown.image), ms(shown.qpc),
+                        static_cast<unsigned long long>(shown.map));
         }
     }
     return text;
@@ -406,6 +434,9 @@ ClipInfo writeClip(const SaveJob& job) {
     if (!job.picture.empty()) {
         writeImageFile(job.folder / kClipPicture, ImageFormat::Jpeg, job.picture.data(), job.width, job.height,
                        job.width * 4);
+    }
+    if (!job.depths.empty()) {
+        writeDepthFile(job.folder / kClipDepth, job.depths);
     }
 
     ClipInfo info;
@@ -449,6 +480,9 @@ struct ClipRecorder::Impl {
     std::deque<Snap> snaps;
     std::deque<Note> notes;
     std::deque<Grounded> grounds;
+    std::deque<DepthShown> depthShows;
+    std::deque<std::shared_ptr<const DepthRecord>> depths; // In image order.
+    std::uint64_t depthBytes = 0;
     std::atomic<bool> holding{false}; // It holds at least one frame.
 
     // From the recogniser's thread (one writer) to the clip thread (one reader).
@@ -465,6 +499,9 @@ struct ClipRecorder::Impl {
     std::mutex mutex;
     std::vector<Note> newNotes;
     std::vector<Grounded> newGrounds;
+    std::vector<DepthShown> newDepthShows;
+    // From the depth finder's thread.
+    std::vector<std::shared_ptr<const DepthRecord>> newDepths;
     bool saveAsked = false;
     SaveJob asked; // The folder, what it is about and when; the rest is filled on the clip thread.
 
@@ -736,6 +773,22 @@ void ClipRecorder::Impl::trim(std::int64_t cutoffQpc) {
     while (grounds.size() >= 2 && grounds[1].qpc <= first) {
         grounds.pop_front();
     }
+    // Likewise the depth maps drawn, and the maps from the first of them drawn on (made from an image a little before
+    // it was drawn); with none drawn, those of images from the first frame on.
+    while (depthShows.size() >= 2 && depthShows[1].qpc <= first) {
+        depthShows.pop_front();
+    }
+    std::uint64_t firstDrawn = 0;
+    for (const DepthShown& shown : depthShows) {
+        if (shown.map != 0 && (firstDrawn == 0 || shown.map < firstDrawn)) {
+            firstDrawn = shown.map;
+        }
+    }
+    while (!depths.empty() &&
+           (firstDrawn != 0 ? depths.front()->image < firstDrawn : depths.front()->imageQpc < first)) {
+        depthBytes -= depths.front()->map.size() + depths.front()->levels.size();
+        depths.pop_front();
+    }
 }
 
 void ClipRecorder::Impl::takeLooks() {
@@ -789,6 +842,15 @@ void ClipRecorder::Impl::takeNotes() {
         grounds.push_back(ground);
     }
     newGrounds.clear();
+    for (const DepthShown& shown : newDepthShows) {
+        depthShows.push_back(shown);
+    }
+    newDepthShows.clear();
+    for (std::shared_ptr<const DepthRecord>& record : newDepths) {
+        depthBytes += record->map.size() + record->levels.size();
+        depths.push_back(std::move(record));
+    }
+    newDepths.clear();
 }
 
 SaveJob ClipRecorder::Impl::takeSave() {
@@ -828,6 +890,18 @@ SaveJob ClipRecorder::Impl::takeSave() {
     for (const Grounded& ground : grounds) {
         if (ground.qpc <= job.savedQpc) {
             job.grounds.push_back(ground);
+        }
+    }
+    for (const DepthShown& shown : depthShows) {
+        if (shown.qpc <= job.savedQpc) {
+            job.depthShows.push_back(shown);
+        }
+    }
+    // Every map up to the save, drawn or not (in image order): the clip's Today tilts the camera by them as the ground
+    // finder did live (engine/ClipGround), and the shows draw some of them.
+    for (const auto& record : depths) {
+        if (record->imageQpc <= job.savedQpc) {
+            job.depths.push_back(record);
         }
     }
 
@@ -943,10 +1017,28 @@ void ClipRecorder::note(std::string_view text) {
     impl_->newNotes.push_back({qpcNow(), std::string(text)});
 }
 
+void ClipRecorder::logged(std::int64_t qpc, const LogLine& line) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newNotes.push_back({qpc, line.text, true, line.when});
+}
+
 void ClipRecorder::grounded(std::int64_t shownQpc, std::uint64_t image, std::uint64_t followed,
                             const GroundCamera& drawn) {
     std::scoped_lock lock(impl_->mutex);
     impl_->newGrounds.push_back({shownQpc, image, followed, drawn});
+}
+
+void ClipRecorder::depthed(std::shared_ptr<const DepthRecord> record) {
+    if (state() == State::Failed || record == nullptr) {
+        return;
+    }
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newDepths.push_back(std::move(record));
+}
+
+void ClipRecorder::depthShown(std::int64_t shownQpc, std::uint64_t image, std::uint64_t map) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newDepthShows.push_back({shownQpc, image, map});
 }
 
 bool ClipRecorder::save(std::filesystem::path folder, ClipAbout about) {
@@ -1075,6 +1167,7 @@ void ClipRecorder::run(std::stop_token stop) {
                     impl.packets.empty() ? 0.0 : msSince(now, impl.packets.front()->qpc, impl.frequency) / 1000.0;
                 stats.bytes = impl.packetBytes;
                 stats.dropped = impl.dropped.load(std::memory_order_relaxed);
+                stats.depthBytes = impl.depthBytes;
                 stats_.publish();
                 windowFrames = 0;
                 windowSumMs = 0.0f;

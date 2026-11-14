@@ -1,4 +1,5 @@
 #include "core/Ground.h"
+#include "heuristics/DepthTilt.h"
 #include "heuristics/GroundMotion.h"
 #include "heuristics/MinimapCone.h"
 #include "heuristics/Snapper.h" // GreyImage
@@ -9,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <vector>
 
@@ -173,6 +175,34 @@ TEST_CASE("walking keeps the pitch and goes on the map; standing still holds it"
     }
     CHECK(fit.camera().pitch == doctest::Approx(0.5f).epsilon(0.02));
     CHECK(fit.camera().yawSpeed == doctest::Approx(0.0f));
+}
+
+TEST_CASE("a pitch held (by the depth network) is mostly kept by the fit; free, a turn's motion takes it back") {
+    const GroundCamera truth = groundCamera(0.5f, 13.0f, kWidth, kHeight);
+    const OwnRows rows = ownRows(truth);
+    for (const bool held : {true, false}) {
+        CAPTURE(held);
+        GroundFit fit;
+        fit.own(rows.top, rows.bottom, kWidth, kHeight, 0.0);
+        double timeMs = 0.0;
+        for (int pair = 0; pair < 8; ++pair, timeMs += 66.0) {
+            fit.own(rows.top, rows.bottom, kWidth, kHeight, timeMs + 66.0);
+            fit.motion(matchesOf(truth, truth, 0.05f), timeMs, timeMs + 66.0);
+        }
+        REQUIRE(fit.camera().pitch == doctest::Approx(0.5f).epsilon(0.01));
+        fit.tilt(0.06f); // As a depth map says: 3.4 degrees off.
+        const GroundCamera& camera = fit.camera();
+        const GroundFit::Start start{camera.pitch, camera.pitch, camera.distance, camera.distance,
+                                     false,        0.0f,         false,           held};
+        fit.own(rows.top, rows.bottom, kWidth, kHeight, timeMs + 66.0);
+        CHECK(fit.motion(matchesOf(truth, truth, 0.05f), timeMs, timeMs + 66.0, start));
+        // Held, a turn's motion (which says the pitch) takes it back only about a quarter of the way (1 degree).
+        if (held) {
+            CHECK(fit.camera().pitch > 0.535f);
+        } else {
+            CHECK(fit.camera().pitch == doctest::Approx(0.5f).epsilon(0.01));
+        }
+    }
 }
 
 TEST_CASE("matches off the ground count for little") {
@@ -388,7 +418,7 @@ void drawMinimap(std::vector<std::uint8_t>& pixels, const GreyArea& window, floa
 
 } // namespace
 
-TEST_CASE("between follows the camera turns as the minimap's cone does, and stops when it stops") {
+TEST_CASE("between follows the camera turns as the ground does, held to the minimap's cone, and stops with them") {
     const GreyArea window{470, 10, 630, 180};
     GroundCamera truth = groundCamera(0.65f, 10.0f, kSmallWidth, kSmallHeight);
     const OwnRows rows = ownRows(truth);
@@ -403,14 +433,16 @@ TEST_CASE("between follows the camera turns as the minimap's cone does, and stop
     GroundFollower follower;
     GreyImage image;
     std::uint64_t number = 0;
-    const auto show = [&](std::optional<float> heading) {
-        std::vector<std::uint8_t> pixels = render(truth);
+    const auto show = [&](std::optional<float> heading, bool flat = false) {
+        std::vector<std::uint8_t> pixels = flat ? std::vector<std::uint8_t>(kSmallWidth * kSmallHeight, 120)
+                                                : render(truth);
         if (heading) {
             drawMinimap(pixels, window, *heading);
         }
         image.fromGrey(pixels.data(), kSmallWidth, kSmallHeight, kSmallWidth);
         return image.view(++number);
     };
+    const auto off = [](float a, float b) { return std::abs(std::remainder(a - b, 6.28318531f)); };
     // Followed through a turn, the cone turning with the camera.
     for (int step = 0; step < 4; ++step) {
         truth.yaw = 0.03f * static_cast<float>(step);
@@ -422,30 +454,229 @@ TEST_CASE("between follows the camera turns as the minimap's cone does, and stop
     REQUIRE(follower.cone().seen());
     REQUIRE(followed.yawSpeed > 0.0003f); // The follow's: 0.03 every 66 ms.
 
-    // It turns a little more, then stops: the camera on the images between stops with the cone, and does not go on
-    // along the follow's speed.
+    // It turns on fast, then stops: the camera on the images between turns and stops with the ground, and does not go
+    // on along the follow's speed. (On this screen's eighth size, 80 x 45, the turns found come out about 0.75 of the
+    // true ones; on the real one they were within half a degree of the far trees' shift, clips 2026-11-11_22-10-08
+    // and 2026-11-12_18-58-01.)
     std::array<GreyArea, 8> areas{};
+    float stopped = 0.0f;
     for (int step = 1; step <= 7; ++step) {
         const double timeMs = 198.0 + 8.0 * step;
-        const float turned = 0.004f * static_cast<float>(std::min(step, 3));
+        const float turned = 0.02f * static_cast<float>(std::min(step, 3));
+        truth.yaw = 0.09f + turned;
         REQUIRE(follower.headAreas(timeMs, hints, areas.data(), static_cast<int>(areas.size())) == 1);
+        CHECK(follower.headFirstLevel() == GroundMotion::kCoarseLevel);
         CHECK(follower.head(show(1.09f + turned)));
         const GroundCamera camera = follower.camera();
         CHECK(camera.known);
         CHECK(camera.timeMs == doctest::Approx(timeMs));
-        CHECK(std::abs(std::remainder(camera.yaw - followed.yaw - turned, 6.28318531f)) < 0.006f);
+        const float turnedBy = std::remainder(camera.yaw - followed.yaw, 6.28318531f);
+        CHECK(turnedBy > 0.6f * turned);
+        CHECK(turnedBy < 1.2f * turned);
+        if (step == 3) {
+            stopped = camera.yaw;
+        } else if (step > 3) {
+            CHECK(off(camera.yaw, stopped) < 0.001f);
+        }
         CHECK(camera.pitch == doctest::Approx(groundAt(followed, timeMs).pitch));
     }
+    CHECK(std::abs(follower.camera().yawSpeed) < 0.0002f);
+
+    // Where the ground says nothing (a flat image), where the cone looks, and held there.
+    REQUIRE(follower.headAreas(262.0, hints, areas.data(), static_cast<int>(areas.size())) == 1);
+    CHECK_FALSE(follower.head(show(1.17f, true)));
+    CHECK(off(follower.camera().yaw, follower.cone().heading()) < 0.001f);
+    CHECK(off(follower.cone().heading(), 1.17f) < 0.02f);
     CHECK(follower.camera().yawSpeed == 0.0f);
 
-    // With the cone not seen, it goes on along the follow's speeds, as before.
-    REQUIRE(follower.headAreas(260.0, hints, areas.data(), static_cast<int>(areas.size())) == 1);
-    CHECK_FALSE(follower.head(show(std::nullopt)));
-    CHECK(follower.camera().yaw == doctest::Approx(groundAt(followed, 260.0).yaw));
+    // With neither, it goes on along the follow's speeds, as before.
+    REQUIRE(follower.headAreas(270.0, hints, areas.data(), static_cast<int>(areas.size())) == 1);
+    CHECK_FALSE(follower.head(show(std::nullopt, true)));
+    CHECK(follower.camera().yaw == doctest::Approx(groundAt(followed, 270.0).yaw));
 
     // The next follow is the follow's own again.
     truth.yaw = 0.1f;
-    follower.begin(264.0, kSmallWidth, kSmallHeight, hints);
+    follower.begin(274.0, kSmallWidth, kSmallHeight, hints);
     follower.end(show(1.1f));
-    CHECK(follower.camera().timeMs == doctest::Approx(264.0));
+    CHECK(follower.camera().timeMs == doctest::Approx(274.0));
+
+    // While the cone holds still, the ground turns the camera at most kConeSlack from where it was (looking level the
+    // ground's patches turned it where the cone did not).
+    follower.begin(340.0, kSmallWidth, kSmallHeight, hints);
+    follower.end(show(1.1f));
+    const GroundCamera still = follower.camera();
+    for (int step = 1; step <= 5; ++step) {
+        const double timeMs = 340.0 + 8.0 * step;
+        truth.yaw = 0.1f + 0.015f * static_cast<float>(step);
+        REQUIRE(follower.headAreas(timeMs, hints, areas.data(), static_cast<int>(areas.size())) == 1);
+        CHECK(follower.head(show(1.1f)));
+    }
+    CHECK(off(follower.camera().yaw - still.yaw, GroundFollower::kConeSlack) < 0.001f);
+}
+
+namespace {
+
+// A positive float as a half-precision one (what the depth network gives), rounded.
+std::uint16_t toHalf(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const int exponent = static_cast<int>((bits >> 23) & 0xFFu) - 127 + 15;
+    if (exponent <= 0) {
+        return 0;
+    }
+    if (exponent >= 31) {
+        return 0x7C00u;
+    }
+    return static_cast<std::uint16_t>((static_cast<std::uint32_t>(exponent) << 10) + (((bits & 0x7FFFFFu) + 0x1000u) >> 13));
+}
+
+// A depth map of flat ground as `camera` sees it on a `screenWidth` x `screenHeight` screen: the true inverse depth
+// (along where it looks, own heights), times 5 (the network's scale), 0 past the horizon.
+struct FlatDepth {
+    int width = 0;
+    int height = 0;
+    std::vector<std::uint16_t> map;
+};
+FlatDepth flatDepth(const GroundCamera& camera, int width, int height, float screenWidth, float screenHeight) {
+    FlatDepth depth{width, height, std::vector<std::uint16_t>(static_cast<std::size_t>(width * height))};
+    const float above = camera.distance * std::sin(camera.pitch) + kGroundTarget; // The eye over the ground.
+    for (int y = 0; y < height; ++y) {
+        const float row = (static_cast<float>(y) + 0.5f) * screenHeight / static_cast<float>(height);
+        const float inverse =
+            (std::sin(camera.pitch) + (row - camera.middleY) / camera.focal * std::cos(camera.pitch)) / above;
+        const std::uint16_t value = toHalf(std::max(inverse, 0.0f) * 5.0f);
+        std::fill_n(depth.map.begin() + static_cast<std::ptrdiff_t>(y * width), width, value);
+    }
+    (void)screenWidth;
+    return depth;
+}
+
+DepthInput inputOf(const FlatDepth& depth, float screenWidth, float screenHeight) {
+    DepthInput input;
+    input.map = depth.map.data();
+    input.width = depth.width;
+    input.height = depth.height;
+    input.screenWidth = static_cast<int>(screenWidth);
+    input.screenHeight = static_cast<int>(screenHeight);
+    return input;
+}
+
+// `area` of the screen (pixels) set to `value` on `depth`'s map.
+void paint(FlatDepth& depth, const GreyArea& area, float value, float screenWidth, float screenHeight) {
+    const float sx = static_cast<float>(depth.width) / screenWidth;
+    const float sy = static_cast<float>(depth.height) / screenHeight;
+    for (int y = static_cast<int>(static_cast<float>(area.y0) * sy); y < static_cast<int>(static_cast<float>(area.y1) * sy); ++y) {
+        for (int x = static_cast<int>(static_cast<float>(area.x0) * sx); x < static_cast<int>(static_cast<float>(area.x1) * sx); ++x) {
+            depth.map[static_cast<std::size_t>(y * depth.width + x)] = toHalf(value);
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("the depth of flat ground falls on a line that reaches 0 at the horizon, the interface and characters out") {
+    const GroundCamera truth = groundCamera(0.3f, 10.0f, kWidth, kHeight);
+    FlatDepth depth = flatDepth(truth, 924, 518, kWidth, kHeight);
+    DepthLine line = measureDepthLine(inputOf(depth, kWidth, kHeight), {});
+    REQUIRE(line.known);
+    CHECK(std::abs(line.zeroRow - horizonRow(truth)) < 3.0f);
+    CHECK(line.straight < 0.005f);
+    CHECK(line.rows > 140);
+
+    // A window across two thirds of the band's columns, and a character: nearer than the ground there.
+    const GreyArea window{700, 700, 1500, 900};
+    const GreyArea character{1250, 760, 1330, 1000};
+    paint(depth, window, 9.0f, kWidth, kHeight);
+    paint(depth, character, 6.0f, kWidth, kHeight);
+    DepthInput input = inputOf(depth, kWidth, kHeight);
+    const DepthLine spoilt = measureDepthLine(input, {}); // With them in, no line (or a crooked one).
+    CHECK((!spoilt.known || spoilt.straight > GroundFollower::kDepthStraight));
+    input.ignore = &window;
+    input.ignoreCount = 1;
+    line = measureDepthLine(input, {&character, 1});
+    REQUIRE(line.known);
+    CHECK(std::abs(line.zeroRow - horizonRow(truth)) < 3.0f);
+    CHECK(line.straight < 0.005f);
+}
+
+TEST_CASE("the network's pitch is the pitch up to 15 degrees, then means ever more of it, counting less") {
+    constexpr float kDegree = 0.0174532925f;
+    CHECK(depthPitch(10.0f * kDegree).pitch == doctest::Approx(10.5f * kDegree).epsilon(0.001));
+    CHECK(depthPitch(10.0f * kDegree).weight > 0.5f);
+    float before = depthPitch(0.0f).pitch;
+    for (float seen = 1.0f; seen <= 45.0f; seen += 1.0f) {
+        const DepthPitch said = depthPitch(seen * kDegree);
+        CHECK(said.pitch >= before);
+        CHECK(said.weight > 0.0f);
+        before = said.pitch;
+    }
+    CHECK(depthPitch(30.0f * kDegree).weight < 0.15f);
+    CHECK(depthPitch(37.0f * kDegree).pitch > 75.0f * kDegree);
+    CHECK(depthPitch(45.0f * kDegree).pitch == doctest::Approx(depthPitch(38.0f * kDegree).pitch)); // Saturated.
+}
+
+TEST_CASE("a depth map pulls the camera's pitch: all the way while it is only guessed, then over the images after") {
+    const GroundCamera truth = groundCamera(0.65f, 10.0f, kSmallWidth, kSmallHeight);
+    const OwnRows rows = ownRows(truth);
+    GroundFollower follower;
+    GreyImage image;
+    GroundHints hints;
+    hints.hasOwn = true;
+    hints.ownTop = rows.top;
+    hints.ownBottom = rows.bottom;
+    const std::vector<std::uint8_t> pixels = render(truth);
+    image.fromGrey(pixels.data(), kSmallWidth, kSmallHeight, kSmallWidth);
+    follower.begin(100.0, kSmallWidth, kSmallHeight, hints);
+    follower.end(image.view(1));
+    REQUIRE(follower.camera().known);
+    REQUIRE_FALSE(follower.camera().pitchMeasured);
+    const float guessed = follower.camera().pitch;
+    const auto mapAt = [&](float pitch) {
+        GroundCamera seen = follower.camera();
+        seen.pitch = pitch;
+        return flatDepth(seen, 308, 173, kSmallWidth, kSmallHeight);
+    };
+    const float screenWidth = static_cast<float>(kSmallWidth);
+    const float screenHeight = static_cast<float>(kSmallHeight);
+
+    // Older than the images kept: says nothing.
+    const FlatDepth first = mapAt(0.2f);
+    GroundDepthNote note = follower.depth(inputOf(first, screenWidth, screenHeight), 50.0);
+    CHECK_FALSE(note.measured);
+    CHECK(follower.camera().pitch == guessed);
+
+    // Only guessed: all the way at once.
+    note = follower.depth(inputOf(first, screenWidth, screenHeight), 100.0);
+    REQUIRE(note.measured);
+    CHECK(note.seen == doctest::Approx(0.2f).epsilon(0.03));
+    CHECK(note.then == doctest::Approx(guessed));
+    CHECK(follower.camera().pitch == doctest::Approx(depthPitch(note.seen).pitch));
+
+    // Then not at once: how far off it was, from the pitch on the map's image.
+    const float now = follower.camera().pitch;
+    const FlatDepth second = mapAt(0.22f);
+    note = follower.depth(inputOf(second, screenWidth, screenHeight), 100.0);
+    REQUIRE(note.measured);
+    const DepthPitch said = depthPitch(note.seen);
+    CHECK(note.then == doctest::Approx(now));
+    CHECK(note.pulled == doctest::Approx(said.pitch - now));
+    CHECK(follower.camera().pitch == now);
+
+    // A crooked map (a wall, the horizon in the band) says nothing, and leaves the pull as it was.
+    FlatDepth crooked = mapAt(0.3f);
+    for (int y = 0; y < crooked.height; y += 2) {
+        std::fill_n(crooked.map.begin() + static_cast<std::ptrdiff_t>(y * crooked.width), crooked.width, toHalf(3.0f));
+    }
+    note = follower.depth(inputOf(crooked, screenWidth, screenHeight), 100.0);
+    CHECK_FALSE(note.measured);
+    CHECK(follower.camera().pitch == now);
+
+    // The next image (66 ms on) tilts it the share of the way its time says; the motion fits from the pitch as it was,
+    // and the follow keeps it.
+    follower.begin(166.0, kSmallWidth, kSmallHeight, hints);
+    follower.end(image.view(2));
+    const float rate = std::max(said.weight, GroundFollower::kDepthLeast) / GroundFollower::kDepthMs;
+    const float share = 1.0f - std::exp(-rate * 66.0f);
+    CHECK(share > 0.2f);
+    CHECK(follower.camera().pitch == doctest::Approx(now + share * (said.pitch - now)).epsilon(0.02));
 }

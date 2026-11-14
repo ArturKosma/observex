@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Depth.h"
 #include "core/Detection.h"
 #include "core/Ground.h"
 #include "core/Heuristics.h"
@@ -8,14 +9,16 @@
 
 // What observex_heuristics.dll hands the app (engine/HeuristicsLibrary): plain C, so the two only need to agree on
 // this and on Detection and Tracked (core/Detection), GreyView, GreyArea and SnapFind (core/Heuristics) and
-// GroundCamera, GroundHints and GroundNote (core/Ground), which the sizes below check.
+// GroundCamera, GroundHints, GroundNote and GroundDepthNote (core/Ground) and DepthInput (core/Depth), which the sizes
+// below check.
 // Change any of them and bump kObservexHeuristicsAbi: the app then refuses a DLL built for another one, and keeps the
 // heuristics it has, until both are rebuilt. 2 since 2026-11-11: snapping; 3 since that evening: snapping's searches
 // recorded and replayed (SnapFind, GreyView::image); 4 since 2026-11-12: following the camera (the ground); 5 since
-// that evening: the ground turned by the minimap between follows (headAreas, head).
+// that evening: the ground turned by the minimap between follows (headAreas, head); 6 then: by the ground itself
+// (headFirstLevel); 7 later that night: the pitch by the depth network's maps (Grounding::depth).
 extern "C" {
 
-inline constexpr std::uint32_t kObservexHeuristicsAbi = 5;
+inline constexpr std::uint32_t kObservexHeuristicsAbi = 7;
 
 struct ObservexHeuristicsApi {
     std::uint32_t abi;           // kObservexHeuristicsAbi when the DLL was built.
@@ -65,10 +68,15 @@ struct ObservexHeuristicsApi {
     bool (*groundCamera)(void* ground, observex::GroundCamera* out);
     bool (*groundNote)(void* ground, observex::GroundNote* out);
     void (*clearGround)(void* ground);
-    // Grounding's headAreas (-1 if it failed) and head (1 the cone seen, 0 not, -1 failed).
+    // Grounding's headAreas (-1 if it failed), headFirstLevel and head (1 turned by the ground, 0 not, -1 failed).
     int (*groundHeadAreas)(void* ground, double timeMs, const observex::GroundHints* hints, observex::GreyArea* out,
                            int max);
+    int (*groundHeadFirstLevel)(void* ground);
     int (*groundHead)(void* ground, const observex::GreyView* image);
+    // Grounding's depth (false if it failed: nothing written).
+    std::uint32_t depthInputSize; // sizeof(DepthInput) and sizeof(GroundDepthNote) when the DLL was built.
+    std::uint32_t groundDepthNoteSize;
+    bool (*groundDepth)(void* ground, const observex::DepthInput* map, double timeMs, observex::GroundDepthNote* out);
 };
 
 // The one function the DLL exports, by this name.

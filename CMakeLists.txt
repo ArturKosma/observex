@@ -37,18 +37,24 @@ add_library(observex_core STATIC
     src/core/BoxLearner.cpp
     src/core/ClipGuesses.cpp
     src/core/ClipLines.cpp
+    src/core/Depth.cpp
     src/core/Features.cpp
+    src/core/GameStats.cpp
     src/core/Ground.cpp
     src/core/ImageView.cpp
     src/core/KindLearner.cpp
     src/core/LiveLines.cpp
+    src/core/Log.cpp
     src/core/Marks.cpp
     src/core/Mirror.cpp
     src/core/ModelInfo.cpp
     src/core/Recordings.cpp
     src/core/ReviewHistory.cpp
     src/core/ReviewLines.cpp
-    src/core/UiLayout.cpp)
+    src/core/StateTree.cpp
+    src/core/Tiles.cpp
+    src/core/UiLayout.cpp
+    src/core/XpWatch.cpp)
 target_include_directories(observex_core PUBLIC src)
 target_link_libraries(observex_core PRIVATE observex_warnings)
 
@@ -58,17 +64,28 @@ target_link_libraries(observex_core PRIVATE observex_warnings)
 # in the running app: build only that target (`--target observex_heuristics`), as the app's exe is locked while it
 # runs. Unit tested (the tracker).
 add_library(observex_rules STATIC
+    src/heuristics/DepthRules.cpp
+    src/heuristics/DepthTilt.cpp
     src/heuristics/GroundMotion.cpp
+    src/heuristics/Miniatures.cpp
     src/heuristics/MinimapCone.cpp
     src/heuristics/Rules.cpp
     src/heuristics/SnapRules.cpp
     src/heuristics/Snapper.cpp
+    src/heuristics/StatsReader.cpp
+    src/heuristics/TextOcr.cpp
     src/heuristics/Tracker.cpp)
-target_link_libraries(observex_rules PUBLIC observex_core PRIVATE observex_warnings)
-add_library(observex_heuristics SHARED src/heuristics/Plugin.cpp)
+# windowsapp: Windows' own OCR (heuristics/TextOcr, through C++/WinRT), for the target's name.
+target_link_libraries(observex_rules PUBLIC observex_core windowsapp PRIVATE observex_warnings)
+add_library(observex_heuristics SHARED src/heuristics/DepthPlugin.cpp src/heuristics/Plugin.cpp)
 target_link_libraries(observex_heuristics PRIVATE observex_rules observex_warnings)
 # Next to the app: the Release one with C:\_ai\observex\observex.exe.
 set_target_properties(observex_heuristics PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR})
+# Reading the game's bars and numbers (heuristics/StatsReader) as observex_stats.dll, a DLL of its own, loaded again
+# whenever it is rebuilt likewise (engine/StatsLibrary; `--target observex_stats`).
+add_library(observex_stats SHARED src/heuristics/StatsPlugin.cpp)
+target_link_libraries(observex_stats PRIVATE observex_rules observex_warnings)
+set_target_properties(observex_stats PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR})
 
 # Engine: the real-time loop (screen capture on its own thread and GPU device), the recorder, the recogniser (a
 # trained model on the GPU through TensorRT), its live log while recording, the clip buffer (the last 10 s through
@@ -80,6 +97,9 @@ add_library(observex_engine STATIC
     src/engine/ClipGround.cpp
     src/engine/ClipRecorder.cpp
     src/engine/ClipSnapper.cpp
+    src/engine/DepthFinder.cpp
+    src/engine/DepthNet.cpp
+    src/engine/DepthStore.cpp
     src/engine/Detector.cpp
     src/engine/Finder.cpp
     src/engine/Gpu.cpp
@@ -95,11 +115,13 @@ add_library(observex_engine STATIC
     src/engine/Recorder.cpp
     src/engine/Refresher.cpp
     src/engine/ScreenCapture.cpp
+    src/engine/StatsLibrary.cpp
+    src/engine/TensorRt.cpp
     src/engine/UiFinder.cpp)
 target_compile_definitions(observex_engine PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(observex_engine
     PUBLIC observex_core observex_rules d3d11 dxgi
-    PRIVATE windowscodecs d3dcompiler mfplat mfreadwrite mfuuid observex_nvenc observex_tensorrt observex_warnings)
+    PRIVATE windowscodecs d3dcompiler cabinet mfplat mfreadwrite mfuuid observex_nvenc observex_tensorrt observex_warnings)
 
 # App: the window and the UI. The icon and fonts are built into the exe (see src/app/observex.rc.in).
 set(OBSERVEX_SOURCE_DIR ${CMAKE_SOURCE_DIR})
@@ -107,6 +129,7 @@ configure_file(src/app/observex.rc.in ${CMAKE_BINARY_DIR}/observex.rc @ONLY)
 add_executable(observex
     src/app/App.cpp
     src/app/ClipView.cpp
+    src/app/LogView.cpp
     src/app/MainWindow.cpp
     src/app/Overlay.cpp
     src/app/Review.cpp
@@ -115,13 +138,16 @@ add_executable(observex
     src/app/ScreenPicker.cpp
     src/app/Settings.cpp
     src/app/Snapshot.cpp
+    src/app/StateTreeView.cpp
+    src/app/SkillsView.cpp
+    src/app/StatsPanel.cpp
     src/app/Theme.cpp
     src/app/Thumbnails.cpp
     src/app/Widgets.cpp
     src/app/main.cpp
     ${CMAKE_BINARY_DIR}/observex.rc)
 target_link_libraries(observex PRIVATE observex_engine imgui dwmapi observex_warnings)
-add_dependencies(observex observex_heuristics) # Building the app builds the heuristics it loads.
+add_dependencies(observex observex_heuristics observex_stats) # Building the app builds the DLLs it loads.
 
 # Debug builds keep a console window for stderr; other configs are a plain windowed app.
 # The Release build goes straight into the project folder, so C:\_ai\observex\observex.exe is always the newest.
@@ -136,7 +162,7 @@ endif()
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT observex)
 
 # Bench: measures the pipeline from a console, without the app window (see bench/Bench.cpp).
-add_executable(observex_bench bench/Bench.cpp)
+add_executable(observex_bench bench/Bench.cpp bench/DepthBench.cpp bench/StatsBench.cpp)
 target_link_libraries(observex_bench PRIVATE observex_engine dwmapi observex_warnings)
 add_dependencies(observex_bench observex_heuristics) # For --heuristics.
 
@@ -146,11 +172,14 @@ if(OBSERVEX_BUILD_TESTS)
         tests/BoxLearnerTests.cpp
         tests/ClipGuessesTests.cpp
         tests/ClipLinesTests.cpp
+        tests/DepthTests.cpp
         tests/FeaturesTests.cpp
+        tests/GameStatsTests.cpp
         tests/GroundTests.cpp
         tests/ImageViewTests.cpp
         tests/KindLearnerTests.cpp
         tests/LiveLinesTests.cpp
+        tests/LogTests.cpp
         tests/MarksTests.cpp
         tests/MirrorTests.cpp
         tests/ModelInfoTests.cpp
@@ -161,6 +190,8 @@ if(OBSERVEX_BUILD_TESTS)
         tests/StatWindowTests.cpp
         tests/SnapRulesTests.cpp
         tests/SnapperTests.cpp
+        tests/StateTreeTests.cpp
+        tests/TilesTests.cpp
         tests/TrackerTests.cpp
         tests/TripleBufferTests.cpp
         tests/UiLayoutTests.cpp

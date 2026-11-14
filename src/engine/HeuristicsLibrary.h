@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Depth.h"
 #include "core/Ground.h"
 #include "core/Heuristics.h"
 
@@ -12,6 +13,7 @@
 #include <optional>
 #include <string>
 
+struct ObservexDepthApi;
 struct ObservexHeuristicsApi;
 
 namespace observex {
@@ -35,6 +37,9 @@ public:
     std::unique_ptr<Snapping> makeSnapping() const;
     // New following of the camera (the ground), likewise.
     std::unique_ptr<Grounding> makeGround() const;
+    // New shading of depth (core/Depth's Depthing), likewise; the one built into the app if the DLL has none for this
+    // app (heuristics/DepthAbi).
+    std::unique_ptr<Depthing> makeDepth() const;
 
     const std::filesystem::path& file() const { return file_; }
     // When the file was written (built), as it was loaded.
@@ -45,6 +50,7 @@ private:
 
     void* module_ = nullptr; // Its HMODULE.
     const ObservexHeuristicsApi* api_ = nullptr;
+    const ObservexDepthApi* depthApi_ = nullptr; // Null: none for this app.
     std::filesystem::path file_;
     std::filesystem::path copy_;
     std::filesystem::file_time_type written_{};
@@ -72,6 +78,8 @@ public:
     std::unique_ptr<Snapping> makeSnapping() const;
     // New following of the camera (core/Ground's Grounding), likewise.
     std::unique_ptr<Grounding> makeGround() const;
+    // New shading of depth (core/Depth's Depthing), likewise.
+    std::unique_ptr<Depthing> makeDepth() const;
     // One more each time poll loads a new one, so a user that keeps heuristics (the recogniser) makes new ones.
     // Any thread.
     std::uint64_t version() const { return version_.load(std::memory_order_acquire); }

@@ -3,6 +3,7 @@
 #include "core/StatWindow.h"
 #include "engine/ImageChannel.h"
 #include "engine/ScreenCapture.h"
+#include "engine/DepthFinder.h"
 #include "engine/GroundFinder.h"
 #include "engine/UiFinder.h"
 
@@ -48,6 +49,8 @@ bool Pipeline::start(const Screen& screen) {
                                              ScreenCapture::kImageFormat);
         ground_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                  ScreenCapture::kImageFormat);
+        depth_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                                ScreenCapture::kImageFormat);
     } catch (const std::exception& e) {
         stop();
         fail(std::string("Could not start screen capture: ") + e.what());
@@ -77,6 +80,7 @@ void Pipeline::stop() {
     snap_.reset();
     ui_.reset();
     ground_.reset();
+    depth_.reset();
     capture_.reset();
     gpu_ = {};
     state_.store(State::Stopped, std::memory_order_release);
@@ -106,7 +110,8 @@ void Pipeline::run(std::stop_token stop) {
     std::uint64_t merged = 0;
     std::int64_t windowStart = qpcNow();
     std::int64_t nextRecording = 0; // When the next image is due for recording.
-    std::int64_t nextUi = 0;        // And for the UI finder.
+    std::int64_t nextUi = 0;        // And for the UI finder,
+    std::int64_t nextDepth = 0;     // and the depth finder.
     ScreenCapture::Frame frame;
 
     while (!stop.stop_requested()) {
@@ -136,6 +141,12 @@ void Pipeline::run(std::stop_token stop) {
             }
             if (groundEnabled_.load(std::memory_order_relaxed)) { // Every image: it reads the minimap's cone on each.
                 ground_->write(gpu_.context.Get(), frame.texture, stamp);
+            }
+            if (depthEnabled_.load(std::memory_order_relaxed) && now >= nextDepth) {
+                depth_->write(gpu_.context.Get(), frame.texture, stamp);
+                // Steady at its rate on average (a frame late now, a frame early next), unless it fell a gap behind.
+                const std::int64_t gap = frequency.QuadPart / DepthFinder::kImagesPerSecond;
+                nextDepth = now - nextDepth < gap ? nextDepth + gap : now + gap;
             }
             if (previewEnabled_.load(std::memory_order_relaxed)) {
                 preview_->write(gpu_.context.Get(), frame.texture, stamp);

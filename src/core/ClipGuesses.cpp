@@ -120,6 +120,11 @@ ClipText readClipText(std::string_view text) {
             clip.notes.push_back({timeMs, note});
         } else if (readGround(line, ground.image, ground.timeMs, ground.followed, ground.camera)) {
             clip.grounds.push_back(ground);
+        } else if (ClipDepthLine depth; readDepth(line, depth.image, depth.timeMs, depth.map)) {
+            clip.depths.push_back(depth);
+        } else if (LogLine log; readLog(line, timeMs, log)) {
+            clip.logs.push_back(std::move(log));
+            clip.logMs.push_back(timeMs);
         }
     }
     return clip;
@@ -132,6 +137,12 @@ GroundCamera recordedGround(std::span<const ClipGroundLine> lines, double timeMs
         return {};
     }
     return (after - 1)->camera;
+}
+
+unsigned long long recordedDepth(std::span<const ClipDepthLine> lines, double timeMs) {
+    const auto after = std::upper_bound(lines.begin(), lines.end(), timeMs,
+                                        [](double ms, const ClipDepthLine& line) { return ms < line.timeMs; });
+    return after == lines.begin() ? 0 : (after - 1)->map;
 }
 
 std::vector<unsigned long long> followedImages(const ClipText& clip) {

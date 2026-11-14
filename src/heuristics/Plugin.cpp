@@ -173,11 +173,24 @@ int groundHeadAreas(void* ground, double timeMs, const observex::GroundHints* hi
     }
 }
 
+int groundHeadFirstLevel(void* ground) {
+    return static_cast<observex::GroundFollower*>(ground)->headFirstLevel();
+}
+
 int groundHead(void* ground, const observex::GreyView* image) {
     try {
         return static_cast<observex::GroundFollower*>(ground)->head(*image) ? 1 : 0;
     } catch (...) {
         return -1;
+    }
+}
+
+bool groundDepth(void* ground, const observex::DepthInput* map, double timeMs, observex::GroundDepthNote* out) {
+    try {
+        *out = static_cast<observex::GroundFollower*>(ground)->depth(*map, timeMs);
+        return true;
+    } catch (...) {
+        return false;
     }
 }
 
@@ -217,6 +230,10 @@ extern "C" __declspec(dllexport) const ObservexHeuristicsApi* observexHeuristics
                                            groundNote,
                                            clearGround,
                                            groundHeadAreas,
-                                           groundHead};
+                                           groundHeadFirstLevel,
+                                           groundHead,
+                                           static_cast<std::uint32_t>(sizeof(observex::DepthInput)),
+                                           static_cast<std::uint32_t>(sizeof(observex::GroundDepthNote)),
+                                           groundDepth};
     return &api;
 }

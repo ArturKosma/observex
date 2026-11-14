@@ -29,6 +29,7 @@ std::string toUtf8(const std::filesystem::path& path) {
 Settings Settings::load(const std::filesystem::path& file) {
     Settings settings;
     settings.recordingsFolder = defaultRecordingsFolder();
+    settings.brainsFolder = defaultBrainsFolder();
 
     std::ifstream in(file, std::ios::binary);
     std::string line;
@@ -44,14 +45,30 @@ Settings Settings::load(const std::filesystem::path& file) {
         const std::string_view value(line.data() + equals + 1, line.size() - equals - 1);
         if (key == "recordings" && !value.empty()) {
             settings.recordingsFolder = fromUtf8(value);
+        } else if (key == "brains" && !value.empty()) {
+            settings.brainsFolder = fromUtf8(value);
+        } else if (key == "brain") {
+            settings.brainName = value;
         } else if (key == "show-characters") {
             settings.showCharacters = value != "0";
         } else if (key == "show-kinds") {
             settings.showKinds = value != "0";
         } else if (key == "show-ui") {
             settings.showUi = value != "0";
+        } else if (key == "show-live") {
+            settings.showLive = value != "0";
+        } else if (key == "show-stats") {
+            settings.showGameStats = value != "0";
+        } else if (key == "show-state") {
+            settings.showState = value != "0";
+        } else if (key == "show-skills") {
+            settings.showSkills = value != "0";
+        } else if (key == "show-log") {
+            settings.showLog = value != "0";
         } else if (key == "show-ground") {
             settings.showGround = value != "0";
+        } else if (key == "show-depth") {
+            settings.showDepth = value != "0";
         } else if (key == "live-log") {
             settings.liveLog = value != "0";
         }
@@ -65,7 +82,13 @@ bool Settings::save(const std::filesystem::path& file) const {
     out << "show-characters=" << (showCharacters ? 1 : 0) << "\r\n";
     out << "show-kinds=" << (showKinds ? 1 : 0) << "\r\n";
     out << "show-ui=" << (showUi ? 1 : 0) << "\r\n";
+    out << "show-live=" << (showLive ? 1 : 0) << "\r\n";
+    out << "show-stats=" << (showGameStats ? 1 : 0) << "\r\n";
+    out << "show-state=" << (showState ? 1 : 0) << "\r\n";
+    out << "show-skills=" << (showSkills ? 1 : 0) << "\r\n";
+    out << "show-log=" << (showLog ? 1 : 0) << "\r\n";
     out << "show-ground=" << (showGround ? 1 : 0) << "\r\n";
+    out << "show-depth=" << (showDepth ? 1 : 0) << "\r\n";
     out << "live-log=" << (liveLog ? 1 : 0) << "\r\n";
     return static_cast<bool>(out);
 }
@@ -103,6 +126,10 @@ std::filesystem::path modelFolder(const char* category) {
 
 std::filesystem::path defaultRecordingsFolder() {
     return appFolder() / L"recordings";
+}
+
+std::filesystem::path defaultBrainsFolder() {
+    return appFolder() / L"brains";
 }
 
 std::optional<std::filesystem::path> pickFolder(HWND owner, const std::filesystem::path& start, const wchar_t* title) {

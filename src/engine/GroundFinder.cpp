@@ -53,9 +53,11 @@ GroundFinder::~GroundFinder() {
     }
 }
 
-void GroundFinder::hint(std::span<const Tracked> things, int ownKind, const UiPieces* ui) {
+void GroundFinder::hint(std::span<const Tracked> things, int ownKind, const UiPieces* ui,
+                        std::shared_ptr<const DepthMade> depth) {
     Hint& hint = hints_.writeSlot();
     hint.qpc = qpcNow();
+    hint.depth = std::move(depth);
     const Tracked* own = ownCharacter(things, ownKind, static_cast<float>(width_));
     hint.hasOwn = own != nullptr;
     hint.ownTop = own != nullptr ? own->y : 0.0f;
@@ -119,6 +121,9 @@ void GroundFinder::run(std::stop_token stop) {
     StatWindow work;
     StatWindow fitting;
     StatWindow heading;
+    StatWindow depthing;
+    int depthMeasured = 0;
+    double depthOff = 0.0;
     int images = 0;
     int fitted = 0;
     int searched = 0;
@@ -131,6 +136,7 @@ void GroundFinder::run(std::stop_token stop) {
         const StatWindow::Summary workSummary = work.take();
         const StatWindow::Summary fitSummary = fitting.take();
         const StatWindow::Summary headSummary = heading.take();
+        const StatWindow::Summary depthSummary = depthing.take();
         GroundFinderStats& stats = stats_.writeSlot();
         stats.imagesPerSecond =
             elapsed > 0 ? static_cast<float>(workSummary.count / (static_cast<double>(elapsed) * perTick / 1000.0))
@@ -148,6 +154,15 @@ void GroundFinder::run(std::stop_token stop) {
             elapsed > 0 ? static_cast<float>(headSummary.count / (static_cast<double>(elapsed) * perTick / 1000.0))
                         : 0.0f;
         stats.headAvgMs = headSummary.average;
+        stats.depthPerSecond =
+            elapsed > 0 ? static_cast<float>(depthSummary.count / (static_cast<double>(elapsed) * perTick / 1000.0))
+                        : 0.0f;
+        stats.depthMeasured =
+            depthSummary.count > 0 ? static_cast<float>(depthMeasured) / static_cast<float>(depthSummary.count) : 0.0f;
+        stats.depthOffDegrees = depthMeasured > 0 ? static_cast<float>(depthOff / depthMeasured * 57.29578) : 0.0f;
+        stats.depthAvgMs = depthSummary.average;
+        depthMeasured = 0;
+        depthOff = 0.0;
         stats_.publish();
         images = 0;
         fitted = 0;
@@ -159,9 +174,9 @@ void GroundFinder::run(std::stop_token stop) {
 
     const GreyArea whole{0, 0, static_cast<int>(width_), static_cast<int>(height_)};
     std::array<GreyArea, 8> full{};
-    const GreyView nothingRead{};
     double nextFollowMs = -1e300;
     std::uint64_t followedImage = 0;
+    std::uint64_t depthGiven = 0; // The depth map last given the follower (its image).
     ImageStamp stamp;
     while (!stop.stop_requested()) {
         // Once a second, the numbers to the UI (lock-free).
@@ -186,6 +201,17 @@ void GroundFinder::run(std::stop_token stop) {
                 }
                 hints_.fetch();
                 const Hint& hint = hints_.readSlot();
+                // A new depth map: the camera's pitch by it, before this image is followed.
+                if (hint.depth && hint.depth->image != depthGiven) {
+                    depthGiven = hint.depth->image;
+                    const std::int64_t depthStart = qpcNow();
+                    const GroundDepthNote depth = follower->depth(hint.depth->input(), groundMs(hint.depth->imageQpc));
+                    depthing.add(static_cast<float>(static_cast<double>(qpcNow() - depthStart) * perTick));
+                    if (depth.measured) {
+                        ++depthMeasured;
+                        depthOff += std::fabs(depth.pitch - depth.then);
+                    }
+                }
                 const bool fresh = hint.qpc != 0 && (start - hint.qpc) * perTick < kHintMs;
                 GroundHints hints;
                 hints.hasOwn = fresh && hint.hasOwn;
@@ -197,21 +223,21 @@ void GroundFinder::run(std::stop_token stop) {
                 hints.windowCount = hint.qpc != 0 ? hint.windowCount : 0;
                 const double timeMs = groundMs(stamp.shownQpc != 0 ? stamp.shownQpc : start);
                 if (timeMs < nextFollowMs - kJitterMs) {
-                    // Between follows: only the minimap's cone, to turn the camera with it (nothing to read while
-                    // it is not known where the cone is).
+                    // Between follows: only the eighth size (58 kB) and the minimap's cone, to turn the camera as
+                    // the ground and the cone did.
                     const int count = follower->headAreas(timeMs, hints, full.data(), static_cast<int>(full.size()));
-                    const GreyView* grey = &nothingRead;
+                    const GreyView* grey = nullptr;
                     try {
+                        greys->make(gpu_.context.Get(), stamp.number, image);
+                        reader_->endUse();
                         if (count > 0) {
-                            greys->make(gpu_.context.Get(), stamp.number, image);
-                            reader_->endUse();
                             greys->read(gpu_.context.Get(), stamp.number,
                                         {full.data(), static_cast<std::size_t>(count)}, 1);
-                            greys->wait(gpu_.context.Get());
-                            grey = greys->find(stamp.number);
-                        } else {
-                            reader_->endUse();
                         }
+                        greys->read(gpu_.context.Get(), stamp.number, {&whole, 1}, GreyView::kLevels,
+                                    follower->headFirstLevel());
+                        greys->wait(gpu_.context.Get());
+                        grey = greys->find(stamp.number);
                     } catch (const std::exception&) {
                         reader_->endUse(); // Harmless once ended.
                         fail("The GPU stopped making grey images (it may have been reset)");

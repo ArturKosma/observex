@@ -1,16 +1,23 @@
 #pragma once
 
 #include "app/ClipView.h"
+#include "app/LogView.h"
+#include "app/StateTreeView.h"
 #include "app/MainWindow.h"
 #include "app/Review.h"
 #include "app/ScreenImage.h"
 #include "app/ScreenPicker.h"
 #include "app/Settings.h"
+#include "app/StatsPanel.h"
 #include "app/Theme.h"
 #include "app/Thumbnails.h"
+#include "core/Log.h"
 #include "core/Recordings.h"
+#include "core/Tiles.h"
+#include "core/XpWatch.h"
 #include "engine/BoxSnapper.h"
 #include "engine/ClipRecorder.h"
+#include "engine/DepthFinder.h"
 #include "engine/Gpu.h"
 #include "engine/HeuristicsLibrary.h"
 #include "engine/ImageChannel.h"
@@ -20,11 +27,14 @@
 #include "engine/Recognizer.h"
 #include "engine/Recorder.h"
 #include "engine/Refresher.h"
+#include "engine/StatsLibrary.h"
 #include "engine/GroundFinder.h"
 #include "engine/UiFinder.h"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -38,11 +48,13 @@ namespace observex {
 // Owns everything: the window, the UI's GPU device, ImGui and the pipeline. The UI runs on this thread;
 // the pipeline runs on its own.
 //
-// The UI is a top bar and, below it, the screen being observed, a recording being reviewed or a clip being played. The
-// bar holds the screen button (live miniatures of all screens; picking one starts the pipeline on it), Show (what is
-// drawn over the observed screen, e.g. the characters the recogniser finds on it, or the game's interface), the Review
-// button (training recordings or clips), Save last 10 s (a clip), the Record button and Settings. While reviewing, its
-// middle steps through the images; while a clip plays, it plays and pauses it.
+// The UI is a top bar, the tabs Live, Stats and State under it, and below them the tiles the tabs show (core/Tiles):
+// Live (the screen being observed, a recording being reviewed or a clip being played), Stats (the numbers read from the
+// game's interface) and State (the bot's brain). The bar holds the screen button (live miniatures of all screens;
+// picking one starts the pipeline on it), Show (what is drawn over the observed screen, e.g. the characters the
+// recogniser finds on it, or the game's interface), the Review button (training recordings or clips), Save last 10 s (a
+// clip), the Record button and Settings. While reviewing, its middle steps through the images; while a clip plays, it
+// plays and pauses it.
 class App {
 public:
     // Snapshot mode, for checking the UI without showing it: the window stays hidden, the input `steps` play in
@@ -105,9 +117,17 @@ private:
     void saveClip();
     // A line for the clip buffer's text about what the user did, e.g. "show Kinds off". Nothing while there is no buffer.
     void noteInClip(std::string_view text);
+    // A line of observex's log (the Log tab; the user asked, 2026-11-13): into log_ (its file) and the clip buffer,
+    // timed at `qpc` (a QueryPerformanceCounter time a moment ago; 0: now).
+    void addLog(std::string text, std::int64_t qpc = 0);
     // What the Show flag Ground drew this UI frame (groundDrawn_), into the clip buffer if it changed: so a clip's
     // Recorded shows the grid exactly as it was seen.
     void noteGroundInClip();
+    // Likewise the depth map the Show flag Depth drew this UI frame (depthDrawn_).
+    void noteDepthInClip();
+    // Starts the depth finder on the observed screen (it runs while the flag Depth draws its maps or the flag Ground
+    // takes the grid's pitch from them); depthFinderError_ says why it could not.
+    void startDepth();
 
     // Review: first what to review (the review chooser: training recordings or clips). Recordings: pick one from the
     // list (the recording.observex files in the recordings folder), then what to look for in it (the category popup),
@@ -127,7 +147,34 @@ private:
     std::unique_ptr<Snapping> todaysSnapping() const;
     // And its following of the camera (the Ground flag), likewise.
     std::unique_ptr<Grounding> todaysGround() const;
+    // And its shading of depth (the Depth flag), likewise.
+    std::unique_ptr<Depthing> todaysDepth() const;
     void closeClip();
+    // Each frame: the numbers the UI finder read on its newest image join statsHistory_ (the last kStatsKeptSeconds).
+    void keepStats();
+    // The State tile's brain takes a step on each new reading (live, or a clip's today), and stops when none is read.
+    void tickBrain();
+    // What observex spends on a screen image, all its parts added up (ms); with `parts`, each part's.
+    float imageWorkMs(std::string* parts);
+    // Into a clip being saved in `folder`: what statsHistory_ holds, as clip-stats.txt (core/GameStats).
+    void writeClipStats(const std::filesystem::path& folder);
+    // The Stats tile's numbers: live (the UI finder's newest), or the clip's Recorded or Today.
+    void drawGameStats();
+    // The Skills tab: the profile's skills, and Add Skill from the screen or the clip's frame.
+    void drawSkills();
+    // Each frame: the profile's skills, when they changed, to the readers and the icons.
+    void syncSkills();
+    // The profile's skills as the readers take them (grey).
+    std::vector<SkillToFind> skillsToFind() const;
+    // The Nearby counts (core/GameStats' addNearby) of what the live view shows, into `stats`.
+    void addLiveNearby(GameStats& stats);
+    // An open clip's reading on the frame shown (`today`: read again today, else as recorded) with the Nearby counts
+    // of what its guesser shows there; null if none.
+    const GameStats* clipStatsShown(bool today);
+    // The Log tile: observex's log, or an open clip's lines (those after the frame shown dimmed).
+    void drawLog();
+    // Between frames: the screen picker's None, nothing observed any more.
+    void stopObservingAll();
     // Between frames: the clip in `folder` goes to the Recycle Bin (its X in the clips list), closed first if open.
     void removeClip(const std::filesystem::path& folder);
 
@@ -138,6 +185,14 @@ private:
     bool playSnapshot();
 
     void drawFrame();
+    // The tabs Live, State, Stats and Log at the top of the view, `height` high: each shows or hides its tile (the last
+    // one shown stays).
+    void drawTabs(float height);
+    // What the Live tile shows: the review, the clip, the observed screen or the screens to choose from.
+    void drawLive();
+    // The lines between the tiles, which drag to share the view differently; `log` is the Log tile (not shown: none),
+    // a column right of the others, which start at `left`.
+    void drawTileLines(const Tiles& tiles, const TileRect& log, float left);
     void drawTopBar(float height);
     void drawSettings();
     void drawRecordChooser();
@@ -202,9 +257,39 @@ private:
     std::unique_ptr<ScreenImage> observedImage_;
     std::optional<Screen> observed_;         // The screen being observed, if any.
     std::optional<Screen> chosen_;           // Picked this frame; observed from the start of the next one.
+    bool chosenNone_ = false;                // None picked this frame: nothing observed from the next one.
     std::string error_;                      // Why the observed screen cannot be shown.
     // What the recogniser and the clip screen's Today go by: observex_heuristics.dll, loaded again when rebuilt.
     std::shared_ptr<HeuristicsSource> heuristics_;
+    // What reads the game's numbers (the UI finder's, live and on a clip): observex_stats.dll, likewise.
+    std::shared_ptr<StatsSource> stats_;
+    // The numbers the live UI finder read, oldest first, the last kStatsKeptSeconds: a saved clip gets them.
+    std::deque<GameStats> statsHistory_;
+    static constexpr double kStatsKeptSeconds = 15.0;
+    // The bot's brain, edited in the State tile (the tree stays while observex runs).
+    StateTreeView stateTree_;
+    std::uint64_t brainImage_ = 0; // The reading the brain last stepped on.
+    StatsTile statsTile_;          // The Stats tile.
+    SkillsView skillsView_;        // The Skills tab (its Add Skill popup keeps what it shows).
+    SkillIcons skillIcons_;        // The profile's skills' icons, for both.
+    // The profile's skills as last given to the readers (the UI finder's, an open clip's) and the icons, and the
+    // profile's text when they were last compared (syncSkills).
+    std::vector<statetree::Skill> skillsGiven_;
+    std::string profileSeen_;
+    GameStats liveStats_; // The UI finder's newest reading, with the Nearby counts (keepStats); image 0: none.
+    GameStats clipStats_; // An open clip's on the frame shown, likewise (clipStatsShown).
+    // How the tiles share the view (core/Tiles; the lines between them drag): Live's share of the width beside the
+    // others, and Stats' share of the height above State.
+    float liveSplit_ = 0.6f; // Live's share; State and Stats 2/5 (the user asked, 2026-11-13).
+    float statsSplit_ = 0.5f;
+    float logSplit_ = 0.8f; // The share of the width left of the Log tile (a column at the right).
+    // What observex did (core/Log), kept in observex.log next to observex.exe (in snapshot mode next to the PNG); made
+    // first in init(), gone after shutdown().
+    std::unique_ptr<LogBook> log_;
+    LogView logView_;
+    LogView clipLogView_;          // An open clip's lines,
+    std::uint64_t clipsOpened_ = 0; // which change with each clip opened.
+    XpWatch xpWatch_;               // The XP read live, for "Got 0.12% XP" lines.
     std::unique_ptr<Recognizer> recognizer_; // Looks for characters on the observed screen, shown or not.
     std::string recognizerError_;            // Why it could not start.
     // Puts the recogniser's boxes onto every new image; shown instead of the recogniser's while it runs. Shared with
@@ -231,6 +316,16 @@ private:
     };
     GroundDrawn groundDrawn_;
     GroundDrawn groundNoted_;
+    // Guesses how near each pixel is while the Show flag Depth (which draws it over the screen) or Ground (whose pitch
+    // comes from its maps) is on. Made the first time one is on while observing, kept until observing stops.
+    std::unique_ptr<DepthFinder> depthFinder_;
+    std::string depthFinderError_;            // Why it could not start.
+    bool depthRunning_ = false;               // It was handed images this frame,
+    bool depthShowing_ = false;               // and the flag Depth draws them.
+    std::unique_ptr<ScreenImage> depthImage_; // The newest map drawn (at the map's size),
+    std::uint64_t depthUploaded_ = 0;         // which one (DepthSeen::image).
+    std::uint64_t depthDrawn_ = 0;            // The map drawn over the preview this UI frame (0: none),
+    std::uint64_t depthNoted_ = 0;            // and the last one the clip buffer was given.
     // Keeps the last 10 s of the observed screen and what the recogniser saw, to save as a clip on request. Shared
     // with the recogniser, which hands it every look.
     std::shared_ptr<ClipRecorder> clipRecorder_;

@@ -1,6 +1,8 @@
 #include "engine/HeuristicsLibrary.h"
 
 #include "heuristics/Abi.h"
+#include "heuristics/DepthAbi.h"
+#include "heuristics/DepthRules.h"
 #include "heuristics/GroundMotion.h"
 #include "heuristics/Rules.h"
 #include "heuristics/SnapRules.h"
@@ -148,7 +150,12 @@ public:
         const int count = api_.groundHeadAreas(ground_, timeMs, &hints, out, max);
         return count < 0 ? 0 : count;
     }
+    int headFirstLevel() const override { return api_.groundHeadFirstLevel(ground_); }
     bool head(const GreyView& image) override { return api_.groundHead(ground_, &image) == 1; }
+    GroundDepthNote depth(const DepthInput& map, double timeMs) override {
+        GroundDepthNote note;
+        return api_.groundDepth(ground_, &map, timeMs, &note) ? note : GroundDepthNote{};
+    }
     GroundCamera camera() const override {
         GroundCamera camera;
         return api_.groundCamera(ground_, &camera) ? camera : GroundCamera{};
@@ -163,6 +170,30 @@ private:
     std::shared_ptr<const HeuristicsLibrary> library_;
     const ObservexHeuristicsApi& api_;
     void* ground_;
+};
+
+// Shading of depth made by a loaded DLL, likewise. A failure inside shows as nothing shaded.
+class DllDepthing final : public Depthing {
+public:
+    DllDepthing(std::shared_ptr<const HeuristicsLibrary> library, const ObservexDepthApi& api)
+        : library_(std::move(library)), api_(api), depthing_(api.create()) {
+        if (depthing_ == nullptr) {
+            throw std::runtime_error("observex_heuristics.dll could not make its shading of depth");
+        }
+    }
+    ~DllDepthing() override { api_.destroy(depthing_); }
+
+    DllDepthing(const DllDepthing&) = delete;
+    DllDepthing& operator=(const DllDepthing&) = delete;
+
+    bool shade(const DepthInput& input, std::uint8_t* levels, std::uint32_t* palette) override {
+        return api_.shade(depthing_, &input, levels, palette);
+    }
+
+private:
+    std::shared_ptr<const HeuristicsLibrary> library_;
+    const ObservexDepthApi& api_;
+    void* depthing_;
 };
 
 } // namespace
@@ -202,11 +233,20 @@ std::shared_ptr<HeuristicsLibrary> HeuristicsLibrary::load(const fs::path& file)
         api->trackedSize != sizeof(Tracked) || api->greyViewSize != sizeof(GreyView) ||
         api->greyAreaSize != sizeof(GreyArea) || api->snapFindSize != sizeof(SnapFind) ||
         api->groundCameraSize != sizeof(GroundCamera) || api->groundHintsSize != sizeof(GroundHints) ||
-        api->groundNoteSize != sizeof(GroundNote)) {
+        api->groundNoteSize != sizeof(GroundNote) || api->depthInputSize != sizeof(DepthInput) ||
+        api->groundDepthNoteSize != sizeof(GroundDepthNote)) {
         throw std::runtime_error(utf8(file.filename()) +
                                  " was built for another observex: rebuild the app too (observex)");
     }
     library->api_ = api;
+    // Depth's entry of its own (heuristics/DepthAbi): missing or for another app, the app's own rules shade.
+    const auto depthEntry = reinterpret_cast<ObservexDepthEntry>(
+        reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(library->module_), kObservexDepthEntry)));
+    if (const ObservexDepthApi* depth = depthEntry != nullptr ? depthEntry() : nullptr;
+        depth != nullptr && depth->abi == kObservexDepthAbi && depth->inputSize == sizeof(DepthInput) &&
+        depth->areaSize == sizeof(GreyArea)) {
+        library->depthApi_ = depth;
+    }
     return library;
 }
 
@@ -228,6 +268,13 @@ std::unique_ptr<Snapping> HeuristicsLibrary::makeSnapping() const {
 
 std::unique_ptr<Grounding> HeuristicsLibrary::makeGround() const {
     return std::make_unique<DllGrounding>(shared_from_this(), *api_);
+}
+
+std::unique_ptr<Depthing> HeuristicsLibrary::makeDepth() const {
+    if (depthApi_ == nullptr) {
+        return std::make_unique<DepthRules>();
+    }
+    return std::make_unique<DllDepthing>(shared_from_this(), *depthApi_);
 }
 
 HeuristicsSource::HeuristicsSource(fs::path file) : file_(std::move(file)) {
@@ -332,6 +379,18 @@ std::unique_ptr<Grounding> HeuristicsSource::makeGround() const {
         return library->makeGround();
     }
     return std::make_unique<GroundFollower>();
+}
+
+std::unique_ptr<Depthing> HeuristicsSource::makeDepth() const {
+    std::shared_ptr<HeuristicsLibrary> library;
+    {
+        const std::scoped_lock lock(mutex_);
+        library = library_;
+    }
+    if (library) {
+        return library->makeDepth();
+    }
+    return std::make_unique<DepthRules>();
 }
 
 std::string HeuristicsSource::describe() const {

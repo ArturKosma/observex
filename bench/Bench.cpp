@@ -2,6 +2,7 @@
 //
 //   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--every S] [--unsure]]
 //                  [--model FOLDER [--snap]] [--clip FOLDER] [--find-ui [--layout FOLDER]]
+//                  [--find-depth [--depth-model FOLDER]]
 //   observex_bench --model FOLDER --images FOLDER --out FILE
 //   observex_bench --model FOLDER --replay RECORDING
 //   observex_bench --model FOLDER --update-kinds RECORDINGS
@@ -11,6 +12,8 @@
 //   observex_bench --clip-guesses CLIP [--heuristics DLL] [--snap [--out FOLDER --at FRAME...]] [--today-out FILE]
 //   observex_bench --ground CLIP [--heuristics DLL] [--layout FOLDER] [--frames] [--out FOLDER [--every N]
 //                  [--at FRAME]...]
+//   observex_bench --depth CLIP [--depth-model FOLDER] [--heuristics DLL] [--layout FOLDER] [--every N]
+//                  [--out FOLDER] [--at FRAME]... [--compare NPY]
 //
 // Lists the screens, runs the real Pipeline on one (the primary by default, or number N from the list)
 // and prints its numbers once a second.
@@ -48,6 +51,14 @@
 // models/ui), and adds its numbers: images per second, milliseconds per image and of them finding, pieces found. With
 // --model, the recogniser's milliseconds show what it costs the model (2026-11-12: within run-to-run noise, at most
 // about 0.1 ms a look).
+//
+// Depth: --find-depth also runs the depth finder as the app does while the Show flag Depth is on (engine/DepthFinder:
+// 20 images a second through the depth network from --depth-model, default models/depth, shaded by the built-in
+// heuristics, the interface the UI finder found left out with --find-ui), and adds its numbers: maps per second, the
+// network's milliseconds (squeezing, the network, the map back), shading, packing, a map's packed size and the share
+// of pixels whose level moved more than 8 from the map before. With --clip, every map goes into the clip buffer and
+// each new one is said drawn as the app's UI draws it (at the time it is there: the bench has no preview image), so
+// the saved clip's Depth replays it.
 //
 // Replay: --replay walks a reviewed recording's images in order the way the review does, with its answers as the
 // user, and prints how many guesses each rule pre-fills right and wrong and how many it asks about: the model's own
@@ -106,6 +117,18 @@
 // one before the first, and from when it is shown) and after each one snapped a finds line of its searches, to read
 // with the scripts that read a clip's own lines. With --looks-out FILE it writes Today's heuristics' own set after each
 // look (the tracker's, not snapped) into FILE, a shown line per look with the image looked at.
+//
+// Depth over a clip: --depth runs the Show flag Depth over every Nth frame of a saved clip (--every, default 1; CLIP a
+// clip folder or its clip.mp4; bench/DepthBench) as the depth finder does live: the depth network (engine/DepthNet,
+// from --depth-model, default models/depth), the interface core/UiLayout finds with ui.txt (--layout) left out, shaded
+// by the rules built in or with --heuristics an observex_heuristics.dll's, packed as the clip buffer keeps maps. Prints
+// the network's, shading's and packing's milliseconds, the packed size, whether packing loses nothing, whether the maps
+// written to depth.bin and read back shade the same again, and how much the levels move from frame to frame (all
+// pixels, and where the picture stood still). --compare NPY checks the first --at frame's map against the Python
+// network's (tools/depth). With --out: side-by-side JPEGs (the frame and its depth) of the first frame, every 150th
+// and each --at; depth.bin; and, for a clip folder, a copy of the clip with depth lines added (each map drawn from its
+// own frame on), so the clip screen's Depth shows it as if the flag had been on live (in a folder the clips list
+// reads, e.g. a recordings folder's clips).
 
 #include "core/BoxLearner.h"
 #include "core/ClipGuesses.h"
@@ -124,6 +147,7 @@
 #include "engine/ClipPlayer.h"
 #include "engine/ClipRecorder.h"
 #include "engine/ClipSnapper.h"
+#include "engine/DepthFinder.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
 #include "engine/GreyMaker.h"
@@ -138,6 +162,9 @@
 #include "engine/Refresher.h"
 #include "engine/ScreenCapture.h"
 #include "engine/UiFinder.h"
+
+#include "DepthBench.h"
+#include "StatsBench.h"
 #include "heuristics/GroundMotion.h"
 #include "heuristics/Rules.h"
 #include "heuristics/SnapRules.h"
@@ -203,6 +230,11 @@ struct Options {
     bool findUi = false;              // --find-ui: the live run also runs the UI finder, as the app does.
     const char* ground = nullptr;     // --ground CLIP: the camera followed over a clip, as the Ground flag does.
     bool groundFrames = false;        // --frames for --ground: a line for every frame followed, and every camera.
+    const char* depth = nullptr;      // --depth CLIP: the Show flag Depth over a clip (bench/DepthBench).
+    const char* depthModel = nullptr; // --depth-model for --depth and --find-depth (default models/depth).
+    bool findDepth = false;           // --find-depth: the live run also runs the depth finder, as the flag Depth does.
+    const char* compare = nullptr;    // --compare for --depth: the Python network's map of the first --at frame.
+    bool everyGiven = false;          // --every was given (its default is for --clip-frames' pictures).
 };
 
 bool parse(int argc, char** argv, Options& options) {
@@ -220,6 +252,7 @@ bool parse(int argc, char** argv, Options& options) {
         } else if (std::strcmp(argv[i], "--every") == 0 && i + 1 < argc) {
             options.recordEvery = static_cast<unsigned>(std::atoi(argv[++i]));
             options.frameEvery = options.recordEvery;
+            options.everyGiven = true;
         } else if (std::strcmp(argv[i], "--unsure") == 0) {
             options.recordUnsure = true;
         } else if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -248,6 +281,8 @@ bool parse(int argc, char** argv, Options& options) {
             options.snap = true;
         } else if (std::strcmp(argv[i], "--find-ui") == 0) {
             options.findUi = true;
+        } else if (std::strcmp(argv[i], "--find-depth") == 0) {
+            options.findDepth = true;
         } else if (std::strcmp(argv[i], "--at") == 0 && i + 1 < argc) {
             options.at.push_back(std::strtoull(argv[++i], nullptr, 10));
         } else if (std::strcmp(argv[i], "--today-out") == 0 && i + 1 < argc) {
@@ -262,11 +297,17 @@ bool parse(int argc, char** argv, Options& options) {
             options.ground = argv[++i];
         } else if (std::strcmp(argv[i], "--frames") == 0) {
             options.groundFrames = true;
+        } else if (std::strcmp(argv[i], "--depth") == 0 && i + 1 < argc) {
+            options.depth = argv[++i];
+        } else if (std::strcmp(argv[i], "--depth-model") == 0 && i + 1 < argc) {
+            options.depthModel = argv[++i];
+        } else if (std::strcmp(argv[i], "--compare") == 0 && i + 1 < argc) {
+            options.compare = argv[++i];
         } else {
             std::printf(
                 "usage: observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] "
                 "[--record FOLDER [--every S] [--unsure]] [--model FOLDER [--snap]] [--clip FOLDER]\n"
-                "                      [--find-ui [--layout FOLDER]]\n"
+                "                      [--find-ui [--layout FOLDER]] [--find-depth [--depth-model FOLDER]]\n"
                 "       observex_bench --model FOLDER --images FOLDER --out FILE\n"
                 "       observex_bench --model FOLDER --replay RECORDING\n"
                 "       observex_bench --model FOLDER --update-kinds RECORDINGS\n"
@@ -277,7 +318,9 @@ bool parse(int argc, char** argv, Options& options) {
                 " [--today-out FILE]\n"
                 "       observex_bench --ui CLIP [--layout FOLDER] [--out FOLDER [--every N] [--at FRAME]...]\n"
                 "       observex_bench --ground CLIP [--heuristics DLL] [--layout FOLDER] [--frames]"
-                " [--out FOLDER [--every N] [--at FRAME]...]\n");
+                " [--out FOLDER [--every N] [--at FRAME]...]\n"
+                "       observex_bench --depth CLIP [--depth-model FOLDER] [--heuristics DLL] [--layout FOLDER]"
+                " [--every N] [--out FOLDER] [--at FRAME]... [--compare NPY]\n");
             return false;
         }
     }
@@ -1058,9 +1101,10 @@ void saveClip(ClipRecorder& clip, const char* clipsFolder, const Screen& screen,
         return error ? 0.0 : static_cast<double>(size) / (1024.0 * 1024.0);
     };
     std::printf("Saved a clip of %.2f s (%u frames, %u looks) in %.0f ms into %s\n"
-                "  %s %.1f MB, %s %.2f MB, %s %.2f MB\n",
+                "  %s %.1f MB, %s %.2f MB, %s %.2f MB, %s %.1f MB\n",
                 info.seconds, info.frames, info.looks, ms, toUtf8(folder.c_str()).c_str(), kClipVideo,
-                megabytes(kClipVideo), kClipText, megabytes(kClipText), kClipPicture, megabytes(kClipPicture));
+                megabytes(kClipVideo), kClipText, megabytes(kClipText), kClipPicture, megabytes(kClipPicture),
+                kClipDepth, megabytes(kClipDepth));
 }
 
 // --clip-frames: decodes a clip's video as the clip player does, writes frames.txt and every Nth frame as a JPEG.
@@ -2398,8 +2442,9 @@ int groundClip(const Options& options) {
                 "too far %d, searched %d\n",
                 stats.motions[0], stats.motions[1], stats.motions[2], stats.motions[3], stats.motions[4],
                 stats.motions[5], stats.motions[6]);
-    std::printf("  minimap cone seen on %d of %d frames; between them read on %d, seen on %d\n", stats.headed,
-                stats.images, stats.heads, stats.headsSeen);
+    std::printf("  minimap cone seen on %d of %d frames; between them %d, turned by the ground on %d (%.2f ms each)\n",
+                stats.headed, stats.images, stats.heads, stats.headsTurned, stats.headMs);
+    std::printf("  depth maps given %d, of them %d said the pitch\n", stats.depths, stats.depthsMeasured);
     // Today against Recorded: the grid the app drew live (clip.txt's ground lines, since 2026-11-12) on the same frames.
     if (clip.grounds.empty()) {
         std::printf("  Recorded: no ground lines (saved before clips kept the grid)\n");
@@ -2448,6 +2493,13 @@ int groundClip(const Options& options) {
                     kMotions[static_cast<std::size_t>(noted.motion)], noted.agreeing,
                     noted.heading < 0.0f ? -1.0 : noted.heading * kDegrees, noted.yaw * kDegrees,
                     noted.pitch * kDegrees, static_cast<double>(noted.distance));
+    }
+    for (const ClipGround::Stats::Depth& noted : stats.depthNotes) {
+        constexpr double kDegrees = 57.29578;
+        std::printf("  %8.1f ms  depth %s  seen %6.2f  pitch %6.2f  then %6.2f  pulled %6.2f  straight %.4f\n",
+                    noted.timeMs - firstMs, noted.note.measured ? "measured" : "not     ",
+                    noted.note.seen * kDegrees, noted.note.pitch * kDegrees, noted.note.then * kDegrees,
+                    noted.note.pulled * kDegrees, static_cast<double>(noted.note.straight));
     }
     for (const GroundCamera& camera : options.groundFrames ? std::span<const GroundCamera>(cameras)
                                                            : std::span<const GroundCamera>()) {
@@ -2606,6 +2658,9 @@ int groundClip(const Options& options) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "--stats") == 0) { // The game's bars on recorded images (bench/StatsBench).
+        return statsBench(argc - 2, argv + 2);
+    }
     Options options;
     if (!parse(argc, argv, options)) {
         return 2;
@@ -2626,6 +2681,28 @@ int main(int argc, char** argv) {
             std::printf("%s\n", e.what());
             return 1;
         }
+    }
+    if (options.depth != nullptr) {
+        const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); // Media Foundation needs it.
+        int result = 1;
+        try {
+            DepthBenchOptions depth;
+            depth.clip = options.depth;
+            depth.model = options.depthModel;
+            depth.layout = options.layout;
+            depth.heuristics = options.heuristics;
+            depth.out = options.out;
+            depth.every = options.everyGiven ? options.frameEvery : 1;
+            depth.at = options.at;
+            depth.compare = options.compare;
+            result = depthClip(depth);
+        } catch (const std::exception& e) {
+            std::printf("%s\n", e.what());
+        }
+        if (com) {
+            CoUninitialize();
+        }
+        return result;
     }
     if (options.clipFrames != nullptr || options.clipSeek != nullptr || options.ui != nullptr ||
         options.ground != nullptr) {
@@ -2749,6 +2826,35 @@ int main(int argc, char** argv) {
                                                                                 : std::filesystem::path("models/ui"));
                 pipeline.setUiEnabled(true);
             }
+            // The depth finder, as the app runs it while the flag Depth is on: its maps into the clip buffer.
+            std::unique_ptr<DepthFinder> depthFinder;
+            if (options.findDepth) {
+                DepthFinder::Record record;
+                if (clip) {
+                    record = [clip](std::shared_ptr<const DepthRecord> map) { clip->depthed(std::move(map)); };
+                }
+                depthFinder = std::make_unique<DepthFinder>(
+                    screen.adapter.Get(), *pipeline.depth(), heuristics,
+                    options.depthModel != nullptr ? std::filesystem::path(options.depthModel)
+                                                  : std::filesystem::path("models/depth"),
+                    std::move(record));
+                pipeline.setDepthEnabled(true);
+                std::printf("Loading the depth network");
+                while (depthFinder->state() == DepthFinder::State::Starting) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    if (depthFinder->progress() > 0.0f) {
+                        std::printf(" %.0f%%", static_cast<double>(depthFinder->progress() * 100.0f));
+                    } else {
+                        std::printf(".");
+                    }
+                }
+                std::printf("\n");
+                if (depthFinder->state() == DepthFinder::State::Failed) {
+                    std::printf("%s\n", depthFinder->error().c_str());
+                    return 1;
+                }
+            }
+            std::uint64_t depthNoted = 0; // The map last said drawn to the clip buffer.
             bool uiFailed = false;
             bool uiProblem = false;
             bool snapperFailed = false;
@@ -2772,6 +2878,9 @@ int main(int argc, char** argv) {
                         snapper ? "  snapped/s  snap avg / max ms  late ms  snapped" : "",
                         clip ? "  encoded/s  encode avg / max ms  held s    MB  dropped" : "",
                         uiFinder ? "  ui/s  ui avg / max ms  finding ms  pieces" : "");
+            if (depthFinder) {
+                std::printf("  (then depth: maps/s  network avg / max ms  shade ms  pack ms  kB  changed)\n");
+            }
 
             using Clock = std::chrono::steady_clock;
             const Clock::time_point start = Clock::now();
@@ -2788,6 +2897,12 @@ int main(int argc, char** argv) {
             double uiSum = 0.0;
             double uiMsSum = 0.0;
             double uiFindSum = 0.0;
+            double depthSum = 0.0;
+            double depthNetSum = 0.0;
+            double depthShadeSum = 0.0;
+            double depthPackSum = 0.0;
+            double depthKbSum = 0.0;
+            double depthChangedSum = 0.0;
             int samples = 0;
             while (Clock::now() - start < std::chrono::seconds(options.seconds) + std::chrono::milliseconds(600)) {
                 if (consumer) {
@@ -2818,6 +2933,17 @@ int main(int argc, char** argv) {
                 if (uiFinder && !uiProblem && uiFinder->stats().problem[0] != '\0') {
                     std::printf("UI finder: %s\n", uiFinder->stats().problem.data());
                     uiProblem = true;
+                }
+                // As the app's UI on each frame: the interface to leave out, and the newest map drawn.
+                if (depthFinder && depthFinder->state() == DepthFinder::State::Running) {
+                    depthFinder->hint(uiFinder && uiFinder->state() == UiFinder::State::Running ? &uiFinder->found()
+                                                                                                : nullptr);
+                    if (const DepthSeen& seen = depthFinder->seen(); clip && seen.image != depthNoted) {
+                        LARGE_INTEGER now;
+                        QueryPerformanceCounter(&now);
+                        clip->depthShown(now.QuadPart, seen.image, seen.image);
+                        depthNoted = seen.image;
+                    }
                 }
 
                 if (Clock::now() >= nextPrint) {
@@ -2863,6 +2989,20 @@ int main(int argc, char** argv) {
                         uiMsSum += ui.workAvgMs;
                         uiFindSum += ui.findAvgMs;
                     }
+                    if (depthFinder) {
+                        const DepthFinderStats& depth = depthFinder->stats();
+                        std::printf("  %5.1f  %6.2f / %-6.2f  %6.2f  %6.2f  %4.0f  %5.1f%%",
+                                    static_cast<double>(depth.mapsPerSecond), static_cast<double>(depth.networkAvgMs),
+                                    static_cast<double>(depth.networkMaxMs), static_cast<double>(depth.shadeAvgMs),
+                                    static_cast<double>(depth.packAvgMs), static_cast<double>(depth.packedKb),
+                                    static_cast<double>(depth.changed * 100.0f));
+                        depthSum += depth.mapsPerSecond;
+                        depthNetSum += depth.networkAvgMs;
+                        depthShadeSum += depth.shadeAvgMs;
+                        depthPackSum += depth.packAvgMs;
+                        depthKbSum += depth.packedKb;
+                        depthChangedSum += depth.changed;
+                    }
                     std::printf("\n");
                     lastMerged = stats.mergedUpdates;
                     rateSum += stats.imagesPerSecond;
@@ -2891,6 +3031,12 @@ int main(int argc, char** argv) {
                     std::printf("UI finding: %.1f images/s, %.2f ms per image (finding %.2f)\n", uiSum / samples,
                                 uiMsSum / samples, uiFindSum / samples);
                 }
+                if (depthFinder) {
+                    std::printf("Depth: %.1f maps/s, network %.2f ms, shading %.2f ms, packing %.2f ms, %.0f kB a map "
+                                "packed, %.1f%% of the pixels moved more than 8 levels from map to map\n",
+                                depthSum / samples, depthNetSum / samples, depthShadeSum / samples,
+                                depthPackSum / samples, depthKbSum / samples, depthChangedSum * 100.0 / samples);
+                }
             }
             if (clip) {
                 saveClip(*clip, options.clipFolder, screen, recognizer.get(), options.model);
@@ -2902,6 +3048,10 @@ int main(int argc, char** argv) {
                 recognizer->setSnapper(nullptr);
                 pipeline.setSnapEnabled(false);
                 snapper.reset();
+            }
+            if (depthFinder) {
+                pipeline.setDepthEnabled(false);
+                depthFinder.reset();
             }
             if (uiFinder) {
                 pipeline.setUiEnabled(false);
