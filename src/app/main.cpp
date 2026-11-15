@@ -27,9 +27,9 @@ ImGuiKey keyNamed(const std::wstring& name) {
     return ImGuiKey_None;
 }
 
-// observex.exe [--snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --right-drag X1 Y1 X2 Y2 |
+// observex.exe [--snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --hold X1 Y1 X2 Y2 | --right-drag X1 Y1 X2 Y2 |
 //              --scroll X Y TURNS | --key [Ctrl+]NAME | --type TEXT]... [--mouse X Y] [--recordings FOLDER]
-//              [--wait SECONDS]]
+//              [--wait SECONDS] [--shot]]
 // The snapshot options draw the UI in a hidden window and save it; see App::Snapshot.
 std::optional<observex::App::Snapshot> readSnapshotOptions() {
     int count = 0;
@@ -49,6 +49,11 @@ std::optional<observex::App::Snapshot> readSnapshotOptions() {
             i += 2;
         } else if (snapshot && arg == L"--drag" && i + 4 < count) {
             snapshot->steps.push_back({point(i + 1), point(i + 3)});
+            i += 4;
+        } else if (snapshot && arg == L"--hold" && i + 4 < count) {
+            // A drag not let go of: the snapshot shows it in the middle (give --mouse X2 Y2 to keep the mouse there).
+            snapshot->steps.push_back({point(i + 1), point(i + 3)});
+            snapshot->steps.back().release = false;
             i += 4;
         } else if (snapshot && arg == L"--right-drag" && i + 4 < count) {
             snapshot->steps.push_back({point(i + 1), point(i + 3)});
@@ -89,15 +94,37 @@ std::optional<observex::App::Snapshot> readSnapshotOptions() {
             i += 2;
         } else if (snapshot && arg == L"--wait" && i + 1 < count) {
             snapshot->wait = std::max(0.0f, std::wcstof(args[++i], nullptr));
+        } else if (snapshot && arg == L"--shot") {
+            snapshot->shot = true; // A training screenshot once a screen is observed (into --recordings).
         }
     }
     LocalFree(args);
     return snapshot;
 }
 
+// Whether the command line has `arg`.
+bool hasArgument(const wchar_t* arg) {
+    int count = 0;
+    wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &count);
+    bool has = false;
+    for (int i = 1; args != nullptr && i < count; ++i) {
+        has = has || std::wcscmp(args[i], arg) == 0;
+    }
+    LocalFree(args);
+    return has;
+}
+
 } // namespace
 
 int main() {
-    observex::App app(readSnapshotOptions());
+    std::optional<observex::App::Snapshot> snapshot = readSnapshotOptions();
+    // Started live (not snapshot mode, which never shows a window, nor under a debugger) and not as administrator:
+    // started again as one, so Shift+Win is heard while Lineage 2 is in front (app/ShotHook). If the user
+    // says no, this one goes on and says so in the log when it observes.
+    if (!snapshot && !IsDebuggerPresent() && !observex::runsAsAdministrator() &&
+        !hasArgument(observex::kAsAdministrator) && observex::restartAsAdministrator()) {
+        return 0;
+    }
+    observex::App app(std::move(snapshot));
     return app.run();
 }

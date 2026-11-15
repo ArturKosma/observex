@@ -1,5 +1,6 @@
 #include "StatsBench.h"
 
+#include "heuristics/KeyLabels.h"
 #include "heuristics/StatsReader.h"
 #include "core/StateTree.h"
 #include "core/UiLayout.h"
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -20,11 +22,141 @@
 
 namespace observex {
 
+namespace {
+
+// --stats --keys [--layout FOLDER] read|teach ...: the keys written on hotbar slots (heuristics/KeyLabels, by FOLDER's
+// keys.txt, models/ui by default), as the stats reader reads them and as the Skills tab teaches them:
+//   read BRAIN                 every skill's picture in a profile (.brain)
+//   read IMAGE X Y SIDE        the slot at X Y on a screen image
+//   teach BRAIN SKILL TEXT     learns that the key on SKILL's picture is TEXT, and writes keys.txt
+//   teach IMAGE X Y SIDE TEXT
+int keysBench(int argc, char** argv) {
+    namespace fs = std::filesystem;
+    fs::path folder = "models/ui";
+    int at = 0;
+    if (argc >= 2 && std::strcmp(argv[0], "--layout") == 0) {
+        folder = argv[1];
+        at = 2;
+    }
+    const auto usage = [] {
+        std::printf("usage: observex_bench --stats --keys [--layout FOLDER] read BRAIN | read IMAGE X Y SIDE |\n"
+                    "         teach BRAIN SKILL TEXT | teach IMAGE X Y SIDE TEXT\n");
+        return 2;
+    };
+    if (argc - at < 2 || (std::strcmp(argv[at], "read") != 0 && std::strcmp(argv[at], "teach") != 0)) {
+        return usage();
+    }
+    const bool teach = std::strcmp(argv[at], "teach") == 0;
+    const fs::path source = argv[at + 1];
+    int next = at + 2;
+    KeyFont font;
+    std::string error;
+    if (!font.load(folder / kKeysFile, &error)) {
+        std::printf("%s\n", error.c_str());
+        return 1;
+    }
+    // The pictures: a profile's skills (3 bytes a pixel), or one slot of an image (4).
+    struct Slot {
+        std::string name;
+        std::vector<std::uint8_t> pixels;
+        int side = 0;
+        int step = 3;
+    };
+    std::vector<Slot> slots;
+    if (source.extension() == statetree::kTreeExtension) {
+        std::ifstream in(source, std::ios::binary);
+        const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        const std::optional<statetree::Tree> tree = statetree::readTree(text, &error);
+        if (!tree) {
+            std::printf("%s: %s\n", source.string().c_str(), error.c_str());
+            return 1;
+        }
+        const char* only = teach && next < argc ? argv[next++] : nullptr;
+        for (const statetree::Skill& skill : tree->skills()) {
+            if (skill.side > 0 && (only == nullptr || skill.name == only)) {
+                slots.push_back({skill.name + " (profile: " + (skill.key.empty() ? "no key" : skill.key) + ")",
+                                 skill.bgr, skill.side, 3});
+            }
+        }
+        if (teach && slots.size() != 1) {
+            std::printf("no skill %s in %s\n", only != nullptr ? only : "(none given)", source.string().c_str());
+            return 1;
+        }
+    } else {
+        if (argc - next < 3) {
+            return usage();
+        }
+        const int x = std::atoi(argv[next]);
+        const int y = std::atoi(argv[next + 1]);
+        const int side = std::atoi(argv[next + 2]);
+        next += 3;
+        ImageData image;
+        try {
+            image = readImageFile(source);
+        } catch (const std::exception& e) {
+            std::printf("%s: %s\n", source.string().c_str(), e.what());
+            return 1;
+        }
+        if (side < 8 || side > 64 || x < 0 || y < 0 || x + side > static_cast<int>(image.width) ||
+            y + side > static_cast<int>(image.height)) {
+            std::printf("the slot is not on the image\n");
+            return 1;
+        }
+        Slot slot{source.filename().string() + " " + std::to_string(x) + "," + std::to_string(y), {}, side, 4};
+        for (int row = 0; row < side; ++row) {
+            const std::uint8_t* from = image.bgra.data() + (static_cast<std::size_t>(y + row) * image.width + x) * 4;
+            slot.pixels.insert(slot.pixels.end(), from, from + static_cast<std::size_t>(side) * 4);
+        }
+        slots.push_back(std::move(slot));
+    }
+    const auto pictureOf = [](const Slot& slot) {
+        return KeyPicture{slot.pixels.data(), static_cast<std::size_t>(slot.side * slot.step), slot.step, slot.side};
+    };
+    const auto say = [&](const Slot& slot) {
+        std::vector<KeyPart> parts;
+        const std::string key = font.read(pictureOf(slot), &parts);
+        std::string line = slot.name + ": " + (key.empty() ? "- (no letters)" : key) + "  [";
+        for (const KeyPart& part : parts) {
+            char one[64];
+            std::snprintf(one, sizeof(one), "%s%s %d-%d", line.back() == '[' ? "" : ", ",
+                          part.known ? ("'" + part.text + "' " + std::to_string(part.score).substr(0, 4)).c_str() : "?",
+                          part.from, part.to);
+            line += one;
+        }
+        std::printf("%s]\n", line.c_str());
+        return key;
+    };
+    if (!teach) {
+        for (const Slot& slot : slots) {
+            say(slot);
+        }
+        return 0;
+    }
+    if (next >= argc) {
+        return usage();
+    }
+    const std::string typed = argv[next];
+    std::printf("before: ");
+    say(slots[0]);
+    const int learned = font.teach(pictureOf(slots[0]), typed);
+    std::printf("learned %d glyphs for '%s' (%d in all); after: ", learned, typed.c_str(), font.glyphs());
+    say(slots[0]);
+    if (learned > 0 && !font.save(folder / kKeysFile, &error)) {
+        std::printf("%s\n", error.c_str());
+        return 1;
+    }
+    return 0;
+}
+
+} // namespace
+
 // --stats: on each image (PATH may be an image or a folder of them, e.g. a recording), finds the interface as the UI
 // finder does (core/UiLayout on its grey image) and reads stats.txt's bars on it (core/GameStats), then says per bar
 // how often it was seen and its number read, kept or doubted (read, but not agreeing with the bar), with examples, and
 // how long reading took. --list prints every image's reads, and why what was not seen was not. --skills BRAIN: the skills
 // to look for, a profile's (.brain, as the app gives them), or a folder of grey NAME.pgm pictures (all with cooldowns).
+// --plate X0 Y0 X1 Y1: also the name plate over that box on the image (as Select Target asks for its monster's), a
+// line per image: hovered or selected, where, the name read.
 int statsBench(int argc, char** argv) {
     namespace fs = std::filesystem;
     using Clock = std::chrono::steady_clock;
@@ -47,13 +179,20 @@ int statsBench(int argc, char** argv) {
         }
         return 0;
     }
+    if (argc >= 1 && std::strcmp(argv[0], "--keys") == 0) {
+        return keysBench(argc - 1, argv + 1);
+    }
     std::vector<fs::path> paths;
     fs::path layoutFolder = "models/ui";
     bool list = false;
     bool listPieces = false; // --pieces: each image's found pieces (for scratch stress tests that move them).
     fs::path skillsFrom;
+    PlateLook look{};
     for (int i = 0; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--layout") == 0 && i + 1 < argc) {
+        if (std::strcmp(argv[i], "--plate") == 0 && i + 4 < argc) {
+            look = {1, {std::atoi(argv[i + 1]), std::atoi(argv[i + 2]), std::atoi(argv[i + 3]), std::atoi(argv[i + 4])}};
+            i += 4;
+        } else if (std::strcmp(argv[i], "--layout") == 0 && i + 1 < argc) {
             layoutFolder = argv[++i];
         } else if (std::strcmp(argv[i], "--skills") == 0 && i + 1 < argc) {
             skillsFrom = argv[++i];
@@ -67,6 +206,7 @@ int statsBench(int argc, char** argv) {
     }
     if (paths.empty()) {
         std::printf("usage: observex_bench --stats PATH... [--layout FOLDER] [--skills BRAIN|FOLDER] [--list]\n"
+                    "  [--plate X0 Y0 X1 Y1]\n"
                     "  PATH: an image, or a folder of .jpg/.png (a recording)\n");
         return 2;
     }
@@ -128,6 +268,7 @@ int statsBench(int argc, char** argv) {
         reader.setSkills(pictures);
         std::printf("%d skills from %s\n", reader.skills(), skillsFrom.string().c_str());
     }
+    reader.setLook(look);
 
     std::vector<fs::path> images;
     for (const fs::path& path : paths) {
@@ -183,8 +324,8 @@ int statsBench(int argc, char** argv) {
         }
 
         const Clock::time_point start = Clock::now();
-        StatsArea areas[8];
-        const int parts = reader.areas(on, width, height, areas, 8);
+        StatsArea areas[12];
+        const int parts = reader.areas(on, width, height, areas, 12);
         std::vector<ColourPart> colour;
         for (int i = 0; i < parts; ++i) {
             colour.push_back({areas[i],
@@ -194,6 +335,12 @@ int statsBench(int argc, char** argv) {
         GameStats stats;
         reader.read(on, colour, stats);
         readMs.push_back(std::chrono::duration<double, std::milli>(Clock::now() - start).count());
+        if (look.id != 0) {
+            const NamePlate& plate = stats.plate;
+            std::printf("plate %s: %s at %d,%d-%d,%d, %d orbs round it, name '%s'\n", path.filename().string().c_str(),
+                        !plate.seen ? "none" : plate.selected ? "SELECTED" : "hovered", plate.at.x0, plate.at.y0,
+                        plate.at.x1, plate.at.y1, plate.orbs, plate.name.data());
+        }
 
         std::string line = path.filename().string() + ":";
         for (int i = 0; i < stats.count; ++i) {
@@ -205,10 +352,11 @@ int statsBench(int argc, char** argv) {
             Tally& tally = tallies[name];
             const std::string full = gauge.full >= 0.0f ? std::to_string(gauge.full).substr(0, 6) : "unseen";
             const std::string where = path.parent_path().filename().string() + "/" + path.filename().string();
-            char said[96];
-            std::snprintf(said, sizeof(said), " %s %s %s%s%s", gauge.name.data(), full.c_str(),
+            char said[128];
+            std::snprintf(said, sizeof(said), " %s %s %s%s%s%s%s", gauge.name.data(), full.c_str(),
                           gauge.pressed ? "pressed" : gauge.text[0] != '\0' ? gauge.text.data() : "-",
-                          gauge.doubted[0] != '\0' ? " doubted " : "", gauge.doubted.data());
+                          gauge.doubted[0] != '\0' ? " doubted " : "", gauge.doubted.data(),
+                          gauge.key[0] != '\0' ? " key " : "", gauge.key.data());
             line += said;
             if (std::any_of(on.begin(), on.end(),
                             [&](const UiPiece& p) { return std::strcmp(p.name.data(), gauge.piece.data()) == 0; })) {

@@ -1,11 +1,14 @@
 #include "engine/Finder.h"
 
 #include "core/Features.h"
+#include "core/LootWatch.h"
 #include "core/Marks.h"
+#include "core/ModelInfo.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
 #include "engine/ImageFile.h"
 #include "engine/Recognizer.h"
+#include "engine/TensorRt.h"
 
 #include <algorithm>
 #include <array>
@@ -98,6 +101,17 @@ void Finder::run(std::stop_token stop) {
         std::unique_ptr<Detector> detector; // Made for the first image's size, and again if the size changes.
         unsigned width = 0;
         unsigned height = 0;
+        // A model trained on squares round a spot (drops) looks at each image square by square (lootTiles), not at
+        // all of it squeezed to its size, where drops would be a few pixels.
+        bool inSquares = false;
+        std::error_code noInfo;
+        if (const fs::path infoFile = modelFolder_ / L"model.json"; fs::exists(infoFile, noInfo)) {
+            const std::vector<char> info = readWholeFile(infoFile);
+            inSquares = parseModelLooksAround(std::string_view(info.data(), info.size()));
+        }
+        std::vector<LootSquare> squares;
+        std::vector<Detection> fromSquares;
+        std::vector<float> squareFeatures;
         std::array<Detection, Detector::kMaxCandidates> found;
         ImageMarks guesses;
         GuessFeatures features; // Of each guess, for a model that gives them.
@@ -112,12 +126,45 @@ void Finder::run(std::stop_token stop) {
                                                       image.height, stop, progress_);
                 width = image.width;
                 height = image.height;
+                squares = inSquares ? lootTiles(static_cast<int>(width), static_cast<int>(height))
+                                    : std::vector<LootSquare>{LootSquare{}};
             }
             gpu.context->UpdateSubresource(detector->input(), 0, nullptr, image.bgra.data(), image.width * 4, 0);
-            const int count = detector->detect(gpu.context.Get(), Recognizer::kMinSure, found.data(),
-                                               static_cast<int>(found.size()));
-            if (count < 0) {
-                throw std::runtime_error("The GPU stopped running the model (it may have been reset).");
+            // Each square's things, with their features (taken before the next square's look), then the surest of
+            // each place.
+            const std::size_t featureSize = static_cast<std::size_t>(std::max(0, detector->featureSize()));
+            fromSquares.clear();
+            squareFeatures.clear();
+            for (const LootSquare& square : squares) {
+                const int seen = detector->detect(gpu.context.Get(), Recognizer::kMinSure, found.data(),
+                                                  static_cast<int>(found.size()), false,
+                                                  {square.x, square.y, square.side});
+                if (seen < 0) {
+                    throw std::runtime_error("The GPU stopped running the model (it may have been reset).");
+                }
+                fromSquares.insert(fromSquares.end(), found.begin(), found.begin() + seen);
+                if (featureSize > 0 && seen > 0) {
+                    squareFeatures.resize(fromSquares.size() * featureSize);
+                    if (!detector->features({found.data(), static_cast<std::size_t>(seen)},
+                                            squareFeatures.data() + (fromSquares.size() - seen) * featureSize)) {
+                        throw std::runtime_error("The GPU stopped running the model (it may have been reset).");
+                    }
+                }
+            }
+            std::vector<int> kept;
+            if (squares.size() > 1) {
+                kept = keepApart(fromSquares);
+            } else {
+                for (std::size_t i = 0; i < fromSquares.size(); ++i) {
+                    kept.push_back(static_cast<int>(i));
+                }
+            }
+            const int count = std::min(static_cast<int>(kept.size()), static_cast<int>(found.size()));
+            for (int i = 0; i < count; ++i) {
+                found[static_cast<std::size_t>(i)] = fromSquares[static_cast<std::size_t>(kept[static_cast<std::size_t>(i)])];
+                // Its row in squareFeatures, for after the sort.
+                found[static_cast<std::size_t>(i)].candidate =
+                    static_cast<std::uint16_t>(kept[static_cast<std::size_t>(i)]);
             }
             // Reading order, so Tab in the review goes top to bottom. The features follow the same order.
             const auto end = found.begin() + count;
@@ -140,9 +187,10 @@ void Finder::run(std::stop_token stop) {
             features.size = detector->featureSize();
             if (features.size > 0) {
                 std::vector<float>& numbers = features.images[name];
-                numbers.resize(marks.size() * static_cast<std::size_t>(features.size));
-                if (!detector->features({found.data(), marks.size()}, numbers.data())) {
-                    throw std::runtime_error("The GPU stopped running the model (it may have been reset).");
+                numbers.resize(marks.size() * featureSize);
+                for (std::size_t i = 0; i < marks.size(); ++i) {
+                    std::copy_n(squareFeatures.begin() + static_cast<std::ptrdiff_t>(found[i].candidate * featureSize),
+                                featureSize, numbers.begin() + static_cast<std::ptrdiff_t>(i * featureSize));
                 }
             }
             done_.fetch_add(1, std::memory_order_relaxed);

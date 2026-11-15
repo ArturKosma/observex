@@ -28,7 +28,7 @@ Tiles placeTiles(bool live, bool stats, bool state, TileRect area, float split, 
     return tiles;
 }
 
-TileRect placeLog(TileRect area, bool others, float left, float gap, TileRect& rest) {
+TileRect placeColumn(TileRect area, bool others, float left, float gap, TileRect& rest) {
     if (!others) {
         rest = {};
         return area;

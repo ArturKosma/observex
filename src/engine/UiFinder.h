@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Costs.h"
 #include "core/GameStats.h"
 #include "core/TripleBuffer.h"
 #include "core/UiLayout.h"
@@ -29,6 +30,7 @@ struct UiFinderStats {
     float statsAvgMs = 0.0f;         // Then reading the bars and their numbers (heuristics/StatsReader), on the CPU.
     std::array<char, 256> problem{}; // Why ui.txt is not what it finds with (see UiFinder); empty when it is.
     std::array<char, 256> statsProblem{}; // Why stats.txt cannot be read (no numbers are read); empty when it can.
+    CostPart costs;                  // Its work on each image, step by step (the Debug tab).
 };
 
 // The miniatures (heuristics/Miniatures: skills' and items' pictures) on the whole of one image, when asked (the Stats
@@ -43,6 +45,34 @@ struct UiMiniatures {
     int count = 0;
     std::array<StatsArea, kMax> boxes{};                      // On the screen.
     std::array<std::uint8_t, kPitch * kSide> bgra{};          // The atlas (ScreenCapture::kImageFormat).
+};
+
+// The profile's skills seen ready on the newest image read, each as the stats reader found it: its miniature, where it
+// is and the key written on its slot (core/GameStats' GameGauge at and key). The app follows a skill moved to another
+// slot by them (app/App's followSkills: its shortcut and miniature in the profile).
+struct UiSkillPictures {
+    static constexpr int kMax = 16;
+    static constexpr int kSide = 64;
+    struct Picture {
+        std::array<char, 32> name{};
+        std::array<char, 16> key{}; // "-": no key written.
+        StatsArea at{};             // On the screen; its width is the side.
+        std::array<std::uint8_t, kSide * kSide * 4> bgra{}; // Side x side, rows side * 4 bytes apart.
+    };
+    std::uint64_t image = 0; // The screen image (0: none yet).
+    int count = 0;
+    std::array<Picture, kMax> pictures{};
+};
+
+// A part of one screen image read by Windows OCR when asked (the Skills tab's Refresh: the tooltip round a hovered
+// skill, for its MP cost; heuristics/TextOcr).
+struct UiText {
+    std::uint64_t request = 0; // The ask it answers (UiFinder::readText); 0: none yet.
+    std::uint64_t image = 0;   // The screen image read,
+    std::int64_t shownQpc = 0; // and when the screen showed it.
+    StatsArea area{};          // As read (kept on the image).
+    float ms = 0.0f;           // How long reading it took.
+    std::array<char, 1024> text{}; // Its words as one line; empty if none were read.
 };
 
 // A skill to look for (the profile's, the Skills tab): its name, whether its cooldown is read, and its miniature as it
@@ -111,6 +141,17 @@ public:
     const UiMiniatures& miniatures();
     // The skills to read (the profile's), from the next image on. Any thread.
     void setSkills(std::vector<SkillToFind> skills);
+    // For one reader thread (the UI): the skills seen ready on the newest image read. Valid until the next call.
+    const UiSkillPictures& skillPictures();
+    // Asks for `area` of the next image it looks at to be read by Windows OCR, as light letters on a dark ground (the
+    // game's tooltips: the picture is turned over and doubled first; tens to hundreds of milliseconds on its thread);
+    // returns the ask's number (text().request is it once answered). Any thread.
+    std::uint64_t readText(const StatsArea& area);
+    // For one reader thread (the UI): the newest text read. Valid until the next call.
+    const UiText& text();
+    // The character whose name plate to read (gameStats().plate), from the next image on; id 0: none (the default).
+    // Any thread; cheap, so it can be called every frame.
+    void setLook(const PlateLook& look);
 
 private:
     void run(std::stop_token stop);
@@ -126,10 +167,17 @@ private:
     TripleBuffer<GameStats> gameStats_;
     TripleBuffer<UiFinderStats> stats_;
     TripleBuffer<UiMiniatures> miniatures_;
+    TripleBuffer<UiSkillPictures> skillPictures_;
     std::atomic<std::uint64_t> miniaturesAsked_{0};
     std::mutex skillsMutex_;
     std::vector<SkillToFind> skills_;           // Under skillsMutex_.
     std::atomic<std::uint64_t> skillsVersion_{0}; // One more on each setSkills().
+    std::mutex lookMutex_;
+    PlateLook look_{}; // Under lookMutex_.
+    TripleBuffer<UiText> text_;
+    std::atomic<std::uint64_t> textAsked_{0};
+    std::mutex textMutex_;
+    StatsArea textArea_{}; // Under textMutex_.
     std::atomic<State> state_{State::Starting};
     std::string error_;
     std::jthread thread_; // Last, so it stops before the members it uses are destroyed.

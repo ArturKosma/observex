@@ -3,6 +3,7 @@
 #include "core/Ground.h"
 #include "core/Heuristics.h"
 #include "heuristics/MinimapCone.h"
+#include "heuristics/TurnPitch.h"
 
 #include <array>
 #include <cmath>
@@ -206,6 +207,13 @@ private:
 // GroundFinder) and on a clip (engine/ClipGround), the same way, through observex_heuristics.dll (heuristics/Plugin).
 // It reads an image's levels from GroundMotion::kFirstLevel on (whole: 0.3 MB for a 2560 x 1440 screen) and the full
 // size round the minimap's cone (60 x 60 pixels once found). Use one from one thread.
+//
+// The pitch, while the camera turns, by the turns themselves (TurnPitch, the user asked 2026-11-15: the most precise
+// pitch): each follow its points are followed from the image before and the two cameras fitted, and once they say the
+// pitch surely enough (TurnHold) the camera's pitch is theirs, carried on by every tilt since, until it is lost (nothing
+// followed, the camera forgotten): the ground's motion then says only how the camera tilts between turns (its fit's
+// pitch held, as by a depth map), and the depth network's maps do not pull it (they lean by up to 3 degrees, the ground
+// by its slope). Until then, as before.
 class GroundFollower final : public Grounding {
 public:
     void begin(double timeMs, int width, int height, const GroundHints& hints) override;
@@ -278,9 +286,10 @@ public:
     // with nothing learned on the one before.
     bool followed() const { return followed_; }
 
-    // Lost: nothing followed this long (neither fitted nor surely searched: GroundMotion::kSureSearch), the camera is
-    // forgotten and found again from the start (its pitch searched), not held where it was last right (and where
-    // nothing matches).
+    // Lost: nothing followed this long (neither fitted nor surely searched: GroundMotion::kSureSearch, nor its points
+    // by the turns while they hold the pitch: in a long fast turn the patches matched nothing for 0.6 s while they
+    // did, clip 2026-11-15_14-24-16, 5.1 to 5.7 s), the camera is forgotten and found again from the start (its pitch
+    // searched), not held where it was last right (and where nothing matches).
     static constexpr double kLostMs = 600.0;
 
 private:
@@ -337,6 +346,38 @@ private:
     void notePitch(double timeMs);
     // The camera's pitch on the image at `timeMs`, between the two kept round it; none if older than all.
     std::optional<float> pitchAt(double timeMs) const;
+    // The pitch by the camera's turns: the points learned on the image followed, the camera's pitch and yaw there, and
+    // how the last follow's went (note()).
+    // The camera by the mouse's counts (GroundHints' mouse) on the image begin() or headAreas() was for, and on the
+    // one the patches were learned on; and the camera's yaw less their turn while the cone has not anchored them.
+    // While they are known they turn and tilt the camera (byMouse): the turns, the cone and the depth network do not.
+    struct Mouse {
+        bool known = false;
+        bool yawKnown = false;
+        bool pitchKnown = false;
+        double turned = 0.0;
+        float yaw = 0.0f;
+        float pitch = 0.0f;
+    };
+    Mouse mouse_;
+    Mouse learnedMouse_;
+    bool mouseOffsetKnown_ = false;
+    float mouseOffset_ = 0.0f;
+    static Mouse mouseOf(const GroundHints& hints);
+    std::optional<float> mouseYaw(const Mouse& mouse) const;
+    bool mousePitched() const { return mouse_.known && mouse_.pitchKnown; }
+    // The camera turned and tilted as the counts say on end()'s image (from the one learned on).
+    void byMouse();
+    TurnPitch turns_;
+    TurnHold hold_;
+    float turnsPitch_ = 0.0f;
+    float turnsYaw_ = 0.0f;
+    double turnsMs_ = 0.0;
+    TurnPitch::Pair lastPair_;
+    bool lastTaken_ = false;
+    float lastTurnsMs_ = 0.0f;
+    // Follows the points learned onto `image` and takes what they say; then learns them on it.
+    void followTurns(const GreyView& image);
     double timeMs_ = 0.0;       // The image begin() was for.
     double lostSinceMs_ = -1.0; // The first image not followed since the last one followed; -1: none.
     bool followed_ = false;

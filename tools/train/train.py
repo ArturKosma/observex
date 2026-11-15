@@ -47,6 +47,10 @@ SCORE_CUTOFFS = (0.3, 0.4, 0.5)  # The score counts marks the model is at least 
 # alarms against 892 and 69. It costs 3.2 ms per image live instead of 2.0 (still all 240 images a second on an idle
 # desktop). The user chose 1024 on 2026-11-03. Training at 768 instead was worse (AP50 0.931 on the 80, 2026-11-01).
 LIVE_RESOLUTION = 1024
+# Categories looked for only around a spot, on a full-resolution square cut there, not on the whole squeezed screen
+# (loot.py: drops, round a corpse). Their training images are such squares and their model runs at
+# loot.LOOT_RESOLUTION.
+LOOKED_AROUND = ("drop",)
 # Images per learning step, RF-DETR's usual recipe. They go through the GPU --batch at a time, and the step waits for
 # all of them. Not batch_size="auto": it tries bigger batches until one does not fit, but on Windows the NVIDIA driver
 # then moves GPU memory into normal RAM instead of failing, so the search never ends (it ran 7 minutes, 15 GB RAM).
@@ -102,11 +106,20 @@ def load_trained(path: Path):
     return RFDETR.from_checkpoint(str(path))
 
 
-def load_live(path: Path):
-    """A model saved by train.py, set to see images at LIVE_RESOLUTION, as observex runs it: predict, inference
-    (half precision, compiled) and export then all use that size."""
+def live_resolution(category: str) -> int:
+    """The size observex runs `category`'s model at: LIVE_RESOLUTION, or loot.LOOT_RESOLUTION for squares."""
+    if category in LOOKED_AROUND:
+        from loot import LOOT_RESOLUTION
+
+        return LOOT_RESOLUTION
+    return LIVE_RESOLUTION
+
+
+def load_live(path: Path, resolution: int = LIVE_RESOLUTION):
+    """A model saved by train.py, set to see images at `resolution` (live_resolution of its category), as observex
+    runs it: predict, inference (half precision, compiled) and export then all use that size."""
     model = load_trained(path)
-    model.model.resolution = LIVE_RESOLUTION
+    model.model.resolution = resolution
     return model
 
 
@@ -349,9 +362,10 @@ def main() -> None:
                         help="learn the category's kinds (KINDS) as classes; only images with checked kinds count")
     parser.add_argument("--recordings", type=Path, default=None, help="default: the folder in observex.cfg")
     parser.add_argument("--model", choices=sorted(MODELS), default="medium")
-    parser.add_argument("--resolution", type=int, default=1024,
-                        help="while training, the image is squeezed to this many pixels square (multiple of 32); "
-                             "observex runs the model at LIVE_RESOLUTION")
+    parser.add_argument("--resolution", type=int, default=None,
+                        help="while training, the image is squeezed to this many pixels square (multiple of 32; "
+                             "default 1024, drops loot.LOOT_RESOLUTION); observex runs the model at LIVE_RESOLUTION "
+                             "(drops: LOOT_RESOLUTION)")
     parser.add_argument("--epochs", type=int, default=40,
                         help="passes over the images; on 2026-11-01 the best pass was always before 35")
     parser.add_argument("--augment", choices=sorted(AUGMENTATIONS), default="color",
@@ -360,6 +374,9 @@ def main() -> None:
                         help="images through the GPU at once; lower it if training is slow or runs out of memory")
     parser.add_argument("--held-out", type=float, default=0.2, help="share of each recording kept aside for the score")
     args = parser.parse_args()
+    live = live_resolution(args.category)
+    if args.resolution is None:
+        args.resolution = live if args.category in LOOKED_AROUND else 1024
     if args.resolution % 32 != 0:
         parser.error("--resolution must be a multiple of 32")
     if args.kinds and args.category not in KINDS:
@@ -374,11 +391,20 @@ def main() -> None:
     out = model_folder(args.category)
     out.mkdir(parents=True, exist_ok=True)
     dataset = out / "dataset"
-    counts = build_dataset(recordings, args.category, args.held_out, dataset, kinds)
-    print(f"Training on {counts['train_images']} images ({counts['train_things']} marked), holding out "
-          f"{counts['held_out_images']} ({counts['held_out_things']} marked), from {len(recordings)} recording(s)."
-          + (f" Left out {counts['images_to_answer']} images with a guess added since their review still to answer."
-             if counts["images_to_answer"] else ""), flush=True)
+    if args.category in LOOKED_AROUND:
+        from loot import build_loot_dataset
+
+        counts = build_loot_dataset(recordings, args.category, args.held_out, dataset, write_split)
+        print(f"Training on {counts['train_squares']} squares cut from {counts['train_images']} images "
+              f"({counts['train_things']} marked), holding out {counts['held_out_squares']} squares from "
+              f"{counts['held_out_images']} images ({counts['held_out_things']} marked), from {len(recordings)} "
+              "recording(s).", flush=True)
+    else:
+        counts = build_dataset(recordings, args.category, args.held_out, dataset, kinds)
+        print(f"Training on {counts['train_images']} images ({counts['train_things']} marked), holding out "
+              f"{counts['held_out_images']} ({counts['held_out_things']} marked), from {len(recordings)} recording(s)."
+              + (f" Left out {counts['images_to_answer']} images with a guess added since their review still to "
+                 "answer." if counts["images_to_answer"] else ""), flush=True)
     if kinds:
         print("Kinds: " + ", ".join(f"{n} {kind}" for kind, n in counts["train_kinds"].items())
               + f". Left out {counts['kinds_unchecked_images']} images whose kinds are not checked yet.", flush=True)
@@ -401,13 +427,13 @@ def main() -> None:
     shutil.copy2(best, out / "model.pth")
     for resume_file in training.glob("*.ckpt"):  # 0.5 GB each, only for resuming a stopped run.
         resume_file.unlink()
-    trained = load_live(out / "model.pth")
+    trained = load_live(out / "model.pth", live)
     scores = [score(trained, dataset, cutoff, kinds) for cutoff in SCORE_CUTOFFS]
     info = {
         "category": args.category,
         "model": args.model,
         "resolution": args.resolution,
-        "live_resolution": LIVE_RESOLUTION,
+        "live_resolution": live,
         "trained": datetime.now().isoformat(timespec="seconds"),
         "minutes": round(minutes, 1),
         "epochs": args.epochs,
@@ -425,8 +451,9 @@ def main() -> None:
 
     onnx = export_onnx(args.category)  # What observex runs live.
     print(f"\nTrained in {minutes:.0f} min. Saved {out / 'model.pth'} and {onnx.name}.")
-    print(f"Held-out score, on {counts['held_out_images']} images it never learned from (at {LIVE_RESOLUTION} "
-          "pixels, as observex runs it):")
+    print(f"Held-out score, on {counts.get('held_out_squares', counts['held_out_images'])} "
+          f"{'squares' if args.category in LOOKED_AROUND else 'images'} it never learned from (at {live} pixels, as "
+          "observex runs it):")
     for result in scores:
         print(f"  marks at least {result['cutoff']:.0%} sure: finds {result['found']} of "
               f"{result['found'] + result['missed']} ({result['found_share']:.0%}), {result['false_alarms']} false "

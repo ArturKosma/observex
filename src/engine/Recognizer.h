@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Costs.h"
 #include "core/Heuristics.h"
 #include "core/Question.h"
 #include "core/TripleBuffer.h"
@@ -39,6 +40,7 @@ struct RecognizerStats {
     float imagesPerSecond = 0.0f; // Images looked at.
     float workAvgMs = 0.0f;       // From taking an image to having what is on it.
     float workMaxMs = 0.0f;
+    CostPart costs;               // Its work on each image, step by step (the Debug tab).
 };
 
 // Finds one category of things (e.g. characters) on the observed screen with a trained model (see Detector), on every
@@ -117,9 +119,21 @@ public:
     // How many answers the kind update it picks kinds with learned from; 0 while it uses none. Any thread.
     std::size_t kindAnswers() const { return kindAnswers_.load(std::memory_order_relaxed); }
 
+    // The thing followed as `id` (Tracked::id) is dead: the game's stats said its target died (the user asked,
+    // 2026-11-15: "once we discover the death from stats we can shift the weights of the box towards dead";
+    // core/TargetWatch finds which box). From its next look on, while it is followed, it is shown as the model's "dead"
+    // kind at least kDeadSure sure, its kind before as the second (so to the snapper, the clip buffer's Recorded
+    // things and every reader of found()). Nothing for a model without a "dead" kind. The last kDeadKept ids are kept
+    // (ids are never given to another thing). Any thread.
+    void markDead(std::uint32_t id);
+    static constexpr float kDeadSure = 0.9f;
+    static constexpr std::size_t kDeadKept = 8;
+
 private:
     void run(std::stop_token stop);
     void fail(std::string message);
+    // markDead's things among `things` (as the heuristics show them) as the model's kind `deadKind`.
+    void markDeadThings(std::span<Tracked> things, int deadKind) const;
 
     ComPtr<IDXGIAdapter1> adapter_;
     GpuDevice gpu_;
@@ -136,6 +150,8 @@ private:
     std::atomic<std::shared_ptr<BoxSnapper>> snapper_;
     std::atomic<bool> reloadKinds_{false};
     std::atomic<std::size_t> kindAnswers_{0};
+    std::array<std::atomic<std::uint32_t>, kDeadKept> dead_{}; // markDead's ids (0: none), oldest overwritten.
+    std::atomic<std::size_t> deadNext_{0};
     std::atomic<State> state_{State::Starting};
     std::atomic<float> progress_{0.0f};
     std::string error_;

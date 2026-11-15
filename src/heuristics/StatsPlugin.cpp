@@ -60,6 +60,15 @@ bool setSkills(void* reader, const observex::SkillPicture* skills, int count) {
     }
 }
 
+bool setLook(void* reader, const observex::PlateLook* look) {
+    try {
+        static_cast<observex::StatsReader*>(reader)->setLook(*look);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 } // namespace
 
 extern "C" __declspec(dllexport) const ObservexStatsApi* observexStats() {
@@ -73,6 +82,8 @@ extern "C" __declspec(dllexport) const ObservexStatsApi* observexStats() {
                                       destroy,
                                       areas,
                                       read,
-                                      setSkills};
+                                      setSkills,
+                                      static_cast<std::uint32_t>(sizeof(observex::PlateLook)),
+                                      setLook};
     return &api;
 }

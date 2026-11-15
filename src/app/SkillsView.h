@@ -8,6 +8,7 @@
 #include <imgui.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -22,6 +23,14 @@ class StateTreeView;
 struct MiniatureSource {
     std::function<std::uint64_t()> ask;          // Asks for them on the next image; the ask's number, 0 if none can be.
     std::function<const UiMiniatures*()> newest; // The newest found, or null.
+};
+
+// The Skills tab's Refresh button (the app's Refresh: the mouse over each skill on the hotbar, its MP cost read off its
+// tooltip): whether it runs and how far it is, and what a click does (starts or stops it).
+struct RefreshButton {
+    bool running = false;
+    float progress = 0.0f; // 0 to 1, while it runs.
+    std::function<void()> click;
 };
 
 // The profile's skills' miniatures on the GPU, to draw as their icons (the Skills tab, and the Stats tile next to each
@@ -44,15 +53,21 @@ private:
 };
 
 // The Skills tab (the user asked, 2026-11-14: "a pocket with all skills", kept in the profile like the state tree):
-// + Add Skill at the top (picks a miniature among those on the screen, the hotbar's first, while the skill is ready,
-// then its name and whether it has a cooldown to read: one without is never in the Stats tile's Cooldowns), then the
-// profile's skills, each its icon, name, Has Cooldown, and an X that removes it. Changes go into the profile at once
+// at the top the profile, chosen as in the State tile (Load, and its name in a field that renames it; the user asked,
+// 2026-11-15), + Add Skill (picks a miniature among those on the screen, the hotbar's first, while the skill is
+// ready, then its name and whether it has a cooldown to read: one without is never in the Stats tile's Cooldowns) and
+// Refresh (RefreshButton); then the profile's skills, each its icon, name, MP Cost, Shortcut (the key on its hotbar
+// slot, as read: for the Pico to press; typed in, it is learned from the slot), Has Cooldown, and an X that removes it. Changes go into the profile at once
 // (StateTreeView::saveSkills: Ctrl+Z in the State tile undoes them).
 class SkillsView {
 public:
-    // Draws into the current window (the tile).
-    void draw(const theme::Fonts& fonts, ID3D11Device* device, StateTreeView& profile, const SkillIcons& icons,
-              const MiniatureSource& source, float dpiScale);
+    // A shortcut typed for the skill `name` (already saved into the profile): the slot's letters are to be learned.
+    using KeyTyped = std::function<void(const std::string& name, const std::string& key)>;
+
+    // Draws into the current window (the tile); profiles are in `folder` (Settings' brains folder).
+    void draw(const theme::Fonts& fonts, ID3D11Device* device, StateTreeView& profile,
+              const std::filesystem::path& folder, const SkillIcons& icons, const MiniatureSource& source,
+              const KeyTyped& keyTyped, const RefreshButton& refresh, float dpiScale);
 
 private:
     void drawAddSkill(const theme::Fonts& fonts, ID3D11Device* device, StateTreeView& profile,
@@ -68,6 +83,12 @@ private:
     bool cooldown_ = true;
     std::string error_;
     bool focusName_ = false;
+    // The Shortcut field being typed in: its skill (-1: none) and its text.
+    int keyEditing_ = -1;
+    std::string keyEdit_;
+    // The MP Cost field being typed in, likewise.
+    int mpEditing_ = -1;
+    std::string mpEdit_;
 };
 
 } // namespace observex

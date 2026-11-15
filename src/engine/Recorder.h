@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/Gpu.h"
+#include "engine/ImageFile.h"
 
 #include <atomic>
 #include <cstdint>
@@ -16,16 +17,17 @@ class ImageChannel;
 class ImageReader;
 class LiveLog;
 
-// Saves the images handed to it through an ImageChannel as numbered JPEG files (000001.jpg, 000002.jpg, ...)
-// in one folder. It works on its own low-priority thread with its own GPU device, so reading the images back
-// and encoding them never slows the pipeline. The pipeline decides how often it hands over an image
-// (Pipeline::setRecordingInterval); images that arrive while one is still being saved replace each other.
+// Saves the images handed to it through an ImageChannel as numbered JPEG files (000001.jpg, 000002.jpg, ...), or PNG
+// (000001.png: the training screenshots), in one folder. It works on its own low-priority thread with its own GPU
+// device, so reading the images back and encoding them never slows the pipeline. The pipeline decides how often it
+// hands over an image (Pipeline::setRecordingInterval, takeShot); images that arrive while one is still being saved
+// replace each other.
 class Recorder {
 public:
     // Starts saving the images of `channel`, which come from `screen`, into `folder` (created if missing),
     // numbering them from `firstNumber`. Each saved image also goes into `log`, if given. Throws on failure.
     Recorder(const Screen& screen, ImageChannel& channel, std::filesystem::path folder, unsigned firstNumber,
-             std::shared_ptr<LiveLog> log = nullptr);
+             std::shared_ptr<LiveLog> log = nullptr, ImageFormat format = ImageFormat::Jpeg);
     // Stops once the image being saved, if any, is written. Destroy it before the channel.
     ~Recorder();
 
@@ -49,6 +51,7 @@ private:
     ComPtr<ID3D11Texture2D> staging_; // CPU-readable copy of the image being saved.
     std::filesystem::path folder_;
     std::shared_ptr<LiveLog> log_;
+    ImageFormat format_;
     unsigned nextNumber_;
     unsigned width_ = 0;
     unsigned height_ = 0;

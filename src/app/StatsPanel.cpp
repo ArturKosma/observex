@@ -126,6 +126,8 @@ struct Row {
     const GameGauge* gauge = nullptr;
     std::string label;
     bool skill = false; // Its icon before its label.
+    std::string text;   // Not a gauge's: these words (bright) and `note` (muted) after them, no bar.
+    std::string note;
 };
 struct Card {
     const char* title = "";
@@ -178,7 +180,13 @@ public:
 
 private:
     void row(const Row& row, float x, float y, float width, float labelWidth) const {
-        const Value value = valueOf(row.gauge);
+        Value value = valueOf(row.gauge);
+        if (row.gauge == nullptr && !row.text.empty()) {
+            value.none = false;
+            value.noBar = true;
+            std::snprintf(value.text, sizeof(value.text), "%s", row.text.c_str());
+            std::snprintf(value.percent, sizeof(value.percent), "%s", row.note.c_str());
+        }
         const ImU32 labelColour = value.none ? theme::faded(theme::kTextMuted, 0.6f) : theme::kTextMuted;
         // The label, after the skill's icon.
         float labelX = x;
@@ -248,10 +256,44 @@ private:
 } // namespace
 
 void StatsTile::draw(const theme::Fonts& fonts, const GameStats* stats, const char* empty, const char* problem,
-                     const std::vector<statetree::Skill>& skills, const SkillIcons& icons, float dpi) {
-    const ImVec2 start = ImGui::GetCursorScreenPos();
+                     const std::vector<statetree::Skill>& skills, const SkillIcons& icons, float dpi,
+                     const CameraShown& camera, const char* cameraProblem) {
+    ImVec2 start = ImGui::GetCursorScreenPos();
+    const ImVec2 tileStart = start;
     const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     ImDrawList* drawList = ImGui::GetWindowDrawList();
+    if (camera.known) {
+        // The camera first, the whole width: its numbers change every frame it turns.
+        Card card{"Camera", {}, nullptr};
+        char text[48];
+        Row yaw;
+        yaw.label = "Yaw";
+        std::snprintf(text, sizeof(text), "%.1f\xC2\xB0", static_cast<double>(camera.yaw));
+        yaw.text = text;
+        yaw.note = camera.yawKnown ? "minimap" : "turned only";
+        card.rows.push_back(yaw);
+        Row pitch;
+        pitch.label = "Pitch";
+        if (camera.pitchKnown) {
+            std::snprintf(text, sizeof(text), "%.1f\xC2\xB0", static_cast<double>(camera.pitch));
+            pitch.text = text;
+            pitch.note = camera.pitchBy == 3 ? "top limit" : camera.pitchBy == 2 ? "turns" : "guess";
+        }
+        card.rows.push_back(pitch);
+        Row off;
+        off.label = "Off by";
+        std::snprintf(text, sizeof(text), "cone %.2f\xC2\xB0  turns %.2f\xC2\xB0",
+                      static_cast<double>(camera.coneOff), static_cast<double>(camera.turnsOff));
+        off.text = text;
+        card.rows.push_back(off);
+        const Drawer drawer(fonts, icons, dpi);
+        start.y = drawer.card(card, start.x, start.y, width, drawer.labelWidth({card})) + std::round(kCardGap * dpi);
+    } else if (cameraProblem != nullptr && cameraProblem[0] != '\0') {
+        // Why none (on a clip): the card with only that.
+        const Card card{"Camera", {}, cameraProblem};
+        const Drawer drawer(fonts, icons, dpi);
+        start.y = drawer.card(card, start.x, start.y, width, drawer.labelWidth({card})) + std::round(kCardGap * dpi);
+    }
     float bottom = start.y;
     if (stats == nullptr) {
         drawList->AddText(start, theme::kTextMuted, empty != nullptr ? empty : "Nothing read yet");
@@ -338,8 +380,8 @@ void StatsTile::draw(const theme::Fonts& fonts, const GameStats* stats, const ch
                           nullptr, width);
         bottom += ImGui::CalcTextSize(problem, nullptr, false, width).y;
     }
-    ImGui::SetCursorScreenPos(start);
-    ImGui::Dummy(ImVec2(width, bottom - start.y));
+    ImGui::SetCursorScreenPos(tileStart);
+    ImGui::Dummy(ImVec2(width, bottom - tileStart.y));
 }
 
 } // namespace observex

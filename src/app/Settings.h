@@ -26,9 +26,13 @@ struct Settings {
     // Skills (app/SkillsView: the profile's skills), closed at first (the user asked, 2026-11-14), covering Stats and State
     // while open.
     bool showSkills = false;
-    bool showLog = false; // The tabs' last: Log (app/LogView: what observex did, core/Log).
+    bool showLog = false; // Log (app/LogView: what observex did, core/Log).
+    bool showDebug = false; // The tabs' last: Debug (app/DebugView: what each part of observex spends, core/Costs).
     bool showGround = false; // Show flag: the ground plane the ground finder follows (engine/GroundFinder).
     bool showDepth = false;  // Show flag: how near each pixel is, the depth finder's map (engine/DepthFinder).
+    bool showGeodata = false; // Show flag: the geodata's ground round the character (app/GeodataView).
+    bool showDrops = true;    // Show flag: drops round a kill (engine/DropFinder).
+    float minimapScale = 0.0f; // Game units a pixel of the minimap's map, learned from two /loc (0: not yet).
     bool liveLog = true;   // Recordings also log what live recognition sees (character-live.txt).
 
     // Reads `file` (one "key=value" per line, UTF-8). A missing file or key keeps the default.

@@ -18,6 +18,7 @@ inline constexpr ImU32 kText = IM_COL32(236, 236, 241, 255);
 inline constexpr ImU32 kTextMuted = IM_COL32(142, 142, 154, 255);
 inline constexpr ImU32 kAccent = IM_COL32(139, 123, 255, 255);
 inline constexpr ImU32 kRecord = IM_COL32(242, 85, 90, 255); // The record dot and stop square.
+inline constexpr ImU32 kWarning = IM_COL32(244, 190, 72, 255); // Something to check, e.g. a shortcut not read whole.
 inline constexpr ImU32 kYes = IM_COL32(74, 214, 130, 255);   // Review marks answered yes (monsters, for characters).
 // The other kinds of characters in the review, each its own colour so a wrong one stands out.
 inline constexpr ImU32 kPlayer = IM_COL32(88, 172, 255, 255);
@@ -27,10 +28,16 @@ inline constexpr ImU32 kOwn = IM_COL32(240, 112, 200, 255);
 inline constexpr ImU32 kUnknown = IM_COL32(214, 214, 224, 255);
 // A dead character (a corpse): brick red, apart from the record dot's brighter red and the user's own pink.
 inline constexpr ImU32 kDead = IM_COL32(204, 96, 72, 255);
+// Drops round a kill (the Show flag Drops): gold like adena, yellower than the NPCs' amber.
+inline constexpr ImU32 kDrop = IM_COL32(255, 221, 26, 255);
 // The game's interface (the Show flag UI): cyan, apart from every character kind's colour.
 inline constexpr ImU32 kUi = IM_COL32(34, 211, 238, 255);
 // The ground plane (the Show flag Ground): lime, apart from the monsters' green.
 inline constexpr ImU32 kGround = IM_COL32(163, 230, 53, 255);
+// The Show flag Geodata's grid: level with the feet kGround, lower kGeoLow, higher kGeoHigh; blocked cells kGeoBlocked.
+inline constexpr ImU32 kGeoLow = IM_COL32(40, 200, 255, 255);
+inline constexpr ImU32 kGeoHigh = IM_COL32(255, 140, 30, 255);
+inline constexpr ImU32 kGeoBlocked = IM_COL32(220, 40, 40, 255);
 inline constexpr ImU32 kOverlay = IM_COL32(14, 14, 17, 210); // Labels drawn over screen images.
 inline constexpr ImU32 kHalo = IM_COL32(0, 0, 0, 140); // Behind box outlines, so they show on snow as well as rock.
 

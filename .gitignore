@@ -4,6 +4,7 @@ out/
 /observex.exe
 /observex_heuristics.dll
 /observex_stats.dll
+/*.pdb
 
 # The app's settings and recordings (screen images, gigabytes per hour)
 /observex.cfg
@@ -11,6 +12,8 @@ out/
 # The profiles (state trees and skills, saved on every change) and the log
 /brains/
 /observex.log
+# What a crash leaves (engine/CrashLog: minidumps)
+/crashes/
 
 # IDEs
 .vs/

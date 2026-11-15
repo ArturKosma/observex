@@ -3,6 +3,7 @@
 #include "heuristics/DepthTilt.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace observex {
@@ -591,8 +592,56 @@ std::span<const GreyArea> spanOf(const GreyArea* areas, int count) {
 
 } // namespace
 
+GroundFollower::Mouse GroundFollower::mouseOf(const GroundHints& hints) {
+    Mouse mouse;
+    mouse.known = hints.mouseKnown;
+    mouse.yawKnown = hints.mouseKnown && hints.mouseYawKnown;
+    mouse.pitchKnown = hints.mouseKnown && hints.mousePitchKnown;
+    mouse.turned = hints.mouseTurned;
+    mouse.yaw = hints.mouseYaw;
+    mouse.pitch = hints.mousePitch;
+    return mouse;
+}
+
+std::optional<float> GroundFollower::mouseYaw(const Mouse& mouse) const {
+    constexpr double kTwoPi = 6.283185307179586;
+    if (!mouse.known) {
+        return std::nullopt;
+    }
+    if (mouse.yawKnown) {
+        return mouse.yaw;
+    }
+    if (!mouseOffsetKnown_) {
+        return std::nullopt;
+    }
+    return static_cast<float>(std::remainder(mouse.turned + static_cast<double>(mouseOffset_), kTwoPi));
+}
+
+void GroundFollower::byMouse() {
+    constexpr double kTwoPi = 6.283185307179586;
+    if (!mouse_.known || !fit_.camera().known) {
+        return;
+    }
+    const GroundCamera& camera = fit_.camera();
+    if (!mouse_.yawKnown && !mouseOffsetKnown_) { // Turned from where the cone (or the ground) had it.
+        mouseOffset_ = static_cast<float>(std::remainder(static_cast<double>(camera.yaw) - mouse_.turned, kTwoPi));
+        mouseOffsetKnown_ = true;
+    }
+    float yawSpeed = 0.0f;
+    float pitchSpeed = 0.0f;
+    const double gapMs = timeMs_ - motion_.learnedMs();
+    if (learnedMouse_.known && gapMs > 0.0) {
+        yawSpeed = static_cast<float>(std::remainder(mouse_.turned - learnedMouse_.turned, kTwoPi) / gapMs);
+        if (mouse_.pitchKnown && learnedMouse_.pitchKnown) {
+            pitchSpeed = static_cast<float>((mouse_.pitch - learnedMouse_.pitch) / gapMs);
+        }
+    }
+    fit_.rotated(*mouseYaw(mouse_), yawSpeed, mouse_.pitchKnown, mouse_.pitch, pitchSpeed);
+}
+
 void GroundFollower::begin(double timeMs, int width, int height, const GroundHints& hints) {
     timeMs_ = timeMs;
+    mouse_ = mouseOf(hints);
     if (hints.hasOwn) {
         fit_.own(hints.ownTop, hints.ownBottom, static_cast<float>(width), static_cast<float>(height), timeMs);
     } else {
@@ -633,6 +682,18 @@ GroundNote GroundFollower::note() const {
     note.searchMatch = motion_.searchMatch();
     note.headed = cone_.seen();
     note.heading = cone_.heading();
+    note.turnPoints = lastPair_.points;
+    note.turnAgreeing = lastPair_.agreeing;
+    note.turnFitted = lastPair_.fitted;
+    note.turnTaken = lastTaken_;
+    note.turnHolds = hold_.holds();
+    note.turnMiss = lastPair_.miss;
+    note.turnTurn = lastPair_.turn;
+    note.turnTilt = lastPair_.tilt;
+    note.turnPitch = lastPair_.pitch + lastPair_.tilt;
+    note.turnSpread = lastPair_.spread;
+    note.turnHoldSpread = hold_.holds() ? hold_.spread() : 0.0f;
+    note.turnMs = lastTurnsMs_;
     return note;
 }
 
@@ -657,14 +718,24 @@ bool GroundFollower::end(const GreyView& image) {
         const float onward = lastTurn_ + lastTurnSpeed_ * static_cast<float>(timeMs_ - lastTurnMs_);
         turn = turn ? std::clamp(onward, *turn - kConeSlack - coneLag, *turn + kConeSlack + coneLag) : onward;
     }
+    const bool countsTurn = mouse_.known && learnedMouse_.known;
+    if (countsTurn) { // The mouse's counts: exactly as far.
+        turn = static_cast<float>(std::remainder(mouse_.turned - learnedMouse_.turned, 2.0 * static_cast<double>(kPi)));
+    }
     if (followed_) {
         motion_.find(image, fit_.camera(), timeMs_, turn, matches_);
-        const bool pitchHeld =
-            depthTaken_ && timeMs_ - depthSaidMs_ < kDepthHeldMs && depthWeight_ >= kDepthHeldWeight;
-        const GroundFit::Start found{motion_.searchFirstPitch(),    motion_.searchPitch(),
+        const bool pitchHeld = hold_.holds() || (depthTaken_ && timeMs_ - depthSaidMs_ < kDepthHeldMs &&
+                                                 depthWeight_ >= kDepthHeldWeight);
+        GroundFit::Start found{motion_.searchFirstPitch(),    motion_.searchPitch(),
                                      motion_.searchFirstDistance(), motion_.searchDistance(),
                                      turn.has_value(),              turn.value_or(0.0f),
                                      motion_.farPitch().has_value(), pitchHeld};
+        if (countsTurn && mouse_.pitchKnown && learnedMouse_.pitchKnown) { // And tilted as the counts say.
+            found.firstPitch = learnedMouse_.pitch;
+            found.secondPitch = mouse_.pitch;
+            found.tiltKnown = true;
+            found.pitchHeld = true;
+        }
         fitted = fit_.motion(matches_, motion_.learnedMs(), timeMs_, found);
         const GroundFit::Motion how = fit_.lastMotion();
         if ((how == GroundFit::Motion::FewMatches || how == GroundFit::Motion::FewAgreeing) &&
@@ -691,14 +762,17 @@ bool GroundFollower::end(const GreyView& image) {
     } else {
         matches_.clear();
     }
-    if (headed) {
+    if (headed && !mouseYaw(mouse_)) {
         // Towards the cone only beyond how far it may lag (none while it holds still).
         const float yaw = fit_.camera().yaw;
         const float off = std::remainder(cone_.heading() - yaw, 2.0f * kPi);
         const float beyond = std::copysign(std::max(std::fabs(off) - coneLag, 0.0f), off);
         fit_.head(yaw + beyond, fitted || (followed_ && fit_.lastMotion() == GroundFit::Motion::Searched));
     }
+    byMouse();
+    followTurns(image);
     motion_.learn(image, fit_.camera(), timeMs_);
+    learnedMouse_ = mouse_;
     learnedHeaded_ = headed;
     learnedHeading_ = cone_.heading();
     learnedHeld_ = headed && coneHeld(timeMs_);
@@ -714,8 +788,46 @@ bool GroundFollower::end(const GreyView& image) {
     return fitted;
 }
 
+void GroundFollower::followTurns(const GreyView& image) {
+    constexpr float kPi = 3.14159265f;
+    const auto started = std::chrono::steady_clock::now();
+    lastPair_ = {};
+    lastTaken_ = false;
+    if (!fit_.camera().known) {
+        turns_.clear();
+        hold_.clear();
+        lastTurnsMs_ = 0.0f;
+        return;
+    }
+    if (turns_.learned() && timeMs_ > turnsMs_) {
+        const GroundCamera camera = fit_.camera();
+        const float turn = std::remainder(camera.yaw - turnsYaw_, 2.0f * kPi);
+        const float tilt = camera.pitch - turnsPitch_;
+        lastPair_ = turns_.follow(image, camera, turnsPitch_, turn, tilt);
+        lastTaken_ = hold_.pair(lastPair_, turnsPitch_, tilt);
+        if (hold_.holds() && lastPair_.fitted) {
+            lostSinceMs_ = -1.0; // Followed by its points: not lost, even where the ground's patches match nothing.
+        }
+        if (hold_.holds() && !mousePitched()) {
+            tiltAll(hold_.pitch() - camera.pitch);
+            const float tilted = lastPair_.fitted ? lastPair_.tilt : tilt;
+            fit_.byTurns(true, tilted / static_cast<float>(timeMs_ - turnsMs_));
+        } else {
+            fit_.byTurns(false, 0.0f);
+        }
+    } else if (!hold_.holds()) {
+        fit_.byTurns(false, 0.0f);
+    }
+    turns_.learn(image, avoid_);
+    turnsPitch_ = fit_.camera().pitch;
+    turnsYaw_ = fit_.camera().yaw;
+    turnsMs_ = timeMs_;
+    lastTurnsMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - started).count();
+}
+
 int GroundFollower::headAreas(double timeMs, const GroundHints& hints, GreyArea* out, int max) {
     headMs_ = timeMs;
+    mouse_ = mouseOf(hints);
     return cone_.areas(timeMs, spanOf(hints.windows, hints.windowCount), out, max);
 }
 
@@ -723,11 +835,22 @@ bool GroundFollower::head(const GreyView& image) {
     const GroundCamera& followed = fit_.camera();
     between_ = true;
     betweenCamera_ = groundAt(followed, headMs_);
+    const std::optional<float> byCounts = followed.known ? mouseYaw(mouse_) : std::nullopt;
+    if (byCounts) { // As the mouse's counts say.
+        betweenCamera_.yaw = *byCounts;
+        if (mouse_.pitchKnown) {
+            betweenCamera_.pitch = mouse_.pitch;
+        }
+    }
     pullDepth(headMs_);
     notePitch(headMs_); // Tilted on along the follow's speed, whatever turns it.
     const bool seen = cone_.read(image.levels[0]); // Reads only the parts headAreas() gave (none: nothing).
     if (!followed.known) {
         return false;
+    }
+    if (byCounts) {
+        noteCone(seen, headMs_);
+        return true;
     }
     const double sinceMs = headMs_ - lastTurnMs_;
     const GroundMotion::Turned turned = motion_.findTurn(
@@ -794,7 +917,9 @@ GroundDepthNote GroundFollower::depth(const DepthInput& map, double timeMs) {
     note.pulled = said.pitch - *then;
     depthSaidMs_ = timeMs;
     depthWeight_ = said.weight;
-    if (!camera.pitchMeasured && !depthTaken_) {
+    if (hold_.holds() || mousePitched()) { // The turns' or counts' pitch stands: the map only says how far it is off.
+        depthLeft_ = 0.0f;
+    } else if (!camera.pitchMeasured && !depthTaken_) {
         tiltAll(note.pulled);
         depthLeft_ = 0.0f;
     } else {
@@ -808,6 +933,9 @@ GroundDepthNote GroundFollower::depth(const DepthInput& map, double timeMs) {
 void GroundFollower::pullDepth(double timeMs) {
     const double sinceMs = std::max(timeMs - depthMs_, 0.0);
     depthMs_ = timeMs;
+    if (hold_.holds() || mousePitched()) {
+        depthLeft_ = 0.0f;
+    }
     if (depthLeft_ == 0.0f) {
         return;
     }
@@ -819,6 +947,7 @@ void GroundFollower::pullDepth(double timeMs) {
 void GroundFollower::tiltAll(float by) {
     fit_.tilt(by);
     motion_.tilt(by);
+    turnsPitch_ += by;
     if (between_) {
         betweenCamera_.pitch += by;
     }
@@ -918,6 +1047,14 @@ void GroundFollower::clear() {
     followed_ = false;
     fitted_ = false;
     learnedBefore_ = 0;
+    turns_.clear();
+    hold_.clear();
+    lastPair_ = {};
+    lastTaken_ = false;
+    mouse_ = {};
+    learnedMouse_ = {};
+    mouseOffsetKnown_ = false;
+    lastTurnsMs_ = 0.0f;
 }
 
 } // namespace observex

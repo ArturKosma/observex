@@ -22,9 +22,9 @@ constexpr auto kPollInterval = std::chrono::milliseconds(5);
 } // namespace
 
 Recorder::Recorder(const Screen& screen, ImageChannel& channel, std::filesystem::path folder, unsigned firstNumber,
-                   std::shared_ptr<LiveLog> log)
-    : folder_(std::move(folder)), log_(std::move(log)), nextNumber_(firstNumber), width_(channel.width()),
-      height_(channel.height()) {
+                   std::shared_ptr<LiveLog> log, ImageFormat format)
+    : folder_(std::move(folder)), log_(std::move(log)), format_(format), nextNumber_(firstNumber),
+      width_(channel.width()), height_(channel.height()) {
     std::filesystem::create_directories(folder_);
 
     const Screen own = findOnOwnAdapter(screen); // So this device cannot hold up the pipeline's.
@@ -71,10 +71,10 @@ void Recorder::run(std::stop_token stop) {
             break;
         }
         char name[32];
-        std::snprintf(name, sizeof(name), "%06u.jpg", nextNumber_);
+        std::snprintf(name, sizeof(name), format_ == ImageFormat::Png ? "%06u.png" : "%06u.jpg", nextNumber_);
         const std::filesystem::path file = folder_ / name;
         try {
-            writeImageFile(file, ImageFormat::Jpeg, mapped.pData, width_, height_, mapped.RowPitch);
+            writeImageFile(file, format_, mapped.pData, width_, height_, mapped.RowPitch);
         } catch (const std::exception& e) {
             gpu_.context->Unmap(staging_.Get(), 0);
             fail(std::string("Could not save ") + toUtf8(file.c_str()) + ": " + e.what());

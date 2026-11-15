@@ -12,28 +12,69 @@
 
 namespace observex {
 
+class SkillIcons;
+
 // The State tile: the bot's brain (core/StateTree) in observex's look. It always works on a profile, a `.brain` file in
 // Settings' brains folder: the last one opened, else the newest there, else a new "Brain"; every change is saved into
 // it as it is made, and Ctrl+Z / Ctrl+Y undo and redo any change (the user asked, 2026-11-13). At its top Load (the
 // profiles in the folder) and the profile's name in a field (typing another renames it and its file; a name taken gets
-// the next number); under them the tree on the left and, while a state is selected, its details on the right (a line
+// the next number), then the Brain button; under them the tree on the left and, while a state is selected, its details
+// on the right (a line
 // between that drags; nothing there otherwise):
 // - The tree: each state a box like the top bar's buttons (the selected one with the accent border, the current one
-//   green), indented under its parent, its transitions after it (a faint arrow and the target's name; a returning
-//   arrow when it goes back to itself or a state above it, as UE's). A right click offers Add State (under it; on
+//   green while the brain acts), its tasks inside it under its name, smaller (the one that runs green; a Parallel
+//   one marked by two upright bars and green the whole time its state is active), indented
+//   under its parent, its transitions after it (a faint arrow and the target's name; a returning
+//   arrow only when it goes back to itself). A right click offers Add State (under it; on
 //   empty space under Root, named at once) and Delete; a click selects, a double click or F2 renames, Delete removes
-//   it with all under it (not Root).
+//   it with all under it (not Root). A state dragged (not Root) moves, with all under it, just above or below the state
+//   under the mouse, as its sibling; an accent line shows where while dragging (Escape cancels). A transition dragged
+//   (the user asked, 2026-11-15: as states are) moves before or after another in the row under the mouse: among its
+//   state's (their order is the order they are tried in) or to another state's; an upright accent line shows where. A
+//   click on a transition selects its state.
 // - The details (a quiet "Details" over them): its name in a field, its transitions, each a state to go to and
 //   conditions as UE's (IF / AND / OR; a kind picked when added: Compare Number, a number or one of the game's numbers
-//   compared with another; Has Target; Target Name; Skill), with a dot by each that holds while it is current; then its
-//   tasks (+ Task: a kind from a list, Use Skill with one of the profile's skills).
+//   compared with another; Has Target; Target Name; Skill; Is Skill Ready), with a dot by each that holds while it is
+//   current; then its tasks (+ Task: a kind from a list, Use Skill with the profile's skills; a Parallel checkbox on
+//   the kinds that can run alongside, statetree::canRunParallel). Lists of skills (Is Skill
+//   Ready's, Use Skill's) are arrays as Unreal's: a row each, + to add one (drawSkillArray).
 // The brain steps on every reading tick() is given (statetree::Runner); stop() when nothing is read.
 class StateTreeView {
 public:
-    // Draws into the current window (the tile); trees are saved into, and loaded from, `folder`. Draw it before what
-    // else reads keys: while the tile has the keyboard, it takes the keys pressed this frame, so they do not also act on
-    // the review or a clip.
-    void draw(const theme::Fonts& fonts, const std::filesystem::path& folder);
+    // Draws into the current window (the tile); trees are saved into, and loaded from, `folder`; `icons` draws the
+    // Use Skill tasks' miniatures (the user asked, 2026-11-15). Draw it before what else reads keys: while the tile has
+    // the keyboard, it takes the keys pressed this frame, so they do not also act on the review or a clip.
+    // Right of the profile's name, the Brain button: Active (green) while `acting`, else Inactive; no tooltip (the user
+    // asked, 2026-11-15). True when it was clicked (the app starts or stops acting). Only while acting is the current
+    // state, and its task that runs, shown green (the user asked, 2026-11-15: nothing green while paused).
+    // With a clip open, `replay`: the brain as recorded at the frame shown is green instead (the user asked,
+    // 2026-11-15: a clip's review showed no active state or task), the condition dots on the frame's reading; a muted
+    // line under the bar says when it cannot be shown (not recorded, or its state not in this profile).
+    struct Replay {
+        bool recorded = false;                           // The clip has brain lines (none before 2026-11-15).
+        const statetree::BrainShown* brain = nullptr;    // At the frame shown; null before the first.
+        const statetree::Variables* variables = nullptr; // The frame's reading; null: none.
+    };
+    bool draw(const theme::Fonts& fonts, const std::filesystem::path& folder, const SkillIcons& icons, bool acting,
+              const Replay* replay = nullptr);
+    // The brain at Root again, its first task next: the app starts the whole tree afresh when it starts acting.
+    void restart() { runner_.reset(); }
+    // The current state the runner is in (for the app to actuate its tasks while acting); null if there is none.
+    const statetree::State* currentState() const { return tree_.find(runner_.current(tree_)); }
+    // Its task that runs (index in its tasks; -1: all done, or none), the app's word that it is done (the next one
+    // runs), and how many tasks have started so far (a change: one starts, afresh).
+    int currentTask() const { return runner_.task(tree_); }
+    void finishTask() { runner_.finishTask(); }
+    std::uint64_t taskStarts() const { return runner_.taskStarts(); }
+    // The Parallel tasks that run now: those of the active states (statetree::Runner::parallelTasks).
+    std::vector<statetree::TaskAt> parallelTasks() const {
+        return statetree::Runner::parallelTasks(tree_, runner_.current(tree_));
+    }
+    // Load and the profile's name in a field, as at the tile's top: the Skills tab has them too (the user asked,
+    // 2026-11-15: the profile chooseable there as in State). Drawn at the cursor, BarButton::kHeight high; profiles
+    // are in `folder`. fileError() says why the last load or save failed (empty when it worked).
+    void drawProfileBar(const theme::Fonts& fonts, const std::filesystem::path& folder);
+    const std::string& fileError() const { return fileError_; }
 
     // A new reading (live, or a clip's): the brain takes a step, and shows its current state.
     void tick(const statetree::Variables& variables);
@@ -52,17 +93,52 @@ public:
     // asked, 2026-11-14), to change; saveSkills() after a change keeps it (Ctrl+Z in the tile undoes it) and writes it.
     std::vector<statetree::Skill>& skills() { return tree_.skills(); }
     const std::vector<statetree::Skill>& skills() const { return tree_.skills(); }
+    const statetree::Tree& tree() const { return tree_; }
     void saveSkills();
     // The profile as its file holds it: any change to the tree or its skills (a change made, a profile loaded, undo,
     // redo) gives another text.
     const std::string& savedText() const { return history_.text(); }
 
 private:
-    void drawToolbar(const theme::Fonts& fonts, const std::filesystem::path& folder);
+    // Load and the name field (`title` its text while typed in: each place it is drawn has its own).
+    // `reserve`: room kept right of the name's field (it narrows for it).
+    void drawToolbar(const theme::Fonts& fonts, const std::filesystem::path& folder, std::string& title,
+                     float reserve = 0.0f);
     void drawTree(const theme::Fonts& fonts);
+    // While a state is dragged: where it lands shown (its rows' boxes `mins`, `maxes`), and moved there once let go.
+    void drawDrag(const theme::Fonts& fonts, const std::vector<statetree::Row>& rows, const std::vector<ImVec2>& mins,
+                  const std::vector<ImVec2>& maxes);
+    // A transition as the tree draws it after its state's box: its state's row, its index in the state's transitions,
+    // and where it is across (its tick or arrow to the end of its target's name).
+    struct TransitionSlot {
+        std::size_t row = 0;
+        std::size_t index = 0;
+        float from = 0.0f;
+        float to = 0.0f;
+    };
+    // While a transition is dragged: where it lands shown, and moved there once let go.
+    void drawTransitionDrag(const std::vector<statetree::Row>& rows, const std::vector<ImVec2>& mins,
+                            const std::vector<ImVec2>& maxes, const std::vector<TransitionSlot>& slots);
     void drawDetails(const theme::Fonts& fonts);
     // One transition of `state`, as a card the panel's width; true when its X was clicked.
     bool drawTransition(const statetree::State& state, statetree::Transition& transition, float width);
+    // `state`'s enter conditions (not Root's): a card with them, or only + Condition while it has none.
+    void drawEnter(statetree::State& state, float width);
+    // A card's rows of `conditions` (IF / AND / OR, by kind, X), `inner` wide, then + Condition; `checking`: a dot at
+    // `dotX` by each, green while it holds on the last reading.
+    void drawConditions(std::vector<statetree::Condition>& conditions, bool checking, float inner, float dotX);
+    // A list of the profile's skills as Unreal's arrays (Is Skill Ready's, Use Skill's), at the cursor, `width` wide, on
+    // a well filled `fill`: "Skills", how many and + at its top (a list of the skills to add one from), then a row
+    // each: its place (a handle: dragged, it moves up or down), miniature, name (a click picks another) and an X.
+    void drawSkillArray(std::vector<std::string>& skills, float width, ImU32 fill);
+    // One of the profile's skills in a list to pick from: its miniature, name and how the last reading saw it; dimmed
+    // and not pickable while `taken` (in the array already). True when picked.
+    bool skillOption(const std::string& name, bool selected, bool taken);
+    // How wide such a list must be for `names` whole.
+    float skillOptionsWidth(const std::vector<std::string>& names) const;
+    // How the last reading saw the skill `name`: "ready", "not seen", how much of its cooldown is left ("45%"), or
+    // nothing when it was not read.
+    std::string skillStatus(const std::string& name) const;
     // A number to type, or one of the game's numbers to pick, `width` wide.
     void drawOperand(const char* id, statetree::Operand& operand, float width);
     // The skills to offer: the profile's.
@@ -74,7 +150,12 @@ private:
     void keepKeys();
     // After a name field: the name it had when clicked comes back if it is left empty; trimmed.
     void keepName(std::string& name);
-    bool isCurrent(int state) const { return state == runner_.current(tree_); }
+    // The current state, as shown: none while the brain does not act (and a clip's recorded one while a clip is open).
+    bool isCurrent(int state) const { return shownState_ != 0 && state == shownState_; }
+    // Active, as shown: the current state or one above it whose transitions count; none while the brain does not act.
+    bool isActive(int state) const {
+        return shownState_ != 0 && statetree::Runner::activeFrom(tree_, shownState_, state);
+    }
     void drawMenu(bool open);
     // The newest profile in `folder` that reads, or a new one ("Brain"), saved at once.
     void openProfile(const std::filesystem::path& folder);
@@ -97,11 +178,28 @@ private:
     statetree::Variables variables_; // The last reading's, shown when picking a variable.
     std::filesystem::path folder_;   // The profile's folder,
     std::string name_;               // and name (its file NAME.brain).
-    std::string title_;              // Its name field, while typed in.
+    std::string title_;              // Its name field, while typed in (the tile's,
+    std::string barTitle_;           // and the Skills tab's).
     int selected_ = 0;
+    int dragging_ = 0; // A state dragged to another place in the tree (the user asked, 2026-11-15); 0: none.
+    // A transition dragged to another place among its state's or another state's (the user asked, 2026-11-15): its
+    // state (0: none) and its index in that state's transitions.
+    int dragFrom_ = 0;
+    std::size_t dragTransition_ = 0;
+    ImGuiID dragArray_ = 0; // A skill array whose row is being dragged up or down (0: none),
+    int dragIndex_ = -1;    // and where the dragged skill is in it now.
     int renaming_ = 0;         // The state whose name is being edited in the tree,
     bool renameFocus_ = false; // which takes the keyboard on its first frame.
     std::string renameText_;
+    const SkillIcons* icons_ = nullptr; // The profile's skills' icons, for the Use Skill tasks; set each draw().
+    bool acting_ = false;               // The brain acts (set each draw()): the current state and task shown green.
+    // What is shown green (set each draw()): the runner's current state and task while acting, a clip's recorded ones
+    // while a clip is open; 0 / -1: none.
+    int shownState_ = 0;
+    int shownTask_ = -1;
+    bool replaying_ = false;              // A clip is open: variables_ is its frame's reading,
+    statetree::Variables liveVariables_;  // and this the last live one, for after.
+    std::string replayNote_;              // Why the clip's brain is not shown; empty: it is (or no clip).
     std::string nameBefore_; // The name when a details' name field was clicked: an empty one puts it back.
     int menuState_ = 0;      // The state the right-click menu is for (0: none, a click on empty space).
     float treeShare_ = 0.45f; // The tree's share of the tile's width; the details have the rest.

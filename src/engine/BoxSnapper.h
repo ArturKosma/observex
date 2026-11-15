@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Costs.h"
 #include "core/Heuristics.h"
 #include "core/TripleBuffer.h"
 #include "engine/Gpu.h"
@@ -28,6 +29,7 @@ struct SnapperStats {
     float lateAvgMs = 0.0f;       // From the screen showing an image to having its boxes.
     float snapped = 0.0f;         // Of the boxes it handed out, the share snapped (the rest where their speed takes
                                   // them: not found, or nothing learned of them yet).
+    CostPart costs;               // Its work on each image, step by step (the Debug tab).
 };
 
 // Puts the boxes the recogniser shows onto every new screen image, the moment it comes (the user asked, 2026-11-11:

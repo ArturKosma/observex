@@ -48,8 +48,9 @@ inline constexpr Kind kCharacterKinds[] = {
 };
 static_assert(std::size(kCharacterKinds) == std::size(kCharacterKindIds));
 
-// What a review looks for. Only characters for now; terrain, UI and more come later, each as one more entry in
-// kCategories.
+// What a review looks for: characters, and drops (the user asked, 2026-11-15: items lying on the ground, boxed on
+// the handmade training screenshots first, with no model to guess them yet). Terrain, UI and more come later, each as
+// one more entry in kCategories.
 struct Category {
     const char* id;              // In the review's file names, e.g. "character" for character-answers.txt.
     const char* name;            // "Characters".
@@ -64,6 +65,9 @@ struct Category {
 inline constexpr Category kCategories[] = {
     {"character", "Characters", "character", "characters", "Monsters, NPCs, other players and you", "Character",
      "Not a character", kCharacterKinds},
+    // No kinds: a drop is a drop (the user's pick, 2026-11-15; Pick Up takes whatever lies there). Answers in
+    // drop-answers.txt, a model in models/drop/ once trained (train.py --category drop).
+    {"drop", "Drops", "drop", "drops", "Items lying on the ground: adena, loot", "Drop", "Not a drop", {}},
 };
 
 // The review screen. Shows a recording's images one at a time with the things marked on them. The user answers

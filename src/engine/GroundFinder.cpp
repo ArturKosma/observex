@@ -39,8 +39,8 @@ double groundMs(std::int64_t qpc) {
 }
 
 GroundFinder::GroundFinder(IDXGIAdapter1* gpu, ImageChannel& channel,
-                           std::shared_ptr<const HeuristicsSource> heuristics)
-    : heuristics_(std::move(heuristics)), width_(channel.width()), height_(channel.height()) {
+                           std::shared_ptr<const HeuristicsSource> heuristics, std::shared_ptr<SharedMouseCamera> mouse)
+    : heuristics_(std::move(heuristics)), mouse_(std::move(mouse)), width_(channel.width()), height_(channel.height()) {
     gpu_ = createGpuDevice(findOwnAdapter(gpu).Get()); // An adapter object of its own: cannot hold up the others.
     reader_ = std::make_unique<ImageReader>(gpu_.device.Get(), channel);
     thread_ = std::jthread([this](std::stop_token stop) { run(stop); });
@@ -122,12 +122,18 @@ void GroundFinder::run(std::stop_token stop) {
     StatWindow fitting;
     StatWindow heading;
     StatWindow depthing;
+    // The Debug tab's steps. A run is every image it takes: a follow (15 a second) or, between them, a turn.
+    enum Step { kDepth, kTurnGrey, kTurn, kFollowGrey, kFollow };
+    CostMeter meter({"Depth pitch", "Grey image (turn)", "Turning", "Grey image (follow)", "Following"});
     int depthMeasured = 0;
     double depthOff = 0.0;
     int images = 0;
     int fitted = 0;
     int searched = 0;
     int headed = 0;
+    int turnsHeld = 0;
+    int turnsTaken = 0;
+    double turnsMs = 0.0;
     double matches = 0.0;
     double agreeing = 0.0;
     double missed = 0.0;
@@ -161,6 +167,13 @@ void GroundFinder::run(std::stop_token stop) {
             depthSummary.count > 0 ? static_cast<float>(depthMeasured) / static_cast<float>(depthSummary.count) : 0.0f;
         stats.depthOffDegrees = depthMeasured > 0 ? static_cast<float>(depthOff / depthMeasured * 57.29578) : 0.0f;
         stats.depthAvgMs = depthSummary.average;
+        stats.turnsHeld = images > 0 ? static_cast<float>(turnsHeld) / static_cast<float>(images) : 0.0f;
+        stats.turnsTaken = images > 0 ? static_cast<float>(turnsTaken) / static_cast<float>(images) : 0.0f;
+        stats.turnsAvgMs = images > 0 ? static_cast<float>(turnsMs / images) : 0.0f;
+        stats.costs = meter.take(static_cast<double>(elapsed) * perTick / 1000.0);
+        turnsHeld = 0;
+        turnsTaken = 0;
+        turnsMs = 0.0;
         depthMeasured = 0;
         depthOff = 0.0;
         stats_.publish();
@@ -186,6 +199,7 @@ void GroundFinder::run(std::stop_token stop) {
         }
         if (reader_->waitForImage(kWaitMs)) {
             const std::int64_t start = qpcNow();
+            meter.begin();
             if (ID3D11Texture2D* image = reader_->useNewImage(&stamp)) {
                 // New following once the app loaded a rebuilt DLL (it starts from the start; if it cannot be made,
                 // the one it has goes on).
@@ -207,6 +221,7 @@ void GroundFinder::run(std::stop_token stop) {
                     const std::int64_t depthStart = qpcNow();
                     const GroundDepthNote depth = follower->depth(hint.depth->input(), groundMs(hint.depth->imageQpc));
                     depthing.add(static_cast<float>(static_cast<double>(qpcNow() - depthStart) * perTick));
+                    meter.lap(kDepth);
                     if (depth.measured) {
                         ++depthMeasured;
                         depthOff += std::fabs(depth.pitch - depth.then);
@@ -222,6 +237,9 @@ void GroundFinder::run(std::stop_token stop) {
                 hints.windows = hint.windows.data();
                 hints.windowCount = hint.qpc != 0 ? hint.windowCount : 0;
                 const double timeMs = groundMs(stamp.shownQpc != 0 ? stamp.shownQpc : start);
+                if (mouse_) {
+                    mouseHints(mouse_->at(timeMs), hints);
+                }
                 if (timeMs < nextFollowMs - kJitterMs) {
                     // Between follows: only the eighth size (58 kB) and the minimap's cone, to turn the camera as
                     // the ground and the cone did.
@@ -243,6 +261,7 @@ void GroundFinder::run(std::stop_token stop) {
                         fail("The GPU stopped making grey images (it may have been reset)");
                         return;
                     }
+                    meter.lap(kTurnGrey);
                     if (grey != nullptr) {
                         follower->head(*grey);
                         GroundSeen& seen = seen_.writeSlot();
@@ -251,6 +270,8 @@ void GroundFinder::run(std::stop_token stop) {
                         seen.followed = followedImage;
                         seen_.publish();
                     }
+                    meter.lap(kTurn);
+                    meter.end();
                     heading.add(static_cast<float>(static_cast<double>(qpcNow() - start) * perTick));
                     continue;
                 }
@@ -277,6 +298,7 @@ void GroundFinder::run(std::stop_token stop) {
                     return;
                 }
                 const std::int64_t read = qpcNow();
+                meter.lap(kFollowGrey);
                 const bool fit = grey != nullptr && follower->end(*grey);
                 GroundSeen& seen = seen_.writeSlot();
                 followedImage = stamp.number;
@@ -284,14 +306,22 @@ void GroundFinder::run(std::stop_token stop) {
                 seen.image = stamp.number;
                 seen.followed = followedImage;
                 seen_.publish();
+                meter.lap(kFollow);
+                meter.end();
                 const std::int64_t done = qpcNow();
                 work.add(static_cast<float>(static_cast<double>(done - start) * perTick));
                 fitting.add(static_cast<float>(static_cast<double>(done - read) * perTick));
                 const GroundNote note = follower->note();
+                if (mouse_) {
+                    anchorMouse(*mouse_, timeMs, note, follower->camera());
+                }
                 ++images;
                 matches += note.found;
                 searched += note.motion == GroundFit::Motion::Searched ? 1 : 0;
                 headed += note.headed ? 1 : 0;
+                turnsHeld += note.turnHolds ? 1 : 0;
+                turnsTaken += note.turnTaken ? 1 : 0;
+                turnsMs += note.turnMs;
                 if (fit) {
                     ++fitted;
                     agreeing += note.agreeing;

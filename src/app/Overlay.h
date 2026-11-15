@@ -27,6 +27,12 @@ void drawThings(ImDrawList* drawList, ImFont* font, ImVec2 min, ImVec2 max, floa
 void drawUiPieces(ImDrawList* drawList, ImFont* font, ImVec2 min, ImVec2 max, float imageWidth,
                   std::span<const UiPiece> pieces, float dpiScale);
 
+// Drops found (the Show flag Drops): each one's four corners just outside it and its tag "Drop 87%", in gold. The
+// square the drop finder looks at closely is not drawn (the user asked, 2026-11-15: its corners, 192 px and more,
+// looked like a drop's outline). Over the screen image drawn as above.
+void drawLoot(ImDrawList* drawList, ImFont* font, ImVec2 min, ImVec2 max, float imageWidth,
+              std::span<const Detection> drops, float dpiScale);
+
 // The ground the camera sees (the Show flag Ground; the user asked, 2026-11-12: a green see-through plane that turns
 // with the camera and reacts to zooms): a grid fixed to the ground around the own character's feet, its cells filled
 // fainter the farther they are, a ring round the feet, and the horizon; fainter still while the pitch is only

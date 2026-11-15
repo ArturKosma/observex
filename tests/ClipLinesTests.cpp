@@ -293,3 +293,140 @@ TEST_CASE("ground lines read back the grid exactly as drawn, and say what was se
     CHECK_FALSE(readGround("ground 100 0 98 1", image, timeMs, followed, camera));
     CHECK_FALSE(readGround("grounds 100 0 98 1 1 0 0 0 0 0 0 0 0", image, timeMs, followed, camera));
 }
+
+TEST_CASE("brain lines read back, and say what the State tile showed at each time") {
+    std::string text;
+    appendBrain(text, 1200, 0.0, {false, "", -1});
+    appendBrain(text, 1203, 50.5, {true, "", 0});
+    appendBrain(text, 1207, 83.25, {true, "Combat > Strike", 1});
+    appendBrain(text, 1209, 120.0, {false, "", -1});
+    CHECK(text == "brain 1200 0 0 -1\nbrain 1203 50.5 1 0\nbrain 1207 83.25 1 1 Combat > Strike\n"
+                  "brain 1209 120 0 -1\n");
+
+    unsigned long long image = 0;
+    double timeMs = 0.0;
+    statetree::BrainShown brain;
+    REQUIRE(readBrain("brain 1207 83.25 1 1 Combat > Strike", image, timeMs, brain));
+    CHECK(image == 1207);
+    CHECK(timeMs == 83.25);
+    CHECK(brain == statetree::BrainShown{true, "Combat > Strike", 1});
+    REQUIRE(readBrain("brain 1203 50.5 1 -1", image, timeMs, brain)); // Root, its tasks done.
+    CHECK(brain == statetree::BrainShown{true, "", -1});
+    CHECK_FALSE(readBrain("brains 1203 50.5 1 0", image, timeMs, brain));
+    CHECK_FALSE(readBrain("brain 1203 50.5 1", image, timeMs, brain));
+    CHECK_FALSE(readBrain("brain 1203 50.5 yes 0", image, timeMs, brain));
+
+    // A state's name with a line end in it stays one line.
+    std::string broken;
+    appendBrain(broken, 1, 0.0, {true, "Fight\nHard", 0});
+    CHECK(broken == "brain 1 0 1 0 Fight Hard\n");
+
+    const ClipText clip = readClipText("frame 1 1200 0\n" + text);
+    REQUIRE(clip.brains.size() == 4);
+    CHECK(recordedBrain(clip.brains, -5.0) == nullptr); // Before the first.
+    CHECK(*recordedBrain(clip.brains, 0.0) == statetree::BrainShown{false, "", -1});
+    CHECK(*recordedBrain(clip.brains, 60.0) == statetree::BrainShown{true, "", 0});
+    CHECK(*recordedBrain(clip.brains, 100.0) == statetree::BrainShown{true, "Combat > Strike", 1});
+    CHECK(*recordedBrain(clip.brains, 500.0) == statetree::BrainShown{false, "", -1});
+}
+
+TEST_CASE("camera lines read back exactly, and say what the Camera card showed at each time") {
+    std::string text;
+    const CameraShown none;
+    const CameraShown turned{true, false, false, 0, -37.125f, 0.0f, 0.0f, 0.0f};
+    const CameraShown guessed{true, true, true, 1, 359.98f, 21.43f, 0.31f, 0.0f};
+    const CameraShown pinned{true, true, true, 3, 0.1f, 81.99987f, 0.0125f, 1.0f / 3.0f};
+    appendCamera(text, 1200, 0.0, none);
+    appendCamera(text, 1203, 50.5, turned);
+    appendCamera(text, 1207, 83.25, guessed);
+    appendCamera(text, 1209, 120.0, pinned);
+    CHECK(text.starts_with("camera 1200 0 0 0 0 0 0 0 0 0\ncamera 1203 50.5 1 0 -37.125 0 0 0 0 0\n"));
+
+    unsigned long long image = 0;
+    double timeMs = 0.0;
+    CameraShown camera;
+    REQUIRE(readCamera("camera 1207 83.25 1 1 359.98 1 21.43 1 0.31 0", image, timeMs, camera));
+    CHECK(image == 1207);
+    CHECK(timeMs == 83.25);
+    CHECK(camera == guessed);
+    CHECK_FALSE(readCamera("cameras 1207 83.25 1 1 359.98 1 21.43 1 0.31 0", image, timeMs, camera));
+    CHECK_FALSE(readCamera("camera 1207 83.25 1 1 359.98 1 21.43 1 0.31", image, timeMs, camera));
+    CHECK_FALSE(readCamera("camera 1207 83.25 1 yes 359.98 1 21.43 1 0.31 0", image, timeMs, camera));
+
+    const ClipText clip = readClipText("frame 1 1200 0\n" + text);
+    REQUIRE(clip.cameras.size() == 4);
+    CHECK(clip.cameras[3].camera == pinned); // Every number exactly (a third is no short decimal).
+    CHECK(recordedCamera(clip.cameras, -5.0) == nullptr); // Before the first.
+    CHECK(*recordedCamera(clip.cameras, 0.0) == none);
+    CHECK(*recordedCamera(clip.cameras, 60.0) == turned);
+    CHECK(*recordedCamera(clip.cameras, 100.0) == guessed);
+    CHECK(*recordedCamera(clip.cameras, 500.0) == pinned);
+}
+
+TEST_CASE("mouse lines read back, counts, buttons and wheel exactly") {
+    std::string text;
+    appendMouse(text, {-12.5, 3, -7, 2, 0x0004, 0, 1280, 720});   // The right button pressed, moving.
+    appendMouse(text, {0.25, -120, 45, 2, 0, 0, 1280, 720});       // Turning the camera fast.
+    appendMouse(text, {7.0, 0, 0, 0, 0x0400, -240, -5, 2000});     // Two notches of the wheel towards the user.
+    CHECK(text == "mouse -12.5 3 -7 2 4 0 1280 720\nmouse 0.25 -120 45 2 0 0 1280 720\n"
+                  "mouse 7 0 0 0 1024 -240 -5 2000\n");
+
+    ClipMouse mouse;
+    REQUIRE(readMouse("mouse 0.25 -120 45 2 0 0 1280 720", mouse));
+    CHECK(mouse == ClipMouse{0.25, -120, 45, 2, 0, 0, 1280, 720});
+    CHECK_FALSE(readMouse("mice 0.25 -120 45 2 0 0 1280 720", mouse));
+    CHECK_FALSE(readMouse("mouse 0.25 -120 45 2 0 0 1280", mouse));
+    CHECK_FALSE(readMouse("mouse 0.25 left 45 2 0 0 1280 720", mouse));
+
+    const ClipText clip = readClipText("frame 1 1200 0\n" + text);
+    REQUIRE(clip.mice.size() == 3);
+    CHECK(clip.mice[0] == ClipMouse{-12.5, 3, -7, 2, 4, 0, 1280, 720});
+    CHECK(clip.mice[2].wheel == -240);
+}
+
+TEST_CASE("drops lines read back, and Recorded's drops are the last line at or before a time") {
+    std::string text;
+    Detection adena;
+    adena.x = 1203.5f;
+    adena.y = 801.25f;
+    adena.width = 19.0f;
+    adena.height = 9.0f;
+    adena.sure = 0.8125f;
+    Detection ring = adena;
+    ring.x = 1250.0f;
+    ring.sure = 0.5f;
+    const std::vector<Detection> drops{adena, ring};
+    appendDrops(text, 1200, 33.5, true, LootSquare{1000, 600, 400}, drops);
+    appendDrops(text, 1210, 83.25, false, LootSquare{1100, 650, 300}, std::span<const Detection>(drops).first(1));
+    appendDrops(text, 0, 150.0, false, LootSquare{}, {});
+    CHECK(text.starts_with("drops 1200 33.5 1 1000 600 400 0.8125 1203.5 801.25 19 9 0.5 1250 801.25 19 9\n"));
+
+    unsigned long long image = 0;
+    double doneMs = 0.0;
+    bool kill = false;
+    LootSquare square;
+    std::vector<Detection> read;
+    REQUIRE(readDrops("drops 1210 83.25 0 1100 650 300 0.8125 1203.5 801.25 19 9", image, doneMs, kill, square,
+                      read));
+    CHECK(image == 1210);
+    CHECK(doneMs == 83.25);
+    CHECK_FALSE(kill);
+    CHECK(square == LootSquare{1100, 650, 300});
+    REQUIRE(read.size() == 1);
+    CHECK(read[0].x == 1203.5f);
+    CHECK(read[0].height == 9.0f);
+    CHECK(read[0].sure == 0.8125f);
+    CHECK_FALSE(readDrops("drop 1210 83.25 0 1100 650 300", image, doneMs, kill, square, read));
+    CHECK_FALSE(readDrops("drops 1210 83.25", image, doneMs, kill, square, read));
+
+    const ClipText clip = readClipText(text);
+    REQUIRE(clip.drops.size() == 3);
+    CHECK(recordedDrops(clip.drops, 10.0) == nullptr); // Before the first.
+    const ClipDropsLine* first = recordedDrops(clip.drops, 50.0);
+    REQUIRE(first != nullptr);
+    CHECK(first->kill);
+    CHECK(first->drops.size() == 2);
+    REQUIRE(recordedDrops(clip.drops, 83.25) != nullptr);
+    CHECK(recordedDrops(clip.drops, 83.25)->image == 1210);
+    CHECK(recordedDrops(clip.drops, 200.0) == nullptr); // Nothing drawn from then on.
+}

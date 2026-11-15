@@ -13,10 +13,17 @@
 namespace observex {
 
 // Live miniatures of every screen, laid out the way the screens are arranged on the desktop. Clicking
-// one picks it. While shown, it captures the screens itself (on the UI thread, never waiting); the
-// captures are freed as soon as it stops being drawn, so it costs nothing while hidden.
+// one picks it. While a screen is observed, a None tile stands left of them, as tall as they are:
+// picking it stops observing. While shown, it captures the screens itself (on the UI thread, never
+// waiting); the captures are freed as soon as it stops being drawn, so it costs nothing while hidden.
 class ScreenPicker {
 public:
+    // What draw() returns: the screen clicked, None clicked, or neither.
+    struct Choice {
+        const Screen* screen = nullptr; // Valid until the next draw() or close().
+        bool none = false;
+    };
+
     // `device` is the UI's GPU device; `gpu` the GPU whose screens are listed.
     ScreenPicker(ID3D11Device* device, IDXGIAdapter1* gpu);
 
@@ -27,13 +34,12 @@ public:
     // `image` (may be null). Call before fit() and draw() each frame.
     void setObserved(const std::string& name, const ScreenImage* image);
 
-    // The size draw() will take for this `maxSize`.
+    // The size draw() will take for this `maxSize`, the None tile included.
     ImVec2 fit(ImVec2 maxSize);
 
-    // Draws the miniatures at the cursor, centred in a `maxSize` area and as large as fits, over a
-    // `background` coloured area. Returns the clicked screen, or nullptr. The pointer is valid until the
-    // next call or close().
-    const Screen* draw(ImVec2 maxSize, ImU32 background);
+    // Draws the miniatures (and the None tile) at the cursor, centred in a `maxSize` area and as large as
+    // fits, over a `background` coloured area.
+    Choice draw(ImVec2 maxSize, ImU32 background);
 
     // Call once per frame after the frame is presented: frees the captures if draw() was not called.
     void endFrame();
@@ -51,6 +57,8 @@ private:
     void open();
     void refresh(Miniature& miniature);
     RECT desktopArea() const; // The part of the desktop that all screens cover.
+    float noneWidth() const;  // How much of the width the None tile takes with its gap; 0 without it.
+    bool drawNone(ImVec2 min, ImVec2 max, float rounding) const; // True when clicked.
 
     ComPtr<ID3D11Device> device_;
     ComPtr<IDXGIAdapter1> gpu_;

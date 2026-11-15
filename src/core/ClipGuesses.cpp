@@ -122,6 +122,17 @@ ClipText readClipText(std::string_view text) {
             clip.grounds.push_back(ground);
         } else if (ClipDepthLine depth; readDepth(line, depth.image, depth.timeMs, depth.map)) {
             clip.depths.push_back(depth);
+        } else if (ClipDropsLine drops; readDrops(line, drops.image, drops.doneMs, drops.kill, drops.square,
+                                                  drops.drops)) {
+            clip.drops.push_back(std::move(drops));
+        } else if (ClipBrainLine brain; readBrain(line, brain.image, brain.timeMs, brain.brain)) {
+            clip.brains.push_back(std::move(brain));
+        } else if (ClipCameraLine camera; readCamera(line, camera.image, camera.timeMs, camera.camera)) {
+            clip.cameras.push_back(camera);
+        } else if (ClipMouse mouse; readMouse(line, mouse)) {
+            clip.mice.push_back(mouse);
+        } else if (ClipCostLine cost; readCost(line, cost.timeMs, cost.part)) {
+            clip.costs.push_back(cost);
         } else if (LogLine log; readLog(line, timeMs, log)) {
             clip.logs.push_back(std::move(log));
             clip.logMs.push_back(timeMs);
@@ -143,6 +154,48 @@ unsigned long long recordedDepth(std::span<const ClipDepthLine> lines, double ti
     const auto after = std::upper_bound(lines.begin(), lines.end(), timeMs,
                                         [](double ms, const ClipDepthLine& line) { return ms < line.timeMs; });
     return after == lines.begin() ? 0 : (after - 1)->map;
+}
+
+const ClipDropsLine* recordedDrops(std::span<const ClipDropsLine> lines, double timeMs) {
+    const auto after = std::upper_bound(lines.begin(), lines.end(), timeMs,
+                                        [](double ms, const ClipDropsLine& line) { return ms < line.doneMs; });
+    if (after == lines.begin() || (after - 1)->square.empty()) {
+        return nullptr;
+    }
+    return &*(after - 1);
+}
+
+const statetree::BrainShown* recordedBrain(std::span<const ClipBrainLine> lines, double timeMs) {
+    const auto after = std::upper_bound(lines.begin(), lines.end(), timeMs,
+                                        [](double ms, const ClipBrainLine& line) { return ms < line.timeMs; });
+    return after == lines.begin() ? nullptr : &(after - 1)->brain;
+}
+
+const CameraShown* recordedCamera(std::span<const ClipCameraLine> lines, double timeMs) {
+    const auto after = std::upper_bound(lines.begin(), lines.end(), timeMs,
+                                        [](double ms, const ClipCameraLine& line) { return ms < line.timeMs; });
+    return after == lines.begin() ? nullptr : &(after - 1)->camera;
+}
+
+std::span<const ClipCostLine> recordedCosts(std::span<const ClipCostLine> lines, double timeMs) {
+    if (lines.empty()) {
+        return {};
+    }
+    // The first look at or after it (its second holds the frame), else the last.
+    auto first = std::lower_bound(lines.begin(), lines.end(), timeMs,
+                                  [](const ClipCostLine& line, double ms) { return line.timeMs < ms; });
+    if (first == lines.end()) {
+        first = lines.end() - 1;
+    }
+    const double at = first->timeMs;
+    while (first != lines.begin() && (first - 1)->timeMs == at) {
+        --first;
+    }
+    auto last = first;
+    while (last != lines.end() && last->timeMs == at) {
+        ++last;
+    }
+    return {first, last};
 }
 
 std::vector<unsigned long long> followedImages(const ClipText& clip) {

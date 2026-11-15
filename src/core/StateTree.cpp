@@ -14,11 +14,24 @@ constexpr const char* kVariableNames[kVariables] = {"Number", "HP",       "MP", 
                                                     "Cast",   "Cooldown", "Characters", "Monsters"};
 constexpr const char* kVariableWords[kVariables] = {"",     "hp",       "mp",         "xp",      "target-hp",
                                                     "cast", "cooldown", "characters", "monsters"}; // In the file.
-constexpr const char* kTaskNames[kTaskKinds] = {"Use Skill"};
-constexpr const char* kTaskWords[kTaskKinds] = {"use-skill"}; // In the file.
+constexpr const char* kTaskNames[kTaskKinds] = {"Use Skill", "Select Target", "Click Mouse", "Debug Print"};
+constexpr const char* kTaskWords[kTaskKinds] = {"use-skill", "select-target", "click-mouse",
+                                                "debug-print"}; // In the file.
+constexpr std::string_view kParallelWord = "parallel"; // Before a Parallel task's kind in the file.
+// Select Target's word in files written before it was renamed (it was Lock Mouse Onto until 2026-11-15).
+constexpr std::string_view kOldSelectTargetWord = "lock-mouse";
+constexpr const char* kTargetNames[kTargets] = {"Nearest Monster"};
+constexpr const char* kTargetWords[kTargets] = {"nearest-monster"}; // In the file.
+constexpr const char* kClickButtonNames[kClickButtons] = {"Left", "Right"};
+constexpr const char* kClickButtonWords[kClickButtons] = {"left", "right"}; // In the file.
 constexpr char kHex[] = "0123456789abcdef";
 constexpr const char* kSkillIsNames[kSkillIs] = {"Ready", "Cooling down", "Being cast"};
 constexpr const char* kSkillIsWords[kSkillIs] = {"ready", "cooling", "cast"}; // In the file.
+constexpr const char* kNeedNames[kNeeds] = {"Any Skill", "All Skills"};
+constexpr const char* kNeedWords[kNeeds] = {"any", "all"}; // In the file.
+constexpr const char* kWhenNames[kWhens] = {"Any time", "Tasks done"}; // After the details' "When".
+constexpr char kTasksDoneWord[] = "done"; // After a go line's target: When Tasks Done.
+constexpr char kListSeparator = '|'; // Between the skills of a list in the file (a skill's name has none).
 // ASCII: observex's font has no U+2264, U+2265 or U+2260 (they showed as "?"), and UE writes them so too.
 constexpr const char* kSymbols[kCompares] = {"<", "<=", "=", "!=", ">=", ">"};
 constexpr const char* kCompareWords[kCompares] = {"<", "<=", "==", "!=", ">=", ">"}; // In the file.
@@ -100,6 +113,38 @@ bool toInt(std::string_view text, int* value) {
     return !text.empty() && result.ec == std::errc() && result.ptr == text.data() + text.size();
 }
 
+// A list of skills as the file has it: the names between "|".
+std::string listText(const std::vector<std::string>& names) {
+    std::string text;
+    for (const std::string& name : names) {
+        text += (text.empty() ? "" : std::string(1, kListSeparator)) + name;
+    }
+    return text;
+}
+
+// The names of a list written by listText (empty ones left out).
+std::vector<std::string> listOf(std::string_view text) {
+    std::vector<std::string> names;
+    while (!text.empty()) {
+        const std::size_t end = text.find(kListSeparator);
+        const std::string_view name = trimmed(text.substr(0, end));
+        if (!name.empty()) {
+            names.emplace_back(name);
+        }
+        text = end == std::string_view::npos ? std::string_view() : text.substr(end + 1);
+    }
+    return names;
+}
+
+// "Wind Strike", "Wind Strike or Ice Bolt", "Wind Strike, Ice Bolt or Heal" (`last` "and" for all of them).
+std::string spoken(const std::vector<std::string>& names, const char* last) {
+    std::string text;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        text += (i == 0 ? "" : i + 1 == names.size() ? std::string(" ") + last + " " : std::string(", ")) + names[i];
+    }
+    return text;
+}
+
 bool toOperand(std::string_view text, Operand* operand) {
     if (text.starts_with("cooldown:") && text.size() > 9) {
         std::string skill(text.substr(9));
@@ -132,8 +177,24 @@ const char* nameOf(SkillIs is) {
     return kSkillIsNames[static_cast<int>(is)];
 }
 
+const char* nameOf(Need need) {
+    return kNeedNames[static_cast<int>(need)];
+}
+
 const char* nameOf(TaskKind kind) {
     return kTaskNames[static_cast<int>(kind)];
+}
+
+const char* nameOf(Target target) {
+    return kTargetNames[static_cast<int>(target)];
+}
+
+const char* nameOf(ClickButton button) {
+    return kClickButtonNames[static_cast<int>(button)];
+}
+
+const char* nameOf(When when) {
+    return kWhenNames[static_cast<int>(when)];
 }
 
 const Skill* Tree::skill(std::string_view name) const {
@@ -188,6 +249,44 @@ bool Tree::remove(int id) {
     return true;
 }
 
+bool Tree::move(int id, int parent, int before) {
+    State* state = find(id);
+    State* to = find(parent);
+    if (state == nullptr || to == nullptr || id == root_ || within(parent, id)) {
+        return false; // Root stays first; a state never goes under itself.
+    }
+    if (before != 0 && std::ranges::find(to->children, before) == to->children.end()) {
+        return false;
+    }
+    if (before == id) {
+        return true; // Just before itself: where it is.
+    }
+    std::erase(find(state->parent)->children, id);
+    state->parent = parent;
+    std::vector<int>& children = to->children;
+    children.insert(before == 0 ? children.end() : std::ranges::find(children, before), id);
+    return true;
+}
+
+bool Tree::moveTransition(int from, std::size_t index, int to, std::size_t before) {
+    State* source = find(from);
+    State* target = find(to);
+    if (source == nullptr || target == nullptr || index >= source->transitions.size() ||
+        before > target->transitions.size()) {
+        return false;
+    }
+    if (source == target && (before == index || before == index + 1)) {
+        return true; // Just before or after itself: where it is.
+    }
+    Transition moved = std::move(source->transitions[index]);
+    source->transitions.erase(source->transitions.begin() + static_cast<std::ptrdiff_t>(index));
+    if (source == target && before > index) {
+        --before; // It was counted before it went.
+    }
+    target->transitions.insert(target->transitions.begin() + static_cast<std::ptrdiff_t>(before), std::move(moved));
+    return true;
+}
+
 std::vector<Row> Tree::rows() const {
     std::vector<Row> rows;
     addRows(root_, 0, rows);
@@ -231,12 +330,26 @@ Variables variablesOf(const GameStats& stats) {
     read(Variable::Hp, "Status", "HP");
     read(Variable::Mp, "Status", "MP");
     read(Variable::Xp, "Status", "XP");
+    // MP in points, from its number ("90/108"; the user asked, 2026-11-15: Use Skill sees a skill's MP cost taken).
+    if (const GameGauge* mp = stats.find("Status", "MP"); mp != nullptr && mp->seen) {
+        const std::string_view text = textOf(mp->text);
+        const std::size_t slash = text.find('/');
+        int points = 0;
+        int most = 0;
+        if (slash != std::string_view::npos && toInt(text.substr(0, slash), &points) &&
+            toInt(text.substr(slash + 1), &most) && most > 0 && points >= 0 && points <= most) {
+            variables.mpPointsKnown = true;
+            variables.mpPoints = static_cast<float>(points);
+            variables.mpMax = static_cast<float>(most);
+        }
+    }
     read(Variable::TargetHp, kTargetPiece, "HP");
     // The cast bar: how far, and the skill cast; no bar on screen is no cast (when stats.txt has one to read).
     if (const GameGauge* cast = stats.find(kCastingPiece, kCastingPiece); cast != nullptr) {
         const auto i = static_cast<std::size_t>(Variable::Cast);
         variables.value[i] = cast->seen ? std::max(cast->full, 0.0f) * 100.0f : 0.0f;
         variables.known[i] = !cast->seen || cast->full >= 0.0f;
+        variables.castShown = cast->seen;
         variables.casting = cast->seen ? std::string(textOf(cast->text)) : std::string();
         variables.castingKnown = !cast->seen || !variables.casting.empty();
     }
@@ -279,6 +392,11 @@ const SkillSeen* Variables::skill(std::string_view name) const {
     return it != skills.end() ? &*it : nullptr;
 }
 
+bool isReady(const Variables& variables, std::string_view name) {
+    const SkillSeen* skill = variables.skill(name);
+    return skill != nullptr && skill->found && skill->cooldown <= 0.0f && !skill->pressed;
+}
+
 bool holds(const Condition& condition, const Variables& variables) {
     switch (condition.kind) {
     case Kind::Number: break;
@@ -294,12 +412,20 @@ bool holds(const Condition& condition, const Variables& variables) {
         if (condition.is == SkillIs::Cast) {
             return variables.castingKnown && !variables.casting.empty() && sameText(variables.casting, condition.text);
         }
-        const SkillSeen* skill = variables.skill(condition.text);
-        if (skill == nullptr || !skill->found) {
-            return false;
+        if (condition.is == SkillIs::Ready) {
+            return isReady(variables, condition.text);
         }
         // Pressed (the flash before the cast begins) is neither: it cannot be used again yet, nor is it cooling.
-        return condition.is == SkillIs::Ready ? skill->cooldown <= 0.0f && !skill->pressed : skill->cooldown > 0.0f;
+        const SkillSeen* skill = variables.skill(condition.text);
+        return skill != nullptr && skill->found && skill->cooldown > 0.0f;
+    }
+    case Kind::SkillsReady: {
+        if (condition.skills.empty()) {
+            return false;
+        }
+        const auto ready = [&](const std::string& name) { return isReady(variables, name); };
+        return condition.need == Need::AllSkills ? std::ranges::all_of(condition.skills, ready)
+                                                 : std::ranges::any_of(condition.skills, ready);
     }
     }
     bool known = true;
@@ -331,21 +457,217 @@ bool pass(const std::vector<Condition>& conditions, const Variables& variables) 
     return result;
 }
 
+std::string describe(const std::vector<Condition>& conditions) {
+    std::string text;
+    for (std::size_t i = 0; i < conditions.size(); ++i) {
+        const Condition& c = conditions[i];
+        if (i > 0) {
+            text += c.join == Join::And ? " and " : " or ";
+        }
+        const bool notEqual = c.compare == Compare::NotEqual;
+        switch (c.kind) {
+        case Kind::Number: {
+            const auto side = [](const Operand& operand) {
+                return operand.variable == Variable::Cooldown ? operand.skill + " cooldown"
+                       : operand.variable == Variable::None   ? operandText(operand)
+                                                              : std::string(nameOf(operand.variable));
+            };
+            text += side(c.left) + " " + symbolOf(c.compare) + " " + side(c.right);
+            break;
+        }
+        case Kind::HasTarget: text += notEqual ? "no target" : "a target"; break;
+        case Kind::TargetName: text += std::string("target ") + (notEqual ? "not " : "") + c.text; break;
+        case Kind::Skill:
+            text += c.text + (c.is == SkillIs::Ready         ? " ready"
+                              : c.is == SkillIs::CoolingDown ? " cooling down"
+                                                             : " being cast");
+            break;
+        case Kind::SkillsReady:
+            text += c.skills.empty()          ? std::string("no skills ready")
+                    : c.skills.size() == 1     ? c.skills.front() + " ready"
+                    : c.need == Need::AllSkills ? spoken(c.skills, "and") + " ready"
+                                                : spoken(c.skills, "or") + " ready";
+            break;
+        }
+    }
+    return text;
+}
+
+bool Runner::activeFrom(const Tree& tree, int current, int id) {
+    return id == current || (id != tree.root() && tree.within(current, id));
+}
+
+std::string statePath(const Tree& tree, int id) {
+    std::vector<const std::string*> names; // Leaf first.
+    for (const State* state = tree.find(id); state != nullptr && state->id != tree.root() && names.size() < 64;
+         state = tree.find(state->parent)) {
+        names.push_back(&state->name);
+    }
+    std::string path;
+    for (auto name = names.rbegin(); name != names.rend(); ++name) {
+        if (!path.empty()) {
+            path += kPathJoin;
+        }
+        path += **name;
+    }
+    return path;
+}
+
+int stateAtPath(const Tree& tree, std::string_view path) {
+    if (path.empty()) {
+        return tree.root();
+    }
+    for (const Row& row : tree.rows()) {
+        if (row.state != tree.root() && statePath(tree, row.state) == path) {
+            return row.state;
+        }
+    }
+    return 0;
+}
+
+bool Runner::canEnter(const Tree& tree, int id, const Variables& variables) {
+    const State* state = tree.find(id);
+    return state != nullptr && pass(state->enter, variables);
+}
+
+int Runner::landing(const Tree& tree, int id, const Variables& variables) {
+    // Down through the first child whose enter conditions pass, while there is one (Root picks none: its transitions
+    // choose, as before 2026-11-15).
+    for (int depth = 0; id != tree.root() && depth < 64; ++depth) {
+        const State* state = tree.find(id);
+        const auto child = std::ranges::find_if(state->children, [&](int c) { return canEnter(tree, c, variables); });
+        if (child == state->children.end()) {
+            break;
+        }
+        id = *child;
+    }
+    return id;
+}
+
 bool Runner::tick(const Tree& tree, const Variables& variables) {
-    for (const Transition& transition : tree.find(current(tree))->transitions) {
-        if (tree.find(transition.target) != nullptr && pass(transition.conditions, variables)) {
-            current_ = transition.target;
-            return true;
+    const int now = current(tree);
+    const bool done = task(tree) < 0; // Its tasks all done, or it has none.
+    // Transitions: the Any Time ones, then (its tasks done) the When Tasks Done ones; each time the current state's,
+    // then those of each state above it (Root's only while it is current itself).
+    for (const When when : {When::AnyTime, When::TasksDone}) {
+        if (when == When::TasksDone && !done) {
+            break;
+        }
+        for (const State* state = tree.find(now); state != nullptr; state = tree.find(state->parent)) {
+            if (state->id == tree.root() && now != tree.root()) {
+                break;
+            }
+            for (const Transition& transition : state->transitions) {
+                if (transition.when == when && tree.find(transition.target) != nullptr &&
+                    pass(transition.conditions, variables) && canEnter(tree, transition.target, variables)) {
+                    enter(landing(tree, transition.target, variables));
+                    return true;
+                }
+            }
+        }
+    }
+    // Picking again, once its tasks are done: from its parent, or from itself while it has children (none could be
+    // picked when it was entered). Only when that lands elsewhere.
+    const State* state = tree.find(now);
+    if (now != tree.root() && done) {
+        const int from = state->children.empty() ? state->parent : now;
+        if (from != tree.root()) {
+            const int land = landing(tree, from, variables);
+            if (land != now) {
+                enter(land);
+                return true;
+            }
         }
     }
     return false;
 }
 
+int Runner::task(const Tree& tree) const {
+    // task_ counts the tasks one after another done since the state was entered; the Parallel ones are skipped.
+    const State* state = tree.find(current(tree));
+    if (state == nullptr) {
+        return -1;
+    }
+    int done = 0;
+    for (std::size_t i = 0; i < state->tasks.size(); ++i) {
+        if (state->tasks[i].parallel) {
+            continue;
+        }
+        if (done == task_) {
+            return static_cast<int>(i);
+        }
+        ++done;
+    }
+    return -1;
+}
+
+std::vector<TaskAt> Runner::parallelTasks(const Tree& tree, int current) {
+    std::vector<int> active; // The active states, the current one first.
+    for (const State* state = tree.find(current); state != nullptr && active.size() < 64;
+         state = tree.find(state->parent)) {
+        if (activeFrom(tree, current, state->id)) {
+            active.push_back(state->id);
+        }
+    }
+    std::vector<TaskAt> tasks;
+    for (auto id = active.rbegin(); id != active.rend(); ++id) { // From the top one down.
+        const State& state = *tree.find(*id);
+        for (std::size_t i = 0; i < state.tasks.size(); ++i) {
+            if (state.tasks[i].parallel) {
+                tasks.push_back({state.id, static_cast<int>(i)});
+            }
+        }
+    }
+    return tasks;
+}
+
+std::string whereText(const Tree& tree, int current, int task) {
+    const State* state = tree.find(current);
+    if (state == nullptr) {
+        return "nowhere";
+    }
+    std::string text = current == tree.root() ? state->name : statePath(tree, current);
+    if (task >= 0 && task < static_cast<int>(state->tasks.size())) {
+        text += std::string(", running ") + nameOf(state->tasks[static_cast<std::size_t>(task)].kind);
+    } else if (std::ranges::any_of(state->tasks, [](const Task& t) { return !t.parallel; })) {
+        text += ", its tasks done";
+    }
+    return text;
+}
+
+void Runner::finishTask() {
+    ++task_;
+    ++taskStarts_;
+}
+
+namespace {
+
+// One condition as its "if" line.
+std::string conditionLine(const Condition& c) {
+    std::string text = std::string("if ") + (c.join == Join::And ? "and " : "or ");
+    const bool notEqual = c.compare == Compare::NotEqual;
+    switch (c.kind) {
+    case Kind::Number:
+        text += operandText(c.left) + " " + kCompareWords[static_cast<int>(c.compare)] + " " + operandText(c.right);
+        break;
+    case Kind::TargetName: text += std::string("target-name ") + (notEqual ? "!= " : "== ") + c.text; break;
+    case Kind::Skill: text += std::string("skill ") + kSkillIsWords[static_cast<int>(c.is)] + " " + c.text; break;
+    case Kind::HasTarget: text += notEqual ? "has-target no" : "has-target yes"; break;
+    case Kind::SkillsReady:
+        text += std::string("skills-ready ") + kNeedWords[static_cast<int>(c.need)] + " " + listText(c.skills);
+        break;
+    }
+    return text + "\n";
+}
+
+} // namespace
+
 std::string writeTree(const Tree& tree) {
     std::string text = std::string(kHeader) + "\n";
     for (const Skill& skill : tree.skills()) {
-        text += std::string("skill ") + (skill.cooldown ? "cooldown " : "no-cooldown ") + std::to_string(skill.side) +
-                " ";
+        text += std::string("skill ") + (skill.cooldown ? "cooldown " : "no-cooldown ") +
+                (skill.key.empty() ? "" : "key=" + skill.key + " ") +
+                (skill.mp > 0 ? "mp=" + std::to_string(skill.mp) + " " : "") + std::to_string(skill.side) + " ";
         if (skill.bgr.empty()) {
             text += "-";
         }
@@ -363,27 +685,41 @@ std::string writeTree(const Tree& tree) {
     for (const Row& row : rows) {
         const State& state = *tree.find(row.state);
         for (const Task& task : state.tasks) {
-            text += "task " + std::to_string(state.id) + " " + kTaskWords[static_cast<int>(task.kind)];
-            text += task.skill.empty() ? "\n" : " " + task.skill + "\n";
+            text += "task " + std::to_string(state.id) + " " +
+                    (task.parallel ? std::string(kParallelWord) + " " : std::string()) +
+                    kTaskWords[static_cast<int>(task.kind)];
+            switch (task.kind) {
+            case TaskKind::UseSkill:
+                text += task.skills.empty() ? "\n" : " " + listText(task.skills) + "\n";
+                break;
+            case TaskKind::SelectTarget:
+                text += std::string(" ") + kTargetWords[static_cast<int>(task.target)] + "\n";
+                break;
+            case TaskKind::ClickMouse:
+                text += std::string(" ") + kClickButtonWords[static_cast<int>(task.button)] + "\n";
+                break;
+            case TaskKind::DebugPrint:
+                text += "\n";
+                break;
+            }
+        }
+    }
+    for (const Row& row : rows) {
+        const State& state = *tree.find(row.state);
+        if (!state.enter.empty()) {
+            text += "enter " + std::to_string(state.id) + "\n";
+            for (const Condition& c : state.enter) {
+                text += conditionLine(c);
+            }
         }
     }
     for (const Row& row : rows) {
         const State& state = *tree.find(row.state);
         for (const Transition& transition : state.transitions) {
-            text += "go " + std::to_string(state.id) + " " + std::to_string(transition.target) + "\n";
+            text += "go " + std::to_string(state.id) + " " + std::to_string(transition.target) +
+                    (transition.when == When::TasksDone ? std::string(" ") + kTasksDoneWord : std::string()) + "\n";
             for (const Condition& c : transition.conditions) {
-                text += std::string("if ") + (c.join == Join::And ? "and " : "or ");
-                const bool notEqual = c.compare == Compare::NotEqual;
-                switch (c.kind) {
-                case Kind::Number:
-                    text += operandText(c.left) + " " + kCompareWords[static_cast<int>(c.compare)] + " " +
-                            operandText(c.right);
-                    break;
-                case Kind::TargetName: text += std::string("target-name ") + (notEqual ? "!= " : "== ") + c.text; break;
-                case Kind::Skill: text += std::string("skill ") + kSkillIsWords[static_cast<int>(c.is)] + " " + c.text; break;
-                case Kind::HasTarget: text += notEqual ? "has-target no" : "has-target yes"; break;
-                }
-                text += "\n";
+                text += conditionLine(c);
             }
         }
     }
@@ -405,7 +741,8 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
         return it != ids.end() ? it->second : 0;
     };
     bool header = false;
-    int lastFrom = 0; // The state of the last go line.
+    int lastFrom = 0;          // The state of the last go or enter line,
+    bool lastEnter = false;    // which was an enter line: the if lines after it are its enter conditions.
     while (!text.empty()) {
         const std::size_t end = text.find('\n');
         std::string_view line = text.substr(0, end);
@@ -451,16 +788,30 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
             }
         } else if (kind == "skill") {
             const std::string_view has = nextWord(line, &at);
+            std::string_view sideWord = nextWord(line, &at);
+            std::string_view key;
+            int mp = 0;
+            bool mpRead = true;
+            for (;;) {
+                if (sideWord.starts_with("key=")) { // Its shortcut (since 2026-11-15).
+                    key = sideWord.substr(4);
+                } else if (sideWord.starts_with("mp=")) { // Its MP cost (since 2026-11-15).
+                    mpRead = toInt(sideWord.substr(3), &mp) && mp >= 0;
+                } else {
+                    break;
+                }
+                sideWord = nextWord(line, &at);
+            }
             int side = 0;
-            const bool sized = toInt(nextWord(line, &at), &side);
+            const bool sized = toInt(sideWord, &side);
             const std::string_view pixels = nextWord(line, &at);
             const std::string_view name = trimmed(line.substr(at));
             const std::size_t bytes = static_cast<std::size_t>(std::max(side, 0)) * static_cast<std::size_t>(side) * 3;
-            if ((has != "cooldown" && has != "no-cooldown") || !sized || side < 0 || side > 64 || name.empty() ||
-                (pixels != "-" && pixels.size() != bytes * 2) || (pixels == "-" && side != 0)) {
-                return fail("a skill is: skill cooldown|no-cooldown SIDE PIXELS NAME");
+            if ((has != "cooldown" && has != "no-cooldown") || !sized || !mpRead || side < 0 || side > 64 ||
+                name.empty() || (pixels != "-" && pixels.size() != bytes * 2) || (pixels == "-" && side != 0)) {
+                return fail("a skill is: skill cooldown|no-cooldown [key=KEY] [mp=MP] SIDE PIXELS NAME");
             }
-            Skill skill{std::string(name), has == "cooldown", side, {}};
+            Skill skill{std::string(name), has == "cooldown", side, {}, std::string(key), mp};
             skill.bgr.reserve(bytes);
             for (std::size_t i = 0; i < bytes; ++i) {
                 const auto digit = [](char c) {
@@ -481,11 +832,34 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
             if (!toInt(nextWord(line, &at), &of) || idOf(of) == 0) {
                 return fail("a task of a state not there");
             }
-            const std::string_view word = nextWord(line, &at);
-            const auto* known = std::find(std::begin(kTaskWords), std::end(kTaskWords), word);
-            if (known != std::end(kTaskWords)) { // Else a task typed in before there were kinds: left out.
-                tree.find(idOf(of))->tasks.push_back(
-                    {static_cast<TaskKind>(known - std::begin(kTaskWords)), std::string(trimmed(line.substr(at)))});
+            std::string_view word = nextWord(line, &at);
+            const bool parallel = word == kParallelWord;
+            if (parallel) {
+                word = nextWord(line, &at);
+            }
+            const auto* known = word == kOldSelectTargetWord
+                                    ? std::begin(kTaskWords) + static_cast<int>(TaskKind::SelectTarget)
+                                    : std::find(std::begin(kTaskWords), std::end(kTaskWords), word);
+            if (known != std::end(kTaskWords)) { // Else an unknown kind (a name typed in before kinds): left out.
+                const auto taskKind = static_cast<TaskKind>(known - std::begin(kTaskWords));
+                const std::string_view rest = trimmed(line.substr(at));
+                Task task;
+                task.kind = taskKind;
+                task.parallel = parallel && canRunParallel(taskKind);
+                if (taskKind == TaskKind::UseSkill) {
+                    task.skills = listOf(rest);
+                } else if (taskKind == TaskKind::SelectTarget) {
+                    const auto* found = std::find(std::begin(kTargetWords), std::end(kTargetWords), rest);
+                    if (found != std::end(kTargetWords)) {
+                        task.target = static_cast<Target>(found - std::begin(kTargetWords));
+                    }
+                } else if (taskKind == TaskKind::ClickMouse) {
+                    const auto* found = std::find(std::begin(kClickButtonWords), std::end(kClickButtonWords), rest);
+                    if (found != std::end(kClickButtonWords)) {
+                        task.button = static_cast<ClickButton>(found - std::begin(kClickButtonWords));
+                    }
+                }
+                tree.find(idOf(of))->tasks.push_back(std::move(task));
             }
         } else if (kind == "go") {
             int from = 0;
@@ -496,11 +870,24 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
             if (idOf(from) == 0 || (to != 0 && idOf(to) == 0)) {
                 return fail("a transition of a state not there, or to one");
             }
+            const std::string_view when = nextWord(line, &at); // Nothing: Any Time (every file before 2026-11-15).
+            if (!when.empty() && when != kTasksDoneWord) {
+                return fail("a transition is: go FROM TO [done]");
+            }
             lastFrom = idOf(from);
-            tree.find(lastFrom)->transitions.push_back({to != 0 ? idOf(to) : 0, {}});
+            lastEnter = false;
+            tree.find(lastFrom)->transitions.push_back(
+                {to != 0 ? idOf(to) : 0, {}, when.empty() ? When::AnyTime : When::TasksDone});
+        } else if (kind == "enter") {
+            int of = 0;
+            if (!toInt(nextWord(line, &at), &of) || idOf(of) == 0) {
+                return fail("enter conditions of a state not there");
+            }
+            lastFrom = idOf(of);
+            lastEnter = true;
         } else if (kind == "if") {
             if (lastFrom == 0) {
-                return fail("a condition before any transition");
+                return fail("a condition before any transition or enter line");
             }
             Condition condition;
             const std::string_view join = nextWord(line, &at);
@@ -527,6 +914,15 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
                 condition.kind = Kind::Skill;
                 condition.is = static_cast<SkillIs>(word - std::begin(kSkillIsWords));
                 condition.text = skill;
+            } else if (left == "skills-ready") {
+                const std::string_view need = nextWord(line, &at);
+                const auto* word = std::find(std::begin(kNeedWords), std::end(kNeedWords), need);
+                if (word == std::end(kNeedWords)) {
+                    return fail("a skills condition is: if and|or skills-ready any|all SKILL|SKILL...");
+                }
+                condition.kind = Kind::SkillsReady;
+                condition.need = static_cast<Need>(word - std::begin(kNeedWords));
+                condition.skills = listOf(line.substr(at));
             } else if (left == "has-target") {
                 const std::string_view answer = nextWord(line, &at);
                 if (answer != "yes" && answer != "no") {
@@ -545,9 +941,10 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
                 }
                 condition.compare = static_cast<Compare>(word - std::begin(kCompareWords));
             }
-            tree.find(lastFrom)->transitions.back().conditions.push_back(std::move(condition));
+            State& state = *tree.find(lastFrom);
+            (lastEnter ? state.enter : state.transitions.back().conditions).push_back(std::move(condition));
         } else {
-            return fail("not a skill, state, task, go or if line");
+            return fail("not a skill, state, task, enter, go or if line");
         }
     }
     if (ids.empty()) {

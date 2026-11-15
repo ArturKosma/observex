@@ -44,9 +44,10 @@ TEST_CASE("reading a recording's info skips what it does not know") {
 }
 
 TEST_CASE("record kinds go to their words and back") {
-    for (const RecordKind kind : {RecordKind::Every, RecordKind::Unsure}) {
+    for (const RecordKind kind : {RecordKind::Every, RecordKind::Unsure, RecordKind::Handmade}) {
         CHECK(parseRecordKind(recordKindId(kind)) == kind);
     }
+    CHECK(std::string(recordKindId(RecordKind::Handmade)) == "handmade");
     CHECK(parseRecordKind("") == RecordKind::Every);
     CHECK(parseRecordKind("later") == RecordKind::Every);
 }
@@ -160,4 +161,30 @@ TEST_CASE("a recording's images are its jpg, jpeg and png files in name order") 
     CHECK(listImages(folder) == std::vector<std::string>{"000001.JPG", "000002.jpg", "000003.jpeg", "000004.png"});
     CHECK(listImages(folder / "missing").empty());
     std::filesystem::remove_all(folder);
+}
+
+TEST_CASE("a handmade package is the hour's: its folder, its start and its title") {
+    CHECK(handmadeFolderName(2026, 11, 15, 15) == "handmade_2026-11-15_15-00");
+    CHECK(handmadeFolderName(2026, 1, 2, 3) == "handmade_2026-01-02_03-00");
+    CHECK(handmadeStarted(2026, 11, 15, 9) == "2026-11-15 09:00:00");
+    CHECK(handmadeTitle(handmadeStarted(2026, 11, 15, 15)) == "15/11/2026 - 15:00");
+    CHECK(handmadeTitle("2026-01-02 03:00:00") == "02/01/2026 - 03:00");
+    CHECK(handmadeTitle("") == "");
+    CHECK(handmadeTitle("not a time at all") == "not a time at all");
+    CHECK(handmadeTitle("2026-13-02 03:00:00") == "2026-13-02 03:00:00");
+
+    RecordingInfo info;
+    info.started = handmadeStarted(2026, 11, 15, 15);
+    info.kind = RecordKind::Handmade;
+    const RecordingInfo read = parseRecordingInfo(formatRecordingInfo(info));
+    CHECK(read.kind == RecordKind::Handmade);
+    CHECK(read.started == "2026-11-15 15:00:00");
+}
+
+TEST_CASE("the next image number is after the highest, so none is ever replaced") {
+    CHECK(nextImageNumber({}) == 1);
+    CHECK(nextImageNumber({"000001.png", "000002.png"}) == 3);
+    CHECK(nextImageNumber({"000001.png", "000007.png"}) == 8); // 2-6 deleted: still after 7.
+    CHECK(nextImageNumber({"000003.jpg", "picture.png"}) == 4);
+    CHECK(nextImageNumber({"picture.png"}) == 1);
 }

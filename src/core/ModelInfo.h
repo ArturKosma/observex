@@ -14,6 +14,11 @@ namespace observex {
 // (no such list), or if the list cannot be read.
 std::vector<std::string> parseModelKinds(std::string_view modelJson);
 
+// Whether a model was trained on squares cut round a spot (tools/train/loot.py, drops round a corpse: its model.json
+// has "loot_side"), not on whole screen images: it is to look at squares (core/LootWatch), never at a whole screen
+// squeezed to its size.
+bool parseModelLooksAround(std::string_view modelJson);
+
 // Whether a model of `modelKinds` (parseModelKinds) fits a category of `categoryKinds`: it knows the category's first
 // kinds, in their order, and no others. A model trained before a kind was added to the category (2026-11-08: "can't
 // tell") still fits; the kinds it does not know yet are only the user's to answer. Never for a model without kinds.

@@ -1,9 +1,11 @@
 #pragma once
 
+#include "core/ClipLines.h"
 #include "core/Detection.h"
 #include "core/Ground.h"
 #include "core/Heuristics.h"
 #include "core/Log.h"
+#include "core/StateTree.h"
 
 #include <atomic>
 #include <cstddef>
@@ -64,6 +66,35 @@ struct ClipDepthLine {
     unsigned long long map = 0;   // The depth finder's map of this screen image (in depth.bin); 0: nothing drawn.
 };
 
+// What the Show flag Drops drew from one moment on (since 2026-11-15; core/ClipLines' drops line).
+struct ClipDropsLine {
+    unsigned long long image = 0; // The screen image the newest close look found the drops on (0: none yet).
+    double doneMs = 0.0;          // From when the app showed it.
+    bool kill = false;            // Round a kill (else round drops the sweep found).
+    LootSquare square{};          // The spot looked at closely; empty: nothing drawn from then on.
+    std::vector<Detection> drops; // Found there: boxes in screen pixels and how sure.
+};
+
+// The brain as the State tile showed it from one screen image on (since 2026-11-15; core/ClipLines' brain line).
+struct ClipBrainLine {
+    unsigned long long image = 0; // The screen image,
+    double timeMs = 0.0;          // which the screen showed then.
+    statetree::BrainShown brain;
+};
+
+// The Stats tab's Camera card from one screen image on (since the night of 2026-11-15; core/ClipLines' camera line).
+struct ClipCameraLine {
+    unsigned long long image = 0; // The screen image,
+    double timeMs = 0.0;          // which the screen showed then.
+    CameraShown camera;
+};
+
+// What one part of observex spent over the second before `timeMs` (since 2026-11-15; core/ClipLines' cost line).
+struct ClipCostLine {
+    double timeMs = 0.0;
+    CostPart part;
+};
+
 struct ClipText {
     std::vector<std::string> kinds; // The model's kinds by number, e.g. "monster" (from the header); empty: none.
     std::vector<double> frameMs;    // frameMs[n - 1]: when the screen showed the image of video frame n (or a moment
@@ -74,6 +105,11 @@ struct ClipText {
     std::vector<ClipNote> notes;
     std::vector<ClipGroundLine> grounds; // In time order; none before 2026-11-12.
     std::vector<ClipDepthLine> depths;   // Likewise.
+    std::vector<ClipDropsLine> drops;    // Likewise; none before the night of 2026-11-15.
+    std::vector<ClipBrainLine> brains;   // Likewise; none before 2026-11-15.
+    std::vector<ClipCameraLine> cameras; // Likewise; none before the night of 2026-11-15 (23:50).
+    std::vector<ClipMouse> mice;         // Likewise; none before the evening of 2026-11-15.
+    std::vector<ClipCostLine> costs;     // Likewise; none before the night of 2026-11-15.
     // observex's log lines made while it was recorded (since 2026-11-13), and when, in time order.
     std::vector<LogLine> logs;
     std::vector<double> logMs;
@@ -91,6 +127,18 @@ GroundCamera recordedGround(std::span<const ClipGroundLine> lines, double timeMs
 // The depth map the app drew live when the screen showed the image of `timeMs` (Recorded's depth): the map of the last
 // line at or before it; 0 before the first or where nothing was drawn.
 unsigned long long recordedDepth(std::span<const ClipDepthLine> lines, double timeMs);
+// What the Show flag Drops drew live at `timeMs` (Recorded's drops): the last line at or before it; null before the
+// first or where nothing was drawn.
+const ClipDropsLine* recordedDrops(std::span<const ClipDropsLine> lines, double timeMs);
+// The brain as the State tile showed it when the screen showed the image of `timeMs`: the last line at or before it;
+// null before the first (or in a clip saved before 2026-11-15).
+const statetree::BrainShown* recordedBrain(std::span<const ClipBrainLine> lines, double timeMs);
+// The Camera card as the Stats tab showed it when the screen showed the image of `timeMs`: the last line at or before
+// it; null before the first (or in a clip saved before the night of 2026-11-15).
+const CameraShown* recordedCamera(std::span<const ClipCameraLine> lines, double timeMs);
+// What the parts spent around the image of `timeMs` (the Debug tab on a clip): the lines of the first look at the
+// costs at or after it (its second holds the frame), else of the last; none in a clip saved before 2026-11-15 night.
+std::span<const ClipCostLine> recordedCosts(std::span<const ClipCostLine> lines, double timeMs);
 // The screen images the live ground finder followed, in order: the ones following it again over the clip (Today's
 // ground) follows, so it does what live did. Empty for a clip without ground lines.
 std::vector<unsigned long long> followedImages(const ClipText& clip);

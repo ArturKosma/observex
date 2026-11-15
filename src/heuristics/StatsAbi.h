@@ -6,12 +6,14 @@
 #include <cstdint>
 
 // What observex_stats.dll hands the app (engine/StatsLibrary): plain C, so the two need only agree on this and on
-// UiPiece (core/UiLayout), StatsArea, ColourPart, GameStats and SkillPicture (core/GameStats), which the sizes below
-// check. Change
+// UiPiece (core/UiLayout), StatsArea, ColourPart, GameStats, SkillPicture and PlateLook (core/GameStats), which the
+// sizes below check. Change
 // any of them and bump kObservexStatsAbi: the app then reads with the rules built into it until both are rebuilt.
 extern "C" {
 
-inline constexpr std::uint32_t kObservexStatsAbi = 4;
+// 5: GameGauge's at and key (skills' shortcuts, 2026-11-15). 6: setLook and GameStats::plate (Select Target's name
+// plate, 2026-11-15). 7: GameStats::minimap and location (the Geodata flag's position, 2026-11-15).
+inline constexpr std::uint32_t kObservexStatsAbi = 7;
 
 struct ObservexStatsApi {
     std::uint32_t abi;       // kObservexStatsAbi when the DLL was built.
@@ -33,6 +35,9 @@ struct ObservexStatsApi {
                  int partCount, observex::GameStats* out);
     // StatsReading::setSkills (the pictures are copied); false if it failed (the reader keeps none).
     bool (*setSkills)(void* reader, const observex::SkillPicture* skills, int count);
+    std::uint32_t lookSize; // sizeof(PlateLook).
+    // StatsReading::setLook; false if it failed.
+    bool (*setLook)(void* reader, const observex::PlateLook* look);
 };
 
 // The one function the DLL exports, by this name.

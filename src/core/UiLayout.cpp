@@ -35,6 +35,7 @@ constexpr int kSide = 40;       // The shortest side of a window.
 constexpr int kTitle = 60;      // How far above where its sides start a window's top line may be (its title bar).
 constexpr int kLongSides = 150; // Sides this long make a window even when no top line is seen (bright sky behind).
 constexpr int kInside = 4;      // A piece this close inside another is left out.
+constexpr int kSamePiece = 8;   // A framed window with each side this near a piece's (placed by its anchor) is it.
 constexpr int kGrid = 8;        // Pixels apart of the points checked for what a window covers.
 constexpr std::size_t kMaxWindows = 1024;
 constexpr int kLeftEdge = -1; // The screen's edges, among the upright lines a level line meets.
@@ -918,17 +919,28 @@ void UiLayout::placePieces(int width, int height) {
     for (const Piece& piece : pieces_) {
         const Anchor& main = anchors_[static_cast<std::size_t>(piece.anchor)];
         for (const Hit& hit : main.hits) {
+            const int dx = hit.x - piece.x;
+            const int dy = hit.y - piece.y;
             // An anchor well inside a framed window is the window's own (the inventory's scroll arrows look like the
-            // chat's): the piece is not there.
-            const bool inWindow = std::any_of(windows_.begin(), windows_.end(), [&](const UiPiece& window) {
-                return hit.x > window.x0 + kInside && hit.y > window.y0 + kInside &&
-                       hit.x + main.width < window.x1 - kInside && hit.y + main.height < window.y1 - kInside;
-            });
+            // chat's): the piece is not there. Unless the window is the piece itself, where the piece would be (the
+            // minimap's compass sits just inside its frame): then the window takes the piece's name (2026-11-15: the
+            // minimap was found as a plain "Window" whenever its frame was seen, and its map not followed).
+            bool inWindow = false;
+            for (UiPiece& window : windows_) {
+                if (hit.x > window.x0 + kInside && hit.y > window.y0 + kInside &&
+                    hit.x + main.width < window.x1 - kInside && hit.y + main.height < window.y1 - kInside) {
+                    inWindow = true;
+                    if (std::abs(window.x0 - (piece.x0 + dx)) <= kSamePiece &&
+                        std::abs(window.y0 - (piece.y0 + dy)) <= kSamePiece &&
+                        std::abs(window.x1 - (piece.x1 + dx)) <= kSamePiece &&
+                        std::abs(window.y1 - (piece.y1 + dy)) <= kSamePiece) {
+                        window.name = piece.name;
+                    }
+                }
+            }
             if (inWindow) {
                 continue;
             }
-            const int dx = hit.x - piece.x;
-            const int dy = hit.y - piece.y;
             UiPiece placed;
             placed.name = piece.name;
             placed.x0 = piece.x0 + dx;

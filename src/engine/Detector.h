@@ -14,6 +14,14 @@
 
 namespace observex {
 
+// A square part of the image to look at instead of all of it (a side of 0: all of it), in image pixels; moved to lie
+// inside the image if it does not.
+struct DetectArea {
+    int x = 0;
+    int y = 0;
+    int side = 0;
+};
+
 // One trained model (models/<category>/model.onnx, written by tools/train) running on the GPU through TensorRT.
 // The image never leaves the GPU: a compute shader squeezes it to the model's size into a buffer that CUDA shares
 // with Direct3D 11, TensorRT runs the network on that buffer, and only the candidate boxes come back to the CPU.
@@ -43,9 +51,11 @@ public:
     ID3D11Texture2D* input() const;
 
     // Runs the model on input(), or on its mirror image left to right if `mirrored` (the boxes still come in
-    // input()'s own pixels). Writes the things it found at least `minSure` sure into `found`, surest first, at most
-    // `capacity`, and returns how many; -1 if the GPU failed. Waits for the GPU. No heap allocation.
-    int detect(ID3D11DeviceContext* context, float minSure, Detection* found, int capacity, bool mirrored = false);
+    // input()'s own pixels), or only on `area` of it, squeezed (or stretched) to the model's size as if cut out
+    // (drops round a corpse: core/LootSpot). Writes the things it found at least `minSure` sure into `found`, surest
+    // first, at most `capacity`, and returns how many; -1 if the GPU failed. Waits for the GPU. No heap allocation.
+    int detect(ID3D11DeviceContext* context, float minSure, Detection* found, int capacity, bool mirrored = false,
+               DetectArea area = {});
 
     // How many numbers per candidate the model's kind classifier reads (the "features" output of a model.onnx
     // exported since 2026-11-08, 256 for RF-DETR Medium); 0 for an older model, which has none.

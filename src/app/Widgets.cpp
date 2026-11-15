@@ -33,6 +33,11 @@ float textWidth(ImFont* font, const char* text) {
     return text != nullptr ? font->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, text).x : 0.0f;
 }
 
+// Where a tab's text is drawn (its line's top), for a tab from `top` to `bottom`.
+float tabTextTop(float top, float bottom) {
+    return std::round((top + bottom) * 0.5f - ImGui::GetFontSize() * 0.5f + 1.0f * layout().dpi);
+}
+
 void drawIcon(ImDrawList* drawList, Icon icon, ImVec2 centre, ImU32 color, const Layout& l) {
     const float dpi = l.dpi;
     switch (icon) {
@@ -145,6 +150,26 @@ void drawIcon(ImDrawList* drawList, Icon icon, ImVec2 centre, ImU32 color, const
         drawList->PathLineTo(centre);
         drawList->PathLineTo(ImVec2(centre.x + 2.4f * dpi, centre.y + 1.6f * dpi));
         drawList->PathStroke(color, 0, l.stroke);
+        break;
+    }
+    case Icon::Refresh: {
+        // A ring open just left of its top, going round clockwise to an arrow head there pointing on (right).
+        constexpr float kPi = 3.14159265f;
+        const float radius = 6.0f * dpi;
+        const float start = -kPi * 0.5f + 0.35f;
+        const float end = kPi * 1.5f - 0.55f;
+        drawList->PathArcTo(centre, radius, start, end, 20);
+        drawList->PathStroke(color, 0, l.stroke);
+        const ImVec2 out(std::cos(end), std::sin(end));   // From the centre to the ring's end.
+        const ImVec2 along(-std::sin(end), std::cos(end)); // On round, clockwise.
+        const ImVec2 tip(centre.x + out.x * radius, centre.y + out.y * radius);
+        const float head = 3.2f * dpi;
+        drawList->AddTriangleFilled(ImVec2(tip.x + along.x * head, tip.y + along.y * head),
+                                    ImVec2(tip.x + out.x * head - along.x * 0.8f * dpi,
+                                           tip.y + out.y * head - along.y * 0.8f * dpi),
+                                    ImVec2(tip.x - out.x * head - along.x * 0.8f * dpi,
+                                           tip.y - out.y * head - along.y * 0.8f * dpi),
+                                    color);
         break;
     }
     case Icon::Play: {
@@ -373,9 +398,7 @@ bool drawTab(const char* id, const char* text, bool on, float height, const them
         drawList->AddRectFilled(ImVec2(min.x, min.y + std::round(6.0f * l.dpi)), ImVec2(max.x, max.y - 1.0f),
                                 theme::kSurfaceHover, 6.0f * l.dpi, ImDrawFlags_RoundCornersTop);
     }
-    const float fontSize = ImGui::GetFontSize();
-    const float textY = std::round((min.y + max.y) * 0.5f - fontSize * 0.5f + 1.0f * l.dpi);
-    drawList->AddText(fonts.medium, fontSize, ImVec2(min.x + padding, textY),
+    drawList->AddText(fonts.medium, ImGui::GetFontSize(), ImVec2(min.x + padding, tabTextTop(min.y, max.y)),
                       on || hovered ? theme::kText : theme::kTextMuted, text);
     if (on) {
         const float thickness = std::round(2.0f * l.dpi);
@@ -383,6 +406,19 @@ bool drawTab(const char* id, const char* text, bool on, float height, const them
                                 ImVec2(max.x - std::round(padding * 0.5f), max.y), theme::kAccent);
     }
     return clicked;
+}
+
+float capsMiddle(ImFont* font, float size) {
+    ImFontBaked* baked = font->GetFontBaked(size);
+    const ImFontGlyph* glyph = baked != nullptr ? baked->FindGlyphNoFallback('H') : nullptr;
+    if (glyph == nullptr || glyph->Y1 <= glyph->Y0) {
+        return size * 0.5f;
+    }
+    return (glyph->Y0 + glyph->Y1) * 0.5f * size / baked->Size; // As ImFont::RenderText places it.
+}
+
+float tabTextMiddle(float top, float height, const theme::Fonts& fonts) {
+    return tabTextTop(top, top + height) + capsMiddle(fonts.medium, ImGui::GetFontSize());
 }
 
 } // namespace observex

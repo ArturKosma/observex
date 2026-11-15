@@ -10,10 +10,15 @@
 //   observex_bench --clip-frames CLIP --out FOLDER [--every N]
 //   observex_bench --clip-seek CLIP
 //   observex_bench --clip-guesses CLIP [--heuristics DLL] [--snap [--out FOLDER --at FRAME...]] [--today-out FILE]
-//   observex_bench --ground CLIP [--heuristics DLL] [--layout FOLDER] [--frames] [--out FOLDER [--every N]
-//                  [--at FRAME]...]
+//   observex_bench --ground CLIP [--heuristics DLL] [--layout FOLDER] [--frames] [--no-mouse]
+//                  [--out FOLDER [--every N] [--at FRAME]...]
 //   observex_bench --depth CLIP [--depth-model FOLDER] [--heuristics DLL] [--layout FOLDER] [--every N]
 //                  [--out FOLDER] [--at FRAME]... [--compare NPY]
+//   observex_bench --geodata CLIP [--layout FOLDER] [--geo FOLDER] [--scale UNITS] [--first-lines] [--all]
+//                  [--out FOLDER [--every N]]
+//   observex_bench --mouse [SECONDS]
+//   observex_bench --turns CLIP [--lag MS] [--layout FOLDER] [--step N]
+//   observex_bench --crash FOLDER [uncaught]
 //
 // Lists the screens, runs the real Pipeline on one (the primary by default, or number N from the list)
 // and prints its numbers once a second.
@@ -44,7 +49,9 @@
 // images snapped onto per second, milliseconds per image (the grey image on the GPU, waited for, then snapping), how
 // long after the screen showed an image its boxes were there, and the share of boxes snapped.
 // With --images it looks at the image files of a recording instead of the screen and writes what it found to FILE
-// in the marks format (like tools/train/guess.py's <category>-guesses.txt), to compare with the Python model.
+// in the marks format (like tools/train/guess.py's <category>-guesses.txt), to compare with the Python model. A drop
+// model (one that looks round corpses, "loot_side" in its model.json) sees each image square by square as the review's
+// Finder runs it (core/LootWatch's lootTiles and keepApart).
 //
 // UI: --find-ui also runs the UI finder as the app does while observing (engine/UiFinder: ten images a second, the
 // grey image on the GPU, its full-size level read back, then core/UiLayout with ui.txt from --layout, default
@@ -129,6 +136,13 @@
 // and each --at; depth.bin; and, for a clip folder, a copy of the clip with depth lines added (each map drawn from its
 // own frame on), so the clip screen's Depth shows it as if the flag had been on live (in a folder the clips list
 // reads, e.g. a recordings folder's clips).
+//
+// Geodata over a clip: --geodata runs what the Show flag Geodata does (bench/GeodataBench) on ~10 frames a second: the
+// minimap followed, /loc answers read from the Messages window (--first-lines: the lines already shown on the first
+// frame count as new), where that puts the character, checked against the geodata (--geo, default models/geodata;
+// --scale: the minimap's units a pixel, as observex.cfg keeps it). --all prints every frame read (the minimap's
+// window, its slide and likeness, the camera's pitch and the one set right on the geodata). With --out, every Nth
+// frame read (--every, default 10) as a JPEG with the geodata's grid drawn as the flag draws it.
 
 #include "core/BoxLearner.h"
 #include "core/ClipGuesses.h"
@@ -136,6 +150,7 @@
 #include "core/Features.h"
 #include "core/KindLearner.h"
 #include "core/LiveLines.h"
+#include "core/LootWatch.h"
 #include "core/Marks.h"
 #include "core/Mirror.h"
 #include "core/ModelInfo.h"
@@ -147,6 +162,7 @@
 #include "engine/ClipPlayer.h"
 #include "engine/ClipRecorder.h"
 #include "engine/ClipSnapper.h"
+#include "engine/CrashLog.h"
 #include "engine/DepthFinder.h"
 #include "engine/Detector.h"
 #include "engine/Gpu.h"
@@ -156,6 +172,7 @@
 #include "engine/ImageFile.h"
 #include "engine/KindUpdater.h"
 #include "engine/LiveLog.h"
+#include "engine/MouseWatch.h"
 #include "engine/Pipeline.h"
 #include "engine/Recognizer.h"
 #include "engine/Recorder.h"
@@ -164,7 +181,9 @@
 #include "engine/UiFinder.h"
 
 #include "DepthBench.h"
+#include "GeodataBench.h"
 #include "StatsBench.h"
+#include "TurnsBench.h"
 #include "heuristics/GroundMotion.h"
 #include "heuristics/Rules.h"
 #include "heuristics/SnapRules.h"
@@ -189,6 +208,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <span>
 #include <sstream>
@@ -230,6 +250,7 @@ struct Options {
     bool findUi = false;              // --find-ui: the live run also runs the UI finder, as the app does.
     const char* ground = nullptr;     // --ground CLIP: the camera followed over a clip, as the Ground flag does.
     bool groundFrames = false;        // --frames for --ground: a line for every frame followed, and every camera.
+    bool groundNoMouse = false;       // --no-mouse for --ground: the clip's mouse lines left out (as before them).
     const char* depth = nullptr;      // --depth CLIP: the Show flag Depth over a clip (bench/DepthBench).
     const char* depthModel = nullptr; // --depth-model for --depth and --find-depth (default models/depth).
     bool findDepth = false;           // --find-depth: the live run also runs the depth finder, as the flag Depth does.
@@ -297,6 +318,8 @@ bool parse(int argc, char** argv, Options& options) {
             options.ground = argv[++i];
         } else if (std::strcmp(argv[i], "--frames") == 0) {
             options.groundFrames = true;
+        } else if (std::strcmp(argv[i], "--no-mouse") == 0) {
+            options.groundNoMouse = true;
         } else if (std::strcmp(argv[i], "--depth") == 0 && i + 1 < argc) {
             options.depth = argv[++i];
         } else if (std::strcmp(argv[i], "--depth-model") == 0 && i + 1 < argc) {
@@ -317,7 +340,7 @@ bool parse(int argc, char** argv, Options& options) {
                 "       observex_bench --clip-guesses CLIP [--heuristics DLL] [--snap [--out FOLDER --at FRAME...]]"
                 " [--today-out FILE]\n"
                 "       observex_bench --ui CLIP [--layout FOLDER] [--out FOLDER [--every N] [--at FRAME]...]\n"
-                "       observex_bench --ground CLIP [--heuristics DLL] [--layout FOLDER] [--frames]"
+                "       observex_bench --ground CLIP [--heuristics DLL] [--layout FOLDER] [--frames] [--no-mouse]"
                 " [--out FOLDER [--every N] [--at FRAME]...]\n"
                 "       observex_bench --depth CLIP [--depth-model FOLDER] [--heuristics DLL] [--layout FOLDER]"
                 " [--every N] [--out FOLDER] [--at FRAME]... [--compare NPY]\n");
@@ -464,6 +487,16 @@ int detectImages(const Options& options) {
     std::printf("Model ready in %.1f s (input %u x %u)\n",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - loadStart).count(),
                 detector.modelSize(), detector.modelSize());
+    // A model that looks round corpses (drops) sees each image square by square, as the review's Finder runs it; no
+    // mirror test then.
+    std::string info;
+    {
+        std::ifstream in(fs::path(options.model) / "model.json", std::ios::binary);
+        info.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    const bool inSquares = parseModelLooksAround(info);
+    const std::vector<LootSquare> squares = inSquares ? lootTiles(first.width, first.height) : std::vector<LootSquare>{};
+    std::vector<Detection> fromSquares;
 
     ImageMarks marks;
     double totalMs = 0.0;
@@ -481,10 +514,31 @@ int detectImages(const Options& options) {
         }
         gpu.context->UpdateSubresource(detector.input(), 0, nullptr, image.bgra.data(), image.width * 4, 0);
         const auto start = std::chrono::steady_clock::now();
-        const int count = detector.detect(gpu.context.Get(), LiveLog::kMinSure, found.data(), Found::kMax);
+        int count = 0;
+        if (inSquares) {
+            fromSquares.clear();
+            for (const LootSquare& square : squares) {
+                const int n = detector.detect(gpu.context.Get(), LiveLog::kMinSure, found.data(), Found::kMax, false,
+                                              {square.x, square.y, square.side});
+                if (n < 0) {
+                    count = -1;
+                    break;
+                }
+                fromSquares.insert(fromSquares.end(), found.begin(), found.begin() + n);
+            }
+            if (count == 0) {
+                const std::vector<int> kept = keepApart(fromSquares);
+                count = static_cast<int>(std::min(kept.size(), found.size()));
+                for (int i = 0; i < count; ++i) {
+                    found[static_cast<std::size_t>(i)] = fromSquares[static_cast<std::size_t>(kept[i])];
+                }
+            }
+        } else {
+            count = detector.detect(gpu.context.Get(), LiveLog::kMinSure, found.data(), Found::kMax);
+        }
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         const int mirroredCount =
-            detector.detect(gpu.context.Get(), LiveLog::kMinSure, mirrored.data(), Found::kMax, true);
+            inSquares ? 0 : detector.detect(gpu.context.Get(), LiveLog::kMinSure, mirrored.data(), Found::kMax, true);
         if (count < 0 || mirroredCount < 0) {
             std::printf("The GPU failed on %s\n", file.filename().string().c_str());
             return 1;
@@ -493,7 +547,8 @@ int detectImages(const Options& options) {
             totalMs += ms; // The first run includes TensorRT's warm-up.
         }
         const std::span<const Detection> plain{found.data(), static_cast<std::size_t>(count)};
-        const std::span<const Detection> turned{mirrored.data(), static_cast<std::size_t>(mirroredCount)};
+        const std::span<const Detection> turned =
+            inSquares ? plain : std::span<const Detection>{mirrored.data(), static_cast<std::size_t>(mirroredCount)};
         disagreements.push_back(mirrorDisagreement(plain, turned, Recognizer::kMinSure));
         const float closest = closestKinds(plain, turned, Recognizer::kMinSure);
         const bool closeKinds = unsureOfKind(closest);
@@ -2407,7 +2462,10 @@ int groundClip(const Options& options) {
         return 1;
     }
     const std::string text{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-    const ClipText clip = readClipText(text);
+    ClipText clip = readClipText(text);
+    if (options.groundNoMouse) {
+        clip.mice.clear();
+    }
     const Guesses shown = recordedGuesses(clip);
     const fs::path layoutFolder = options.layout != nullptr ? fs::path(options.layout) : fs::path("models/ui");
     UiLayout layout;
@@ -2430,8 +2488,10 @@ int groundClip(const Options& options) {
     const GpuDevice gpu = createGpuDevice(adapter.Get(), true); // Video support, for the GPU's video decoder.
     ClipGround::Stats stats;
     const Clock::time_point start = Clock::now();
+    std::vector<ClipCameraLine> mouseCameras;
     const std::vector<GroundCamera> cameras = ClipGround::follow(gpu.device.Get(), *ground, video, clip, shown, &layout,
-                                                                 {}, nullptr, &stats, options.groundFrames);
+                                                                 {}, nullptr, &stats, options.groundFrames,
+                                                                 &mouseCameras);
     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
     std::printf("%s: followed %d frames in %.0f ms (%.2f ms each reading back and fitting); fitted %d (%.0f%%), "
                 "%.1f patches found a frame, %.1f agreeing, %.2f px off\n",
@@ -2445,6 +2505,9 @@ int groundClip(const Options& options) {
     std::printf("  minimap cone seen on %d of %d frames; between them %d, turned by the ground on %d (%.2f ms each)\n",
                 stats.headed, stats.images, stats.heads, stats.headsTurned, stats.headMs);
     std::printf("  depth maps given %d, of them %d said the pitch\n", stats.depths, stats.depthsMeasured);
+    std::printf("  turns: fitted on %d frames, said the pitch on %d, held it on %d (%.0f%%); %.2f ms each\n",
+                stats.turnsFitted, stats.turnsTaken, stats.turnsHeld,
+                stats.images > 0 ? 100.0 * stats.turnsHeld / stats.images : 0.0, stats.turnMs);
     // Today against Recorded: the grid the app drew live (clip.txt's ground lines, since 2026-11-12) on the same frames.
     if (clip.grounds.empty()) {
         std::printf("  Recorded: no ground lines (saved before clips kept the grid)\n");
@@ -2486,13 +2549,18 @@ int groundClip(const Options& options) {
                                                "few agreeing", "too far",   "searched"};
     for (const ClipGround::Stats::Frame& noted : stats.frames) {
         constexpr double kDegrees = 57.29578;
-        std::printf("  %8.0f ms  learned %2d  turn %6.3f  match %5.2f  found %2d  moved %6.1f px  %-12s agreeing %2d"
-                    "  minimap %6.1f  yaw %7.1f  pitch %5.1f  distance %5.2f\n",
+        std::printf("  %8.1f ms  learned %2d  turn %6.3f  match %5.2f  found %2d  moved %6.1f px  %-12s agreeing %2d"
+                    "  minimap %6.1f  yaw %7.1f  pitch %5.1f  distance %5.2f  turns %3d %3d %s%s%s turned %6.2f"
+                    "  says %6.2f +- %5.2f  miss %4.2f  %.1f ms  tilted %7.3f\n",
                     noted.timeMs - firstMs, noted.learned, static_cast<double>(noted.turn),
                     static_cast<double>(noted.match), noted.found, static_cast<double>(noted.moved),
                     kMotions[static_cast<std::size_t>(noted.motion)], noted.agreeing,
                     noted.heading < 0.0f ? -1.0 : noted.heading * kDegrees, noted.yaw * kDegrees,
-                    noted.pitch * kDegrees, static_cast<double>(noted.distance));
+                    noted.pitch * kDegrees, static_cast<double>(noted.distance), noted.note.turnPoints,
+                    noted.note.turnAgreeing, noted.note.turnFitted ? "f" : "-", noted.note.turnTaken ? "t" : "-",
+                    noted.note.turnHolds ? "H" : "-", noted.note.turnTurn * kDegrees, noted.note.turnPitch * kDegrees,
+                    noted.note.turnSpread * kDegrees, static_cast<double>(noted.note.turnMiss),
+                    static_cast<double>(noted.note.turnMs), noted.note.turnTilt * kDegrees);
     }
     for (const ClipGround::Stats::Depth& noted : stats.depthNotes) {
         constexpr double kDegrees = 57.29578;
@@ -2503,9 +2571,13 @@ int groundClip(const Options& options) {
     }
     for (const GroundCamera& camera : options.groundFrames ? std::span<const GroundCamera>(cameras)
                                                            : std::span<const GroundCamera>()) {
-        std::printf("  %8.1f ms  camera %s  yaw %8.2f  pitch %6.2f\n", camera.timeMs - firstMs,
-                    camera.known ? "known" : "unknown", static_cast<double>(camera.yaw) * 57.29578,
-                    static_cast<double>(camera.pitch) * 57.29578);
+        std::printf("  %8.1f ms  camera %s  yaw %8.2f  pitch %6.2f  distance %.4f  focal %.1f  middle %.1f %.1f  feet %.4f "
+                    "%.4f\n",
+                    camera.timeMs - firstMs, camera.known ? "known" : "unknown",
+                    static_cast<double>(camera.yaw) * 57.29578, static_cast<double>(camera.pitch) * 57.29578,
+                    static_cast<double>(camera.distance), static_cast<double>(camera.focal),
+                    static_cast<double>(camera.middleX), static_cast<double>(camera.middleY),
+                    static_cast<double>(camera.feetX), static_cast<double>(camera.feetY));
     }
     double nextMs = -1e300;
     for (const GroundCamera& camera : cameras) {
@@ -2522,6 +2594,50 @@ int groundClip(const Options& options) {
                     camera.pitchMeasured ? " " : "?", static_cast<double>(camera.distance),
                     static_cast<double>(camera.yaw) * 57.29578, static_cast<double>(camera.feetX),
                     static_cast<double>(camera.feetY));
+    }
+    // The Stats tab's Camera card, Today's (the clip's mouse lines) against Recorded's (its camera lines, since the night
+    // of 2026-11-15), every half second.
+    if (!mouseCameras.empty()) {
+        std::printf("  Camera card (Today; Recorded from %zu camera lines):\n", clip.cameras.size());
+        static constexpr const char* kBy[] = {"-", "guess", "turns", "top limit"};
+        const auto cardText = [](const CameraShown* card) {
+            char text[128];
+            if (card == nullptr || !card->known) {
+                std::snprintf(text, sizeof(text), "%s", card == nullptr ? "none" : "not known");
+            } else {
+                std::snprintf(text, sizeof(text), "yaw %7.2f %-7s pitch %s%6.2f %-9s off cone %.2f turns %.2f",
+                              static_cast<double>(card->yaw), card->yawKnown ? "minimap" : "turned",
+                              card->pitchKnown ? " " : "?", static_cast<double>(card->pitch),
+                              kBy[std::clamp(card->pitchBy, 0, 3)], static_cast<double>(card->coneOff),
+                              static_cast<double>(card->turnsOff));
+            }
+            return std::string(text);
+        };
+        int both = 0;
+        double yawOff = 0.0;
+        double pitchOff = 0.0;
+        for (const ClipCameraLine& today : mouseCameras) {
+            const CameraShown* recorded = recordedCamera(clip.cameras, today.timeMs);
+            if (recorded != nullptr && recorded->known && today.camera.known && recorded->yawKnown == today.camera.yawKnown &&
+                recorded->pitchKnown && today.camera.pitchKnown) {
+                ++both;
+                yawOff += std::fabs(std::remainder(static_cast<double>(today.camera.yaw - recorded->yaw), 360.0));
+                pitchOff += std::fabs(static_cast<double>(today.camera.pitch - recorded->pitch));
+            }
+        }
+        if (both > 0) {
+            std::printf("  against Recorded: %d frames both known, yaw off %.2f deg, pitch off %.2f deg on average\n",
+                        both, yawOff / both, pitchOff / both);
+        }
+        double nextCardMs = -1e300;
+        for (const ClipCameraLine& today : mouseCameras) {
+            if (today.timeMs < nextCardMs) {
+                continue;
+            }
+            nextCardMs = today.timeMs + 500.0;
+            std::printf("  %8.0f ms  today %s\n             recorded %s\n", today.timeMs - firstMs,
+                        cardText(&today.camera).c_str(), cardText(recordedCamera(clip.cameras, today.timeMs)).c_str());
+        }
     }
     if (options.out == nullptr) {
         return 0;
@@ -2657,9 +2773,96 @@ int groundClip(const Options& options) {
 
 } // namespace
 
+// --mouse [SECONDS]: watches the mouse as the app does for its clips (engine/MouseWatch, default 5 s) and prints once a
+// second how many reports came, the counts moved (all, and while the right button was held: the camera turning) and
+// where the cursor was: to see it works with the game in front. Reads the mouse, never moves it.
+int watchMouse(int argc, char** argv) {
+    const int seconds = argc >= 1 ? std::max(1, std::atoi(argv[0])) : 5;
+    struct Sums {
+        long long reports = 0;
+        long long dx = 0;
+        long long dy = 0;
+        long long turnedX = 0; // While the right button was held.
+        long long turnedY = 0;
+        int most = 0;          // The largest count in one report.
+        int wheel = 0;
+        unsigned held = 0;
+        int cursorX = 0;
+        int cursorY = 0;
+    };
+    std::mutex mutex;
+    Sums sums;
+    std::printf("Windows: %s\n", MouseWatch::pointerSettings().c_str());
+    try {
+        MouseWatch watch([&](const MouseInput& input) {
+            std::scoped_lock lock(mutex);
+            ++sums.reports;
+            sums.dx += input.dx;
+            sums.dy += input.dy;
+            if ((input.held & 2) != 0) {
+                sums.turnedX += input.dx;
+                sums.turnedY += input.dy;
+            }
+            sums.most = std::max({sums.most, std::abs(input.dx), std::abs(input.dy)});
+            sums.wheel += input.wheel;
+            sums.held = input.held;
+            sums.cursorX = input.cursorX;
+            sums.cursorY = input.cursorY;
+        });
+        for (int second = 1; second <= seconds; ++second) {
+            Sleep(1000);
+            Sums now;
+            {
+                std::scoped_lock lock(mutex);
+                now = sums;
+                sums = {};
+                sums.held = now.held;
+            }
+            std::printf("  %3d s  %5lld reports  moved %6lld %6lld  with the right button %6lld %6lld  most %4d  wheel "
+                        "%5d  held %u  cursor %d %d\n",
+                        second, now.reports, now.dx, now.dy, now.turnedX, now.turnedY, now.most, now.wheel, now.held,
+                        now.cursorX, now.cursorY);
+        }
+    } catch (const std::exception& e) {
+        std::printf("Cannot watch the mouse: %s\n", e.what());
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    // --crash FOLDER [uncaught]: crashes on purpose (an access violation, or a C++ exception nothing catches) with the
+    // app's crash log (engine/CrashLog) installed, writing FOLDER/observex.log and the dump into FOLDER/crashes, to see
+    // what a crash leaves.
+    if (argc >= 3 && std::strcmp(argv[1], "--crash") == 0) {
+        const std::filesystem::path folder = argv[2];
+        std::filesystem::create_directories(folder);
+        installCrashLog(folder / L"observex.log", folder / L"crashes");
+        std::printf("Crashing on purpose; see %s\n", (folder / "observex.log").string().c_str());
+        std::fflush(stdout);
+        crashOnPurpose(argc >= 4 && std::strcmp(argv[3], "uncaught") == 0);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--mouse") == 0) {
+        return watchMouse(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--turns") == 0) { // Turns between frames against the mouse (bench/TurnsBench).
+        const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); // Media Foundation needs it.
+        int result = 1;
+        try {
+            result = turnsBench(argc - 2, argv + 2);
+        } catch (const std::exception& e) {
+            std::printf("%s\n", e.what());
+        }
+        if (com) {
+            CoUninitialize();
+        }
+        return result;
+    }
     if (argc >= 2 && std::strcmp(argv[1], "--stats") == 0) { // The game's bars on recorded images (bench/StatsBench).
         return statsBench(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--geodata") == 0) { // The Show flag Geodata over a clip (bench/GeodataBench).
+        return geodataBench(argc - 2, argv + 2);
     }
     Options options;
     if (!parse(argc, argv, options)) {

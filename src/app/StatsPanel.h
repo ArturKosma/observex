@@ -2,6 +2,7 @@
 
 #include "app/SkillsView.h"
 #include "app/Theme.h"
+#include "core/ClipLines.h"
 #include "core/GameStats.h"
 #include "core/StateTree.h"
 
@@ -20,13 +21,21 @@ namespace observex {
 // (how many characters the model shows, and monsters), "Target" (its name and HP), and any other window's. Few colours:
 // labels muted, values bright, bars coloured as the game's; what is not seen is muted with a dash. A number that did
 // not agree with its bar is muted with a "?".
+// The card Camera: the camera by the mouse's counts (core/MouseCamera's cameraOf) on the frame shown (the user asked,
+// 2026-11-15 night: "add the Yaw/Pitch into stats, and make sure every single frame its updated"; on a clip since the
+// same night: its camera lines, or Today's from its mouse lines): its yaw (degrees clockwise from north, the
+// minimap's, or only turned since the counts began), pitch (down) and what said it, and how far the minimap's cone and
+// the camera's turns were off the counts lately.
+
 class StatsTile {
 public:
     // Draws the tile at the cursor in the current window, taking the room it drew in. `stats` null: `empty` is said
     // instead. `problem` (may be null or empty): why nothing is read, said under it. `skills`: the profile's, whose
-    // icons `icons` draws.
+    // icons `icons` draws. `camera`: the card Camera, first (not known: none, or one saying `cameraProblem` if that is
+    // not empty).
     void draw(const theme::Fonts& fonts, const GameStats* stats, const char* empty, const char* problem,
-              const std::vector<statetree::Skill>& skills, const SkillIcons& icons, float dpiScale);
+              const std::vector<statetree::Skill>& skills, const SkillIcons& icons, float dpiScale,
+              const CameraShown& camera = {}, const char* cameraProblem = nullptr);
 };
 
 } // namespace observex

@@ -61,11 +61,63 @@ float recordingProgress(RecordKind kind, unsigned saved, double elapsed) {
 }
 
 const char* recordKindId(RecordKind kind) {
-    return kind == RecordKind::Unsure ? "unsure" : "every";
+    switch (kind) {
+    case RecordKind::Unsure:
+        return "unsure";
+    case RecordKind::Handmade:
+        return "handmade";
+    case RecordKind::Every:
+        break;
+    }
+    return "every";
 }
 
 RecordKind parseRecordKind(std::string_view id) {
-    return id == "unsure" || id == "auto" ? RecordKind::Unsure : RecordKind::Every;
+    if (id == "unsure" || id == "auto") {
+        return RecordKind::Unsure;
+    }
+    return id == "handmade" ? RecordKind::Handmade : RecordKind::Every;
+}
+
+std::string handmadeFolderName(unsigned year, unsigned month, unsigned day, unsigned hour) {
+    char name[40];
+    std::snprintf(name, sizeof(name), "handmade_%04u-%02u-%02u_%02u-00", year, month, day, hour);
+    return name;
+}
+
+std::string handmadeStarted(unsigned year, unsigned month, unsigned day, unsigned hour) {
+    char started[24];
+    std::snprintf(started, sizeof(started), "%04u-%02u-%02u %02u:00:00", year, month, day, hour);
+    return started;
+}
+
+std::string handmadeTitle(std::string_view started) {
+    // "2026-11-15 15:00:00": year, month, day, hour, minute at fixed places.
+    const auto number = [started](std::size_t at, std::size_t length, unsigned& value) {
+        const char* begin = started.data() + at;
+        const auto [end, error] = std::from_chars(begin, begin + length, value);
+        return error == std::errc() && end == begin + length;
+    };
+    unsigned year = 0, month = 0, day = 0, hour = 0, minute = 0;
+    if (started.size() < 16 || !number(0, 4, year) || !number(5, 2, month) || !number(8, 2, day) ||
+        !number(11, 2, hour) || !number(14, 2, minute) || month < 1 || month > 12 || day < 1 || day > 31) {
+        return std::string(started);
+    }
+    char title[32];
+    std::snprintf(title, sizeof(title), "%02u/%02u/%04u - %02u:%02u", day, month, year, hour, minute);
+    return title;
+}
+
+unsigned nextImageNumber(const std::vector<std::string>& images) {
+    unsigned highest = 0;
+    for (const std::string& image : images) {
+        unsigned number = 0;
+        const auto [end, error] = std::from_chars(image.data(), image.data() + image.size(), number);
+        if (error == std::errc() && end != image.data()) {
+            highest = std::max(highest, number);
+        }
+    }
+    return highest + 1;
 }
 
 std::string formatRecordingInfo(const RecordingInfo& info) {

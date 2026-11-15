@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Costs.h"
 #include "core/Question.h"
 #include "core/TripleBuffer.h"
 #include "engine/Gpu.h"
@@ -25,6 +26,7 @@ struct PipelineStats {
     float latencyMaxMs = 0.0f;
     float workAvgMs = 0.0f; // CPU time the pipeline spends on each image.
     float workMaxMs = 0.0f;
+    CostPart costs;         // The same work, step by step (the Debug tab).
 };
 
 // The real-time loop: capture, then hand each image on to recognise (see Recognizer) and, still to come, react. It
@@ -53,7 +55,7 @@ public:
     bool start(const Screen& screen);
 
     // Stops the loop and frees its GPU resources. Destroy any reader of its channels (preview(), recording(),
-    // recognition(), clip(), snap(), ui(), ground(), depth()) first.
+    // recognition(), clip(), snap(), ui(), ground(), depth(), drops()) first.
     void stop();
 
     State state() const { return state_.load(std::memory_order_acquire); }
@@ -76,6 +78,11 @@ public:
     // While recording: also records the next new image, then the interval counts on from it. Costs nothing.
     void recordNow() { recordNow_.store(true, std::memory_order_relaxed); }
     ImageChannel* recording() const { return recording_.get(); }
+
+    // A training screenshot (Shift+Win, the user asked 2026-11-15): the next new image is also copied for the shot
+    // saver (a Recorder reading shots()), recording or not. Costs nothing until asked.
+    void takeShot() { shotNow_.store(true, std::memory_order_relaxed); }
+    ImageChannel* shots() const { return shots_.get(); }
 
     // While on, every new image is also copied for recognition (see Recognizer). Off costs nothing.
     void setRecognitionEnabled(bool enabled) { recognitionEnabled_.store(enabled, std::memory_order_relaxed); }
@@ -106,6 +113,11 @@ public:
     void setDepthEnabled(bool enabled) { depthEnabled_.store(enabled, std::memory_order_relaxed); }
     ImageChannel* depth() const { return depth_.get(); }
 
+    // While on, a new image every 1 / DropFinder::kImagesPerSecond seconds is also copied for the drop finder (drops
+    // round a kill). Off costs nothing.
+    void setDropsEnabled(bool enabled) { dropsEnabled_.store(enabled, std::memory_order_relaxed); }
+    ImageChannel* drops() const { return drops_.get(); }
+
     // Newest statistics. The reference stays valid until the next call or start().
     const PipelineStats& stats();
 
@@ -122,12 +134,14 @@ private:
     std::unique_ptr<ScreenCapture> capture_;
     std::unique_ptr<ImageChannel> preview_;
     std::unique_ptr<ImageChannel> recording_;
+    std::unique_ptr<ImageChannel> shots_;
     std::unique_ptr<ImageChannel> recognition_;
     std::unique_ptr<ImageChannel> clip_;
     std::unique_ptr<ImageChannel> snap_;
     std::unique_ptr<ImageChannel> ui_;
     std::unique_ptr<ImageChannel> ground_;
     std::unique_ptr<ImageChannel> depth_;
+    std::unique_ptr<ImageChannel> drops_;
     std::unique_ptr<TripleBuffer<PipelineStats>> stats_;
     std::atomic<State> state_{State::Stopped};
     std::atomic<bool> previewEnabled_{false};
@@ -135,12 +149,14 @@ private:
     std::atomic<bool> onlyQuestions_{false};
     Question question_;
     std::atomic<bool> recordNow_{false};
+    std::atomic<bool> shotNow_{false};
     std::atomic<bool> recognitionEnabled_{false};
     std::atomic<bool> clipEnabled_{false};
     std::atomic<bool> snapEnabled_{false};
     std::atomic<bool> uiEnabled_{false};
     std::atomic<bool> groundEnabled_{false};
     std::atomic<bool> depthEnabled_{false};
+    std::atomic<bool> dropsEnabled_{false};
     std::string error_;
     unsigned width_ = 0;
     unsigned height_ = 0;

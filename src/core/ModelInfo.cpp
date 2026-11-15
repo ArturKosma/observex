@@ -112,6 +112,10 @@ std::vector<std::string> parseModelKinds(std::string_view modelJson) {
     }
 }
 
+bool parseModelLooksAround(std::string_view modelJson) {
+    return valueOf(modelJson, "\"loot_side\"", 0) != std::string_view::npos;
+}
+
 KindHead parseKindHead(std::string_view modelJson) {
     // Enough JSON for what export.py writes: two lists of numbers inside "kind_head".
     const std::size_t head = modelJson.find("\"kind_head\"");

@@ -6,6 +6,7 @@
 #include "core/Depth.h"
 #include "core/GameStats.h"
 #include "core/Recordings.h"
+#include "engine/ClipDrops.h"
 #include "engine/ClipGround.h"
 #include "engine/ClipPlayer.h"
 #include "engine/ClipSnapper.h"
@@ -52,6 +53,11 @@ namespace observex {
 // the frame's image, its levels and colours as drawn (depth.bin, clip.txt's depth lines); Today's the same map shaded
 // again by today's heuristics (setHeuristics: a change to them shows on the open clip). Where the app drew none live
 // there is none.
+// The Drops flag (the user asked, 2026-11-15: it was missing there) draws the guesser's drops: Recorded's what Show >
+// Drops drew live (clip.txt's drops lines, since the night of 2026-11-15: the spot looked at closely and the drops
+// found in it), Today's what today's drop model finds on the frame shown, all of it in squares (engine/ClipDrops,
+// started the first time it is asked for; a frame takes about a tenth of a second), with drops on the interface the
+// UI finder found left out as live.
 class ClipView {
 public:
     // Whose characters and grid are drawn over the video (while the Characters and Ground flags are on). Each
@@ -67,10 +73,11 @@ public:
     // device); reads its clip.txt for the guesses, Today's through `today` (used only here) and snapped by `snapping`;
     // follows the ground with `ground` once the flag Ground asks; shades Today's depth with `depth`; finds the
     // interface with the layout in `uiFolder` (models/ui) and reads the numbers on it with readers from `stats`
-    // (Today's; Recorded's are its clip-stats.txt). Never throws: if the video cannot be played, draw() says why.
+    // (Today's; Recorded's are its clip-stats.txt); Today's drops with the drop model in `dropFolder` (models/drop),
+    // once the flag Drops asks. Never throws: if the video cannot be played, draw() says why.
     ClipView(IDXGIAdapter1* gpu, ID3D11Device* device, std::filesystem::path folder, ClipInfo info, Heuristics& today,
              std::unique_ptr<Snapping> snapping, std::unique_ptr<Grounding> ground, std::unique_ptr<Depthing> depth,
-             std::filesystem::path uiFolder, std::shared_ptr<const StatsSource> stats);
+             std::filesystem::path uiFolder, std::shared_ptr<const StatsSource> stats, std::filesystem::path dropFolder);
 
     ClipView(const ClipView&) = delete;
     ClipView& operator=(const ClipView&) = delete;
@@ -125,6 +132,20 @@ public:
     // UI finder's on the frames shown, read by the newest observex_stats.dll; null before the first).
     const GameStats* recordedStats() const;
     bool statsRecorded() const { return !recordedStats_.empty(); } // Saved before 2026-11-12 evening: none.
+    // The brain as the State tile showed it when the screen showed the frame shown's image (clip.txt's brain lines;
+    // the user asked, 2026-11-15); null before the first frame or line. Saved before 2026-11-15: none at all.
+    const statetree::BrainShown* recordedBrain() const;
+    bool brainRecorded() const { return !text_->brains.empty(); }
+    // The Stats tab's Camera card on the frame shown (the user asked, 2026-11-15 night: "last 10s is not saving
+    // camera"): as recorded (clip.txt's camera lines: what the card showed when the screen showed its image; null
+    // before the first or in a clip saved before them) and today (the camera by the clip's mouse lines, anchored by
+    // following the ground over the clip as live, started the first time it is asked for; null until it is done or
+    // without mouse lines). `problem` says why there is none, or none known yet.
+    const CameraShown* recordedCamera(std::string& problem) const;
+    const CameraShown* todayCamera(std::string& problem);
+    // What each part of observex spent as recorded around the frame shown (clip.txt's cost lines: the Debug tile; the
+    // user asked, 2026-11-15); none in a clip saved before 2026-11-15 night.
+    std::span<const ClipCostLine> recordedCosts() const;
     const GameStats* todayStats();
     // Why today's numbers are not read (stats.txt cannot be read, or the finder did not start); empty when they are.
     std::string statsProblem();
@@ -149,15 +170,18 @@ public:
     std::string groundProblem() const;
     // Why the guesser has no depth to draw over the clip; empty while it has.
     std::string depthProblem() const;
+    // Why the guesser has no drops to draw over the clip (Recorded: the clip was saved before they were kept; Today: no
+    // drop model, it is being prepared for the GPU, or it failed); empty while it has, or will once the flag asks.
+    std::string dropsProblem() const;
 
     // Draws the frame as large as fits into the rest of the current window, with the guesser's things over it and
     // the timeline under it, or why it cannot. Handles the keys above. `showCharacters`, `showKinds`, `showUi` and
     // `showGround` as the live view's Characters, Kinds, UI and Ground flags (App's Guesses popup, keys 1 and 2 pick
     // the guesser there); the ground is followed over the clip the first time it is asked for (in the background,
     // about a second for a 10 s clip), and drawn once it has been. `showDepth` as the Depth flag: depth.bin is read the
-    // first time it is on.
+    // first time it is on. `showDrops` as the Drops flag: Today's drop finder starts the first time it is on.
     void draw(const theme::Fonts& fonts, bool showCharacters, bool showKinds, bool showUi, bool showGround,
-              bool showDepth, float dpiScale);
+              bool showDepth, bool showDrops, float dpiScale);
 
 private:
     // Why the video cannot be played (it did not open, or the player failed); empty while it can.
@@ -175,6 +199,10 @@ private:
     void loadDepth();
     // The guesser's depth of the frame shown, over `min` to `max`, if it has one.
     void drawDepth(ImDrawList* drawList, ImVec2 min, ImVec2 max, float rounding);
+    // Starts Today's drop finder on the frames shown, if it has not yet.
+    void lookForDrops();
+    // The guesser's drops on the frame shown, over `min` to `max`.
+    void drawDrops(ImDrawList* drawList, ImFont* font, ImVec2 min, ImVec2 max, float dpiScale);
 
     std::filesystem::path folder_;
     ClipInfo info_;
@@ -209,6 +237,7 @@ private:
     std::unique_ptr<Grounding> grounding_; // What follows it next (today's heuristics').
     std::unique_ptr<ClipGround> ground_;   // Following it; null once taken.
     std::vector<GroundCamera> groundCameras_;
+    std::vector<ClipCameraLine> todayCameras_; // The Camera card on each frame, by the same following.
     std::string groundError_;
     // The depth maps the app drew live (depth.bin), read the first time the flag Depth asks, in image order.
     bool recordedDepth_ = false; // clip.txt says some were drawn.
@@ -225,6 +254,20 @@ private:
     std::vector<std::uint16_t> depthMap_;
     std::vector<std::uint8_t> depthLevels_;
     std::vector<std::uint32_t> depthPixels_;
+    // Today's drops: the drop model on the frames shown (handed to it through dropImages_, at most
+    // kDropImagesPerSecond a second, a paused frame always), started the first time the flag Drops asks for Today's.
+    // Each frame's drops kept once found, so going back shows them at once.
+    static constexpr unsigned kDropImagesPerSecond = 10;
+    std::filesystem::path dropFolder_; // models/drop
+    bool dropsAsked_ = false;
+    std::unique_ptr<ImageChannel> dropImages_; // Declared so the finder goes before its channel.
+    std::unique_ptr<ClipDrops> dropFinder_;
+    std::string dropsError_;  // Why it could not start.
+    bool dropsWanted_ = false; // The flag is on for Today's (set by draw()).
+    std::uint64_t dropsSent_ = 0; // The frame handed to it last,
+    std::chrono::steady_clock::time_point nextDrops_{}; // and when the next may be.
+    std::vector<std::vector<Detection>> todayDrops_; // By frame (number - 1), of those it looked at:
+    std::vector<char> dropsLooked_;
     std::string snapError_;
     std::vector<ClipStats> recordedStats_; // clip-stats.txt's lines, in image order; empty: none.
     std::string heuristicsNotice_; // "Today's heuristics loaded again: ...", shown until noticeUntil_.

@@ -123,6 +123,35 @@ struct DepthShown {
     std::uint64_t map = 0; // 0: none.
 };
 
+// What the Show flag Drops draws from one moment on (ClipRecorder::dropsShown).
+struct DropsShown {
+    std::int64_t qpc = 0;    // When the app had it.
+    std::uint64_t image = 0; // The close look's screen image.
+    bool kill = false;
+    LootSquare square{}; // Empty: nothing drawn.
+    std::vector<Detection> drops;
+};
+
+// The brain as the State tile showed it from one screen image on (ClipRecorder::brained).
+struct Brained {
+    std::int64_t qpc = 0; // When the screen showed the image.
+    std::uint64_t image = 0;
+    statetree::BrainShown brain;
+};
+
+// The Stats tab's Camera card from one screen image on (ClipRecorder::cameraShown).
+struct Cameraed {
+    std::int64_t qpc = 0; // When the screen showed the image.
+    std::uint64_t image = 0;
+    CameraShown camera;
+};
+
+// What the parts of observex spent over a second (ClipRecorder::costed).
+struct Costed {
+    std::int64_t qpc = 0;
+    std::vector<CostPart> parts;
+};
+
 // A look on its way from the recogniser's thread, in a fixed slot so handing it over allocates nothing.
 struct QueuedLook {
     ImageStamp stamp;
@@ -161,6 +190,11 @@ struct SaveJob {
     std::vector<Note> notes;
     std::vector<Grounded> grounds;
     std::vector<DepthShown> depthShows;
+    std::vector<DropsShown> dropsShows;
+    std::vector<Brained> brains;
+    std::vector<Cameraed> cameras;
+    std::vector<MouseInput> mice;
+    std::vector<Costed> costs;
     std::vector<std::shared_ptr<const DepthRecord>> depths; // The maps depthShows draw, in image order.
     std::vector<std::uint8_t> picture; // The screen at the save, BGRA, rows width * 4 bytes apart; empty: none.
 };
@@ -295,6 +329,9 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
         }
         text += ".\n";
     }
+    if (!job.about.mouse.empty()) {
+        text += "# Mouse: " + job.about.mouse + " (the mouse lines' counts are before them).\n";
+    }
     char line[1024];
     std::snprintf(
         line, sizeof(line),
@@ -340,20 +377,57 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
             "# depth IMAGE TIME MAP: the depth map the Show flag Depth drew over screen image IMAGE, shown at TIME: the\n"
             "#   one the depth finder made of screen image MAP (in depth.bin, with what was shown of it). MAP 0: nothing\n"
             "#   drawn from TIME on. The last line at or before a frame's TIME is what was seen on it.\n"
+            "# brain IMAGE TIME ACTING TASK [STATE]: the brain as the State tile showed it from screen image IMAGE on,\n"
+            "#   shown at TIME: ACTING 1 while it was active (0: nothing green), STATE its current state's names below\n"
+            "#   Root with \" > \" between (none: Root), TASK the task of it that ran (from 0; -1: all done, or none). The\n"
+            "#   last line at or before a frame's TIME is what was seen on it.\n"
+            "# camera IMAGE TIME KNOWN YAWKNOWN YAW PITCHKNOWN PITCH BY CONEOFF TURNSOFF: the Stats tab's Camera card\n"
+            "#   (the camera by the mouse's counts) from screen image IMAGE on, shown at TIME: KNOWN 0 no card, YAW the\n"
+            "#   heading in degrees clockwise from north (the minimap's) if YAWKNOWN, else how far it turned, PITCH in\n"
+            "#   degrees (+ down) if PITCHKNOWN, BY what said it (1 the ground finder's guess, 2 the camera's turns, 3\n"
+            "#   the top limit), and how far off the minimap's cone and the turns said it was lately (degrees). The\n"
+            "#   last line at or before a frame's TIME is what was seen on it.\n"
+            "# mouse TIME DX DY HELD BUTTONS WHEEL CURSORX CURSORY: a report of the mouse then (Raw Input): moved DX\n"
+            "#   counts right and DY down (before Windows' pointer speed and acceleration), HELD the buttons down after\n"
+            "#   it (1 left, 2 right, 4 middle; the camera turns while the right is), BUTTONS what it pressed or let go\n"
+            "#   (Raw Input's button flags), WHEEL how far the wheel turned (120 a notch, + away from the user), and\n"
+            "#   where the cursor was (screen pixels).\n"
+            "# cost TIME PART EACH SLOWEST PERSECOND [STEP EACH SLOWEST PERSECOND]...: what PART (a thread of observex)\n"
+            "#   spent over about the second before TIME (the Debug tab): its run on each image it took, on average and\n"
+            "#   at the slowest (ms), and how many it took a second; then each step of that run likewise (steps that did\n"
+            "#   not run are left out). Spaces in names are _. The lines at one TIME are one look at the Debug tab, and\n"
+            "#   the parts' EACH added up is the total the top bar showed right of Show.\n"
             "# note TIME TEXT: something that happened then, e.g. a recording started.\n"
             "# log TIME WHEN  TEXT: a line of observex's log (its Log tab) made then: its local time and text.\n";
 
-    // Frames, looks, snapped images, grids, depth maps and notes in time order; at the same time a frame comes first,
-    // then the look at its image, then the snapped one, then the grid and the depth drawn over it (several in the order
-    // drawn).
+    // Frames, looks, snapped images, grids, depth maps, brains and notes in time order; at the same time a frame comes
+    // first, then the look at its image, then the snapped one, then the grid, the depth and the brain shown over it
+    // (several in the order shown).
     struct Item {
         std::int64_t qpc;
-        int order; // 0 frame, 1 look, 2 snapped, 3 note, 4 ground, 5 depth.
+        int order; // 0 frame, 1 look, 2 snapped, 3 note, 4 ground, 5 depth, 6 brain, 7 mouse, 8 costs, 9 drops,
+                   // 10 camera.
         std::size_t index;
     };
     std::vector<Item> items;
     items.reserve(job.packets.size() + job.looks.size() + job.snaps.size() + job.notes.size() + job.grounds.size() +
-                  job.depthShows.size());
+                  job.depthShows.size() + job.brains.size() + job.mice.size() + job.costs.size() +
+                  job.dropsShows.size() + job.cameras.size());
+    for (std::size_t i = 0; i < job.cameras.size(); ++i) {
+        items.push_back({job.cameras[i].qpc, 10, i});
+    }
+    for (std::size_t i = 0; i < job.dropsShows.size(); ++i) {
+        items.push_back({job.dropsShows[i].qpc, 9, i});
+    }
+    for (std::size_t i = 0; i < job.costs.size(); ++i) {
+        items.push_back({job.costs[i].qpc, 8, i});
+    }
+    for (std::size_t i = 0; i < job.mice.size(); ++i) {
+        items.push_back({job.mice[i].qpc, 7, i});
+    }
+    for (std::size_t i = 0; i < job.brains.size(); ++i) {
+        items.push_back({job.brains[i].qpc, 6, i});
+    }
     for (std::size_t i = 0; i < job.packets.size(); ++i) {
         items.push_back({job.packets[i]->qpc, 0, i});
     }
@@ -405,6 +479,25 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
             const Grounded& ground = job.grounds[item.index];
             appendGround(text, static_cast<unsigned long long>(ground.image), ms(ground.qpc),
                          static_cast<unsigned long long>(ground.followed), ground.camera);
+        } else if (item.order == 6) {
+            const Brained& brained = job.brains[item.index];
+            appendBrain(text, static_cast<unsigned long long>(brained.image), ms(brained.qpc), brained.brain);
+        } else if (item.order == 7) {
+            const MouseInput& input = job.mice[item.index];
+            appendMouse(text, {ms(input.qpc), input.dx, input.dy, input.held, input.buttons, input.wheel,
+                               input.cursorX, input.cursorY});
+        } else if (item.order == 8) {
+            const Costed& costed = job.costs[item.index];
+            for (const CostPart& part : costed.parts) {
+                appendCost(text, ms(costed.qpc), part);
+            }
+        } else if (item.order == 10) {
+            const Cameraed& shown = job.cameras[item.index];
+            appendCamera(text, static_cast<unsigned long long>(shown.image), ms(shown.qpc), shown.camera);
+        } else if (item.order == 9) {
+            const DropsShown& shown = job.dropsShows[item.index];
+            appendDrops(text, static_cast<unsigned long long>(shown.image), ms(shown.qpc), shown.kill, shown.square,
+                        shown.drops);
         } else {
             const DepthShown& shown = job.depthShows[item.index];
             appendDepth(text, static_cast<unsigned long long>(shown.image), ms(shown.qpc),
@@ -481,6 +574,11 @@ struct ClipRecorder::Impl {
     std::deque<Note> notes;
     std::deque<Grounded> grounds;
     std::deque<DepthShown> depthShows;
+    std::deque<DropsShown> dropsShows;
+    std::deque<Brained> brains;
+    std::deque<Cameraed> cameras;
+    std::deque<MouseInput> mice;
+    std::deque<Costed> costs;
     std::deque<std::shared_ptr<const DepthRecord>> depths; // In image order.
     std::uint64_t depthBytes = 0;
     std::atomic<bool> holding{false}; // It holds at least one frame.
@@ -500,6 +598,12 @@ struct ClipRecorder::Impl {
     std::vector<Note> newNotes;
     std::vector<Grounded> newGrounds;
     std::vector<DepthShown> newDepthShows;
+    std::vector<DropsShown> newDropsShows;
+    std::vector<Brained> newBrains;
+    std::vector<Cameraed> newCameras;
+    std::vector<Costed> newCosts;
+    // From the mouse watch's thread.
+    std::vector<MouseInput> newMice;
     // From the depth finder's thread.
     std::vector<std::shared_ptr<const DepthRecord>> newDepths;
     bool saveAsked = false;
@@ -773,6 +877,22 @@ void ClipRecorder::Impl::trim(std::int64_t cutoffQpc) {
     while (grounds.size() >= 2 && grounds[1].qpc <= first) {
         grounds.pop_front();
     }
+    while (brains.size() >= 2 && brains[1].qpc <= first) { // Likewise the brain as shown,
+        brains.pop_front();
+    }
+    while (cameras.size() >= 2 && cameras[1].qpc <= first) { // the camera,
+        cameras.pop_front();
+    }
+    while (dropsShows.size() >= 2 && dropsShows[1].qpc <= first) { // the drops,
+        dropsShows.pop_front();
+    }
+    while (costs.size() >= 2 && costs[1].qpc <= first) { // and the costs.
+        costs.pop_front();
+    }
+    // The mouse from as long before the first frame as the looks: the screen shows a move a little after it.
+    while (!mice.empty() && mice.front().qpc < first - warmUp) {
+        mice.pop_front();
+    }
     // Likewise the depth maps drawn, and the maps from the first of them drawn on (made from an image a little before
     // it was drawn); with none drawn, those of images from the first frame on.
     while (depthShows.size() >= 2 && depthShows[1].qpc <= first) {
@@ -846,6 +966,22 @@ void ClipRecorder::Impl::takeNotes() {
         depthShows.push_back(shown);
     }
     newDepthShows.clear();
+    for (DropsShown& shown : newDropsShows) {
+        dropsShows.push_back(std::move(shown));
+    }
+    newDropsShows.clear();
+    for (Brained& brained : newBrains) {
+        brains.push_back(std::move(brained));
+    }
+    newBrains.clear();
+    cameras.insert(cameras.end(), newCameras.begin(), newCameras.end());
+    newCameras.clear();
+    for (Costed& costed : newCosts) {
+        costs.push_back(std::move(costed));
+    }
+    newCosts.clear();
+    mice.insert(mice.end(), newMice.begin(), newMice.end());
+    newMice.clear();
     for (std::shared_ptr<const DepthRecord>& record : newDepths) {
         depthBytes += record->map.size() + record->levels.size();
         depths.push_back(std::move(record));
@@ -854,6 +990,7 @@ void ClipRecorder::Impl::takeNotes() {
 }
 
 SaveJob ClipRecorder::Impl::takeSave() {
+    takeNotes(); // What the UI handed over just before asking (its log line, the costs up to the save).
     SaveJob job;
     {
         std::scoped_lock lock(mutex);
@@ -895,6 +1032,31 @@ SaveJob ClipRecorder::Impl::takeSave() {
     for (const DepthShown& shown : depthShows) {
         if (shown.qpc <= job.savedQpc) {
             job.depthShows.push_back(shown);
+        }
+    }
+    for (const DropsShown& shown : dropsShows) {
+        if (shown.qpc <= job.savedQpc) {
+            job.dropsShows.push_back(shown);
+        }
+    }
+    for (const Brained& brained : brains) {
+        if (brained.qpc <= job.savedQpc) {
+            job.brains.push_back(brained);
+        }
+    }
+    for (const Cameraed& shown : cameras) {
+        if (shown.qpc <= job.savedQpc) {
+            job.cameras.push_back(shown);
+        }
+    }
+    for (const MouseInput& report : mice) {
+        if (report.qpc <= job.savedQpc) {
+            job.mice.push_back(report);
+        }
+    }
+    for (const Costed& costed : costs) {
+        if (costed.qpc <= job.savedQpc) {
+            job.costs.push_back(costed);
         }
     }
     // Every map up to the save, drawn or not (in image order): the clip's Today tilts the camera by them as the ground
@@ -1041,6 +1203,35 @@ void ClipRecorder::depthShown(std::int64_t shownQpc, std::uint64_t image, std::u
     impl_->newDepthShows.push_back({shownQpc, image, map});
 }
 
+void ClipRecorder::dropsShown(std::int64_t qpc, std::uint64_t image, bool kill, LootSquare square,
+                              std::span<const Detection> drops) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newDropsShows.push_back({qpc, image, kill, square, std::vector<Detection>(drops.begin(), drops.end())});
+}
+
+void ClipRecorder::brained(std::int64_t shownQpc, std::uint64_t image, statetree::BrainShown brain) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newBrains.push_back({shownQpc, image, std::move(brain)});
+}
+
+void ClipRecorder::cameraShown(std::int64_t shownQpc, std::uint64_t image, const CameraShown& camera) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newCameras.push_back({shownQpc, image, camera});
+}
+
+void ClipRecorder::costed(std::int64_t qpc, std::vector<CostPart> parts) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newCosts.push_back({qpc, std::move(parts)});
+}
+
+void ClipRecorder::moused(const MouseInput& input) {
+    if (state() == State::Failed) {
+        return; // Nothing takes them.
+    }
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newMice.push_back(input);
+}
+
 bool ClipRecorder::save(std::filesystem::path folder, ClipAbout about) {
     if (state() != State::Running || !impl_->holding.load(std::memory_order_acquire) ||
         saveState() == SaveState::Saving) {
@@ -1088,6 +1279,9 @@ void ClipRecorder::run(std::stop_token stop) {
     float windowSumMs = 0.0f;
     float windowMaxMs = 0.0f;
     std::int64_t windowStart = qpcNow();
+    // The Debug tab's steps: a run is a frame encoded.
+    enum Step { kCopy, kEncode, kTrim, kLines };
+    CostMeter meter({"Copy in", "Encoding", "Trim", "Taking lines"});
 
     try {
         while (!stop.stop_requested()) {
@@ -1102,6 +1296,7 @@ void ClipRecorder::run(std::stop_token stop) {
                 waiting = impl.reader->waitForImage(waitMs) || waiting;
                 now = qpcNow();
             }
+            meter.begin();
 
             float encodeMs = -1.0f;
             bool took = false;
@@ -1109,11 +1304,13 @@ void ClipRecorder::run(std::stop_token stop) {
                 waiting = false;
                 ImageStamp stamp;
                 if (impl.reader->copyNewImage(impl.gpu.context.Get(), impl.input.Get(), &stamp)) {
+                    meter.lap(kCopy);
                     took = true;
                     const std::int64_t shown = stamp.shownQpc != 0 ? stamp.shownQpc : now;
                     const std::int64_t qpc = encoded ? std::max(shown, lastQpc + minGap) : shown;
                     const bool key = !encoded || qpc - lastKeyQpc >= keyEvery;
                     encodeMs = impl.encode(qpc, stamp.number, key);
+                    meter.lap(kEncode);
                     encoded = true;
                     lastImage = stamp.number;
                     lastQpc = qpc;
@@ -1123,6 +1320,7 @@ void ClipRecorder::run(std::stop_token stop) {
             if (!took && encoded && now - lastQpc >= repeatEvery) {
                 // The screen has not changed for a while: the same image again, as a key frame.
                 encodeMs = impl.encode(now, lastImage, true);
+                meter.lap(kEncode);
                 lastQpc = now;
                 lastKeyQpc = now;
             }
@@ -1131,11 +1329,16 @@ void ClipRecorder::run(std::stop_token stop) {
                 windowSumMs += encodeMs;
                 windowMaxMs = std::max(windowMaxMs, encodeMs);
                 impl.trim(now - keep);
+                meter.lap(kTrim);
             }
 
             impl.takeLooks();
             impl.takeSnaps();
             impl.takeNotes();
+            meter.lap(kLines);
+            if (encodeMs >= 0.0f) {
+                meter.end();
+            }
             bool saveAsked = false;
             {
                 std::scoped_lock lock(impl.mutex);
@@ -1168,6 +1371,7 @@ void ClipRecorder::run(std::stop_token stop) {
                 stats.bytes = impl.packetBytes;
                 stats.dropped = impl.dropped.load(std::memory_order_relaxed);
                 stats.depthBytes = impl.depthBytes;
+                stats.costs = meter.take(seconds);
                 stats_.publish();
                 windowFrames = 0;
                 windowSumMs = 0.0f;

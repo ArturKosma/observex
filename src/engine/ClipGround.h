@@ -52,6 +52,9 @@ public:
     const std::string& error() const { return error_; } // Valid once state() is Failed.
     // The camera at each frame followed (its timeMs: clip.txt's), in order. Valid once state() is Done.
     const std::vector<GroundCamera>& cameras() const { return cameras_; }
+    // The Stats tab's Camera card on each frame (the camera by the clip's mouse lines, anchored by this following as
+    // live: Today's; none on a clip saved before them), in order. Valid once state() is Done.
+    const std::vector<ClipCameraLine>& mouseCameras() const { return mouseCameras_; }
 
     // How a follow went, for the bench.
     struct Stats {
@@ -68,6 +71,10 @@ public:
         double headMs = 0.0; // each taking this long on average (reading back included).
         int depths = 0;          // Depth maps given (depth.bin's whose image is a frame's),
         int depthsMeasured = 0;  // of them ones that said the pitch.
+        int turnsFitted = 0;     // Frames whose pitch by the camera's turns fitted (heuristics/TurnPitch),
+        int turnsTaken = 0;      // of them ones that said it, and frames where the turns held the pitch;
+        int turnsHeld = 0;
+        double turnMs = 0.0;     // following their points, on average.
         // Each depth map given (with `notes` on): its image's time and how it went.
         struct Depth {
             double timeMs = 0.0;
@@ -89,17 +96,21 @@ public:
             float yaw = 0.0f;      // and the camera's yaw, pitch and distance then.
             float pitch = 0.0f;
             float distance = 0.0f;
+            GroundNote note; // All of how it went (the turns' pitch among it).
         };
         std::vector<Frame> frames;
     };
 
     // The same work with `ground` (cleared first) on the calling thread, which must have COM started (Media
     // Foundation needs it), on `device` (made with video support: createGpuDevice(adapter, true)), e.g. the bench's.
-    // `layout` may be null (nothing of the interface left out). Throws if the video cannot be decoded.
+    // `layout` may be null (nothing of the interface left out). Throws if the video cannot be decoded. `mouseCameras`
+    // (may be null) gets the Camera card on each frame, after its own following anchored the mouse's camera (none
+    // without mouse lines).
     static std::vector<GroundCamera> follow(ID3D11Device* device, Grounding& ground, const std::filesystem::path& video,
                                             const ClipText& clip, const Guesses& shown, UiLayout* layout,
                                             std::stop_token stop = {}, std::atomic<float>* progress = nullptr,
-                                            Stats* stats = nullptr, bool notes = false);
+                                            Stats* stats = nullptr, bool notes = false,
+                                            std::vector<ClipCameraLine>* mouseCameras = nullptr);
 
 private:
     void run(std::stop_token stop, ComPtr<IDXGIAdapter1> gpu);
@@ -110,6 +121,7 @@ private:
     Guesses shown_;
     std::filesystem::path uiFolder_;
     std::vector<GroundCamera> cameras_;
+    std::vector<ClipCameraLine> mouseCameras_;
     std::string error_;
     std::atomic<float> progress_{0.0f};
     std::atomic<State> state_{State::Working};

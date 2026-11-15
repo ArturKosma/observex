@@ -1,28 +1,43 @@
 #pragma once
 
 #include "app/ClipView.h"
+#include "app/GeodataView.h"
 #include "app/LogView.h"
+#include "app/MouseTest.h"
+#include "app/PicoLink.h"
 #include "app/StateTreeView.h"
 #include "app/MainWindow.h"
 #include "app/Review.h"
 #include "app/ScreenImage.h"
 #include "app/ScreenPicker.h"
 #include "app/Settings.h"
+#include "app/HotKey.h"
+#include "app/ShotHook.h"
 #include "app/StatsPanel.h"
 #include "app/Theme.h"
 #include "app/Thumbnails.h"
+#include "core/Costs.h"
 #include "core/Log.h"
+#include "core/LootWatch.h"
+#include "core/MouseCamera.h"
 #include "core/Recordings.h"
+#include "core/SkillRefresh.h"
+#include "core/SkillUse.h"
+#include "core/TargetSelect.h"
+#include "core/TargetWatch.h"
 #include "core/Tiles.h"
 #include "core/XpWatch.h"
 #include "engine/BoxSnapper.h"
 #include "engine/ClipRecorder.h"
 #include "engine/DepthFinder.h"
+#include "engine/DropFinder.h"
 #include "engine/Gpu.h"
 #include "engine/HeuristicsLibrary.h"
 #include "engine/ImageChannel.h"
 #include "engine/KindUpdater.h"
 #include "engine/LiveLog.h"
+#include "engine/MouseWatch.h"
+#include "engine/PicoController.h"
 #include "engine/Pipeline.h"
 #include "engine/Recognizer.h"
 #include "engine/Recorder.h"
@@ -71,6 +86,7 @@ public:
             ImGuiKey key = ImGuiKey_None;
             ImGuiKey modifier = ImGuiMod_None; // Held with the key: ImGuiMod_Ctrl (Ctrl+Z) or ImGuiMod_Shift.
             ImGuiMouseButton button = ImGuiMouseButton_Left; // Of the click or drag.
+            bool release = true; // False (--hold): the button stays down, as in the middle of a drag.
             float wheel = 0.0f;                              // Wheel turns (away from the user: positive).
             std::string text;                                // Typed into the field with the keyboard (UTF-8).
         };
@@ -79,6 +95,7 @@ public:
         std::optional<ImVec2> mouse;
         std::filesystem::path recordingsFolder;
         float wait = 0.0f;
+        bool shot = false; // --shot: once a screen is observed, a training screenshot as Shift+Win takes.
     };
 
     explicit App(std::optional<Snapshot> snapshot = std::nullopt) : snapshot_(std::move(snapshot)) {}
@@ -111,6 +128,13 @@ private:
     void pauseRecording();
     void resumeRecording();
 
+    // Training screenshots (the user asked, 2026-11-15): Shift+Win while a screen is observed saves its next image, at
+    // full size and lossless, into the hour's handmade package (core/Recordings: handmadeFolderName), made the first
+    // time; the Log says each one saved. pollShots, every frame: the shortcut, and the Log lines.
+    void takeShot();
+    void pollShots();
+    void logSavedShots(); // A Log line for each screenshot saved since the last call.
+
     // Clips (the user asked, 2026-11-10): the clip buffer always holds the last 10 s of the observed screen; Save last
     // 10 s saves them into a new folder in the clips folder, named by the date and time.
     bool canSaveClip() const;
@@ -125,6 +149,17 @@ private:
     void noteGroundInClip();
     // Likewise the depth map the Show flag Depth drew this UI frame (depthDrawn_).
     void noteDepthInClip();
+    // Likewise the drops the Show flag Drops draws (lootShown_; whatever the flag says), after each watchLoot.
+    void noteDropsInClip();
+    // Likewise what the State tile shows green of the brain (the user asked, 2026-11-15: a clip's review showed no
+    // active state or task): a line when its current state or task changes, or it starts or stops acting, and the first
+    // after the clip buffer starts.
+    void noteBrainInClip();
+    // The Stats tab's Camera card live: the camera by the mouse's counts on the frame shown (previewMs_).
+    CameraShown liveCamera() const;
+    // Likewise the Camera card (the user asked, 2026-11-15 night: "last 10s is not saving camera"; whatever the tab
+    // shows): a line whenever it changes, and the first after the clip buffer starts.
+    void noteCameraInClip();
     // Starts the depth finder on the observed screen (it runs while the flag Depth draws its maps or the flag Ground
     // takes the grid's pitch from them); depthFinderError_ says why it could not.
     void startDepth();
@@ -154,8 +189,16 @@ private:
     void keepStats();
     // The State tile's brain takes a step on each new reading (live, or a clip's today), and stops when none is read.
     void tickBrain();
-    // What observex spends on a screen image, all its parts added up (ms); with `parts`, each part's.
+    // What observex spends on a screen image, all its parts added up (ms); with `parts`, each part's. The total of
+    // costs(), so the top bar and the Debug tile say the same.
     float imageWorkMs(std::string* parts);
+    // What each running part of observex spent over the last second (core/Costs), named, in the order the screen's
+    // images go through them, the app's own frame last; a part that took no image that second is left out.
+    std::vector<CostPart> costs();
+    // Once a second while the clip buffer runs, and just before a save: costs() into it (a clip's Debug tile).
+    void noteCostsInClip();
+    // The Debug tile: costs(), or an open clip's as recorded around the frame shown.
+    void drawDebug();
     // Into a clip being saved in `folder`: what statsHistory_ holds, as clip-stats.txt (core/GameStats).
     void writeClipStats(const std::filesystem::path& folder);
     // The Stats tile's numbers: live (the UI finder's newest), or the clip's Recorded or Today.
@@ -166,8 +209,59 @@ private:
     void syncSkills();
     // The profile's skills as the readers take them (grey).
     std::vector<SkillToFind> skillsToFind() const;
+    // Each frame, live only (the user asked, 2026-11-15: "keep observing if i change the skill's position on the
+    // skillbar"): a skill seen ready on another slot, or with another key on its slot, on kFollowReadings readings in a
+    // row, has the profile's shortcut and miniature taken from it (logged, saved; Ctrl+Z in the State tile undoes it).
+    void followSkills();
+    // The shortcut `key` typed in the Skills tab for the skill `name` (already in the profile): its slot's letters are
+    // learned from its newest picture (models/ui/keys.txt, which the readers read again), and the key stands while the
+    // skill stays on that slot.
+    void keyTyped(const std::string& name, const std::string& key);
     // The Nearby counts (core/GameStats' addNearby) of what the live view shows, into `stats`.
     void addLiveNearby(GameStats& stats);
+    // The monsters the live view shows (sure of the kind, seen now), each with its box on the screen image and on the
+    // desktop (pixels): what Select Target chooses from. Empty when not observing or nothing is found.
+    std::vector<SelectableMonster> selectableMonsters();
+    // The same as the Mouse debug sweep takes them (their boxes on the desktop).
+    std::vector<MouseTarget> visibleMonsters();
+    // Acting: the brain's tasks drive the mouse and keyboard through the Pico controller (the user asked, 2026-11-15).
+    // The Act button toggles it; it only runs while a live screen is observed.
+    void toggleActing();
+    void stopActing();
+    // Each UI frame while acting: runs the current state's task that is due (they run one after another, each until
+    // it is done: core/StateTree's TaskKind), and tells the state tree when it is done; and the Parallel tasks of the
+    // active states alongside (runParallelTasks).
+    void actuateBrain();
+    // The Parallel tasks of the active states (statetree::Runner::parallelTasks), each started when its state becomes
+    // active and dropped when it is left (the user asked, 2026-11-15).
+    void runParallelTasks(std::chrono::steady_clock::time_point now);
+    // The Skills tab's Refresh (the user asked, 2026-11-15: the mouse over each skill on the hotbar, its MP cost read
+    // off its tooltip; core/SkillRefresh): its button starts or stops it (Win+Esc stops it too); it only runs while a
+    // live screen is observed and the brain is not active (both drive the controller). driveRefresh steps it each UI
+    // frame and writes the costs read into the profile.
+    void toggleRefresh();
+    void stopRefresh(const std::string& why);
+    void driveRefresh();
+    // The profile's skills as the newest live reading sees them on the hotbar (on the desktop and the screen image).
+    std::vector<RefreshSkill> refreshSkills() const;
+    // The name plate the UI finder is to read for Select Target (its monster; id 0: none). Select Target's goes first;
+    // without one, the target watch's (watchTarget). Handed over when it changes (sendLook).
+    void lookAt(const PlateLook& look);
+    void sendLook();
+    // On each new live reading (keepStats): the target watch (core/TargetWatch) learns which box the target is from its
+    // name plate, and when its HP bar reads empty logs its death and marks that box dead in the recogniser (the user
+    // asked, 2026-11-15: "once we discover the death from stats we can shift the weights of the box towards dead. i'd
+    // like to see the effect on my screen that im observing").
+    void watchTarget(const GameStats& stats);
+    // The boxes drawFound shows (the snapper's while it runs, else the recogniser's: one tracker, the same ids), the own
+    // character's too, by id; none while the recogniser is not running.
+    std::vector<WatchedThing> thingsShown();
+    // Each UI frame while observing: the loot watch (core/LootWatch) picks where the drop finder looks (round the dead
+    // target's box, then round its drops), from what is on the screen and the drop finder's newest look, and its lines
+    // go to the Log.
+    void watchLoot();
+    // The drops found and where they were looked for (the Show flag Drops), over the observed screen at `min` to `max`.
+    void drawDrops(ImDrawList* drawList, ImVec2 min, ImVec2 max);
     // An open clip's reading on the frame shown (`today`: read again today, else as recorded) with the Nearby counts
     // of what its guesser shows there; null if none.
     const GameStats* clipStatsShown(bool today);
@@ -190,9 +284,9 @@ private:
     void drawTabs(float height);
     // What the Live tile shows: the review, the clip, the observed screen or the screens to choose from.
     void drawLive();
-    // The lines between the tiles, which drag to share the view differently; `log` is the Log tile (not shown: none),
-    // a column right of the others, which start at `left`.
-    void drawTileLines(const Tiles& tiles, const TileRect& log, float left);
+    // The lines between the tiles, which drag to share the view differently; `log` is the Log tile and `debug` the
+    // Debug tile (not shown: none), columns right of the others, which start at `left`.
+    void drawTileLines(const Tiles& tiles, const TileRect& log, const TileRect& debug, float left);
     void drawTopBar(float height);
     void drawSettings();
     void drawRecordChooser();
@@ -209,7 +303,6 @@ private:
     void drawReviewSteps(float height, float right);
     void drawClipSteps(float height, float right);
     void drawReviewChooser();
-    void drawRecordings();
     void drawClips();
     void drawRemoveClip();
     void drawCategoryChooser();
@@ -245,6 +338,9 @@ private:
         std::string when;        // When it was saved: "Today, 18:22".
         std::uint64_t bytes = 0; // Its files together (the video most).
     };
+    // A list of recordings (`rows`) in the popup `popup`, under `title`: the training recordings, or the handmade
+    // packages (`handmade`: no recording's length, "screenshots"). Picking one asks what to look for in it.
+    void drawRecordings(const char* popup, const char* title, const std::vector<RecordingRow>& rows, bool handmade);
 
     float dpiScale_ = 1.0f;
     ComPtr<IDXGIAdapter1> gpuAdapter_; // The GPU of the primary monitor; observex works on its screens.
@@ -276,16 +372,45 @@ private:
     // profile's text when they were last compared (syncSkills).
     std::vector<statetree::Skill> skillsGiven_;
     std::string profileSeen_;
+    // followSkills: per skill (by name), the slot and key it was last seen ready with, on how many readings in a row,
+    // and its picture then; the slot the profile last took it at (x1 0: not yet since observex started); and the slot
+    // a key was typed for it at (x1 0: none), where what is read does not change it.
+    struct SkillFollow {
+        std::string name;
+        StatsArea at{};
+        std::string key;
+        int same = 0;
+        int side = 0;
+        std::vector<std::uint8_t> bgra;
+        StatsArea taken{};
+        StatsArea held{};
+    };
+    std::vector<SkillFollow> skillFollow_;
+    std::uint64_t skillPicturesImage_ = 0; // The UI finder's image they were last followed on.
     GameStats liveStats_; // The UI finder's newest reading, with the Nearby counts (keepStats); image 0: none.
     GameStats clipStats_; // An open clip's on the frame shown, likewise (clipStatsShown).
     // How the tiles share the view (core/Tiles; the lines between them drag): Live's share of the width beside the
     // others, and Stats' share of the height above State.
     float liveSplit_ = 0.6f; // Live's share; State and Stats 2/5 (the user asked, 2026-11-13).
     float statsSplit_ = 0.5f;
-    float logSplit_ = 0.8f; // The share of the width left of the Log tile (a column at the right).
+    float logSplit_ = 0.8f; // The share of the width left of the Log tile (a column at the right),
+    float debugSplit_ = 0.66f; // and of the Debug tile (a column right of it; wider, for its table).
+    // The app's own frame (the UI thread), step by step for the Debug tab, in the order the steps run; summed up once a
+    // second into frameCosts_. Presenting is not timed: it waits for the screen.
+    struct FrameStep {
+        enum : int { Housekeeping, Skills, Stats, Geodata, Loot, Brain, Steering, Preview, Clip, NewFrame, Acting,
+                     Drawing, Rendering };
+    };
+    CostMeter frameMeter_{"Housekeeping", "Skills followed", "Stats kept", "Geodata", "Loot watch", "Brain tick",
+                          "Finders steered", "Preview copy", "Clip shown", "New frame", "Brain acting", "Drawing",
+                          "Rendering"};
+    CostPart frameCosts_;
+    std::chrono::steady_clock::time_point frameCostsSince_ = std::chrono::steady_clock::now();
     // What observex did (core/Log), kept in observex.log next to observex.exe (in snapshot mode next to the PNG); made
     // first in init(), gone after shutdown().
     std::unique_ptr<LogBook> log_;
+    std::filesystem::path crashLogFile_; // Where a crash is told (engine/CrashLog): the log,
+    std::filesystem::path crashFolder_;  // and its dump.
     LogView logView_;
     LogView clipLogView_;          // An open clip's lines,
     std::uint64_t clipsOpened_ = 0; // which change with each clip opened.
@@ -326,9 +451,17 @@ private:
     std::uint64_t depthUploaded_ = 0;         // which one (DepthSeen::image).
     std::uint64_t depthDrawn_ = 0;            // The map drawn over the preview this UI frame (0: none),
     std::uint64_t depthNoted_ = 0;            // and the last one the clip buffer was given.
+    // Where the character is in the world (the minimap followed, /loc read from the chat) and the Show flag Geodata's
+    // grid round it. Made at start; follows every stats reading, flag on or off.
+    std::unique_ptr<GeodataView> geodata_;
     // Keeps the last 10 s of the observed screen and what the recogniser saw, to save as a clip on request. Shared
     // with the recogniser, which hands it every look.
     std::shared_ptr<ClipRecorder> clipRecorder_;
+    // Hands the clip buffer every report of the mouse (its counts say how far the camera turned while the right button
+    // was held; the user asked, 2026-11-15), and the camera by them (core/MouseCamera: the ground finder follows it,
+    // the grid and Stats' card Camera show it on every frame). Made with the observing.
+    std::unique_ptr<MouseWatch> mouseWatch_;
+    std::shared_ptr<SharedMouseCamera> mouseCamera_;
     std::string clipError_;                             // Why it could not start.
     bool clipSaving_ = false;                           // Asked it to save; waiting to hear how it went.
     std::chrono::steady_clock::time_point clipSavedAt_; // The last save that worked: the button says so for a while.
@@ -351,14 +484,87 @@ private:
     std::unique_ptr<Refresher> refresher_;
     std::unique_ptr<KindUpdater> kindUpdater_; // After a review closes, until it is done.
     std::vector<RecordingRow> recordings_;     // The Review button's list, read when it opens.
+    std::vector<RecordingRow> handmade_;       // Likewise the handmade packages (RecordKind::Handmade).
     std::unique_ptr<Thumbnails> thumbnails_;   // The list's pictures, kept between openings.
     const char* openList_ = nullptr;           // Picked in the review chooser: the list popup to open next.
     bool openCategory_ = false;                // A recording was picked in the list: ask for the category next.
     std::filesystem::path reviewFolder_;       // Picked for review, waiting for the category.
-    std::string reviewWhen_;                   // When it was recorded, for the category chooser.
-    std::size_t reviewFolderImages_ = 0;
+    std::string reviewAbout_; // What was picked, for the category chooser: "Recorded Today, 12:56 · 110 images".
+    // The hour's handmade package the training screenshots go into while a screen is observed (none until the first).
+    struct ShotPackage {
+        std::filesystem::path folder;
+        std::string title;   // "15/11/2026 - 15:00".
+        unsigned first = 1;  // The number of the first image its recorder saves.
+        unsigned logged = 0; // Of its recorder's saved images, those already in the Log.
+    };
+    std::unique_ptr<ShotHook> shotHook_;     // While a screen is observed (not in snapshot mode): Shift+Win.
+    std::optional<ShotPackage> shotPackage_;
+    std::unique_ptr<Recorder> shotRecorder_; // Saves the screenshots into shotPackage_ (reads the pipeline's shots()).
+    bool snapshotShot_ = false;              // Snapshot mode's --shot taken.
     bool closeReview_ = false; // Close was clicked; closed between frames.
     std::string reviewError_;  // Why the last review could not start.
+    PicoLink picoLink_;        // Whether the reactor's Raspberry Pi Pico is plugged in (the top bar's green/red light).
+    // TEMPORARY (the user asked, 2026-11-15; to be removed with app/MouseTest.* and engine/PicoController.*): the
+    // serial link to the Pico and the "Mouse debug" sweep that drives the real cursor over the visible monsters.
+    PicoController controller_;    // Declared before mouseTest_, so the sweep is torn down before the link it uses.
+    MouseTest mouseTest_;
+    std::string mouseTestStatus_;  // What the Settings button last reported (why it could not start, or that it did).
+    // Acting (the brain drives the mouse/keyboard through the controller): off by default, toggled by the Act button.
+    bool brainActs_ = false;
+    // The brain the clip buffer was given last (noteBrainInClip): its current state shown (0: none, inactive) and its
+    // task; none yet since the buffer started.
+    bool brainNoted_ = false;
+    int brainNotedState_ = 0;
+    int brainNotedTask_ = -1;
+    // The Camera card the clip buffer was given last (noteCameraInClip); none yet since the buffer started.
+    bool cameraNoted_ = false;
+    CameraShown notedCamera_;
+    // The task that runs: the state tree's count of task starts when it started (another: a task starts afresh),
+    // whether its press was sent (Click Mouse: done once it is let go), and Select Target's and Use Skill's own (Use
+    // Skill on the newest live reading's variables, made once a reading).
+    std::uint64_t actingTaskStart_ = ~std::uint64_t{0};
+    bool taskPressed_ = false;
+    // The Parallel tasks running: where each is, its kind (another kind there now: it starts afresh), and when Debug
+    // Print writes next. Emptied when the brain stops or starts.
+    struct ParallelRun {
+        statetree::TaskAt at;
+        statetree::TaskKind kind = statetree::TaskKind::DebugPrint;
+        std::chrono::steady_clock::time_point next;
+    };
+    std::vector<ParallelRun> parallelRuns_;
+    TargetSelector selector_;
+    SkillUser skillUser_;
+    statetree::Variables skillVariables_;
+    std::uint64_t skillVariablesImage_ = 0;
+    // Refresh, while it runs (skillRefresher_.running()), and its OCR read asked of the UI finder (0: none; answered
+    // once UiFinder::text().request is it).
+    SkillRefresher skillRefresher_;
+    std::uint64_t refreshAsked_ = 0;
+    PlateLook lookAsked_{}; // What the UI finder was last asked to look at (sendLook's pick).
+    PlateLook brainLook_{}; // Select Target's look (lookAt), first.
+    TargetWatch targetWatch_;
+    PlateLook watchLook_{}; // The target watch's look, when Select Target asks for none.
+    // Drops (the user asked, 2026-11-15): the drop model (models/drop) sweeping the screen, and looking closely at the
+    // spot the loot watch picks (round a kill, or drops found). Made when observing starts, if there is a drop model.
+    std::unique_ptr<DropFinder> dropFinder_;
+    std::string dropFinderError_; // Why it could not start (no model yet).
+    LootWatch lootWatch_;
+    LootWatch::Output loot_;      // Where it looks closely now and what it found (watchLoot).
+    std::vector<Detection> lootShown_; // The drops of the spot's newest close look, off the game's interface.
+    std::uint64_t lootImage_ = 0;      // The screen image of that look.
+    bool dropsNoted_ = false;          // What noteDropsInClip handed the clip buffer last: the spot drawn round
+    LootSquare dropsNotedSquare_{};    // (empty: nothing drawn), the close look's image and whether a kill's.
+    std::uint64_t dropsNotedImage_ = 0;
+    bool dropsNotedKill_ = false;
+    std::uint32_t deadNow_ = 0;   // A box the target watch marked dead since the last watchLoot,
+    std::string deadName_;        // and the target's name then.
+    // A Click Mouse / Use Skill press is held for a short while, not tapped, so the game registers it. The held mouse
+    // button rides along with Select Target's moves (so it can drag), and both are released after their time.
+    std::uint8_t heldButtons_ = 0;
+    std::chrono::steady_clock::time_point buttonReleaseAt_{};
+    bool keyHeld_ = false;
+    std::chrono::steady_clock::time_point keyReleaseAt_{};
+    std::unique_ptr<HotKey> brainKey_; // Win+Esc, the Brain's start/stop shortcut, while a screen is observed.
     bool showStats_ = false;   // Toggled with F3.
     bool imguiReady_ = false;
     std::optional<Snapshot> snapshot_;

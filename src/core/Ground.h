@@ -28,8 +28,10 @@ namespace observex {
 // (74 x 46 degrees; 1600 and 1800 fit worse), there with the pitch at 18-22 degrees and the distance steady; fitted
 // jointly with the own character's box over 201 moving frame pairs of that clip and 2026-11-12_11-34-03 (a tilt from
 // 50 to 78 degrees and back): the point circled at 0.856 of the character's height, its box's bottom its feet 0.167
-// of its height nearer the camera, its top its head 0.02 farther.
-inline constexpr float kGroundFocal = 1700.0f;    // The lens, in pixels, on a 2560-pixel-wide screen.
+// of its height nearer the camera, its top its head 0.02 farther. The mouse's counts pinned the lens closer (the night
+// of 2026-11-15, core/MouseCamera: a count turns 0.19775 degrees by the minimap's cone and by a 360 lined up from the
+// images alone; the points of 1291 turning frames moved 1739.8 pixels a radian, of 949 tilting ones 1743.9): 1741.
+inline constexpr float kGroundFocal = 1741.0f;    // The lens, in pixels, on a 2560-pixel-wide screen.
 inline constexpr float kGroundTarget = 0.856f;    // The point the camera circles, of the own character's height.
 inline constexpr float kOwnFeetReach = 0.167f;    // Its box's bottom: its feet this far nearer the camera,
 inline constexpr float kOwnHeadReach = 0.02f;     // its top: its head this far farther (own heights).
@@ -39,6 +41,8 @@ inline constexpr float kGroundStartPitch = 0.35f; // Radians (20 degrees), until
 struct GroundCamera {
     bool known = false;
     bool pitchMeasured = false; // The pitch came from the ground's motion (not kGroundStartPitch yet).
+    bool pitchByTurns = false;  // It is the one the camera's turns said (heuristics/TurnPitch): the ground's slope
+                                // does not lean it.
     float pitch = 0.0f;         // How far it looks down, in radians: 0 level, pi/2 straight down, below 0 up.
     float distance = 0.0f;      // From the point it circles, in own-character heights.
     float focal = 0.0f;         // Its lens, in pixels.
@@ -229,6 +233,29 @@ public:
             camera_.pitch += by;
         }
     }
+    // The camera's yaw is `yaw` (radians), turning at `yawSpeed` radians a millisecond, and, if `pitched`, its pitch
+    // `pitch` tilting at `pitchSpeed`: the mouse's counts said them (core/MouseCamera). Not pitched, the pitch stays
+    // the fit's (and whether it was measured).
+    void rotated(float yaw, float yawSpeed, bool pitched, float pitch, float pitchSpeed) {
+        if (camera_.known) {
+            camera_.yaw = yaw;
+            camera_.yawSpeed = yawSpeed;
+            if (pitched) {
+                camera_.pitch = pitch;
+                camera_.pitchSpeed = pitchSpeed;
+                camera_.pitchMeasured = true;
+            }
+        }
+    }
+    // The pitch is the one the camera's turns say (heuristics/TurnPitch, `on`), tilting `pitchSpeed` radians a
+    // millisecond lately: GroundCamera::pitchByTurns; else not.
+    void byTurns(bool on, float pitchSpeed) {
+        camera_.pitchByTurns = on && camera_.known;
+        if (camera_.pitchByTurns) {
+            camera_.pitchMeasured = true;
+            camera_.pitchSpeed = pitchSpeed;
+        }
+    }
     // Where the camera looks on the image last given, as the minimap shows it (radians clockwise from north,
     // heuristics/MinimapCone): its yaw goes there, so it never drifts. At once the first time (the ground's map then
     // has north up) and when the ground did not say how it turned (`moved` false: in the fastest turns nothing
@@ -283,6 +310,16 @@ struct GroundHints {
     int avoidCount = 0;
     const GreyArea* windows = nullptr; // The interface's pieces (core/UiLayout), among them the minimap.
     int windowCount = 0;
+    // The camera on the image by the mouse's counts (core/MouseCamera, since the night of 2026-11-15): how far they
+    // turned it since they began (radians, unwrapped), its yaw if the minimap's cone anchored them (radians
+    // clockwise from north) and its pitch if something said it (radians, + down). They are the camera's: the
+    // follower turns and tilts it so, and only fits how it went and how far it is.
+    bool mouseKnown = false;
+    bool mouseYawKnown = false;
+    bool mousePitchKnown = false;
+    double mouseTurned = 0.0;
+    float mouseYaw = 0.0f;
+    float mousePitch = 0.0f;
 };
 
 // How following went on the last image (F3's numbers, the bench's notes). Plain data, as GroundHints.
@@ -299,6 +336,23 @@ struct GroundNote {
     float searchMatch = 0.0f; // how well the patches matched there.
     bool headed = false;      // The minimap's cone was seen (heuristics/MinimapCone): where the camera looks (radians
     float heading = 0.0f;     // clockwise from north).
+    // The pitch by the camera's turns (heuristics/TurnPitch): points followed from the image before, of them agreeing
+    // with the two cameras fitted to them (if they fitted), how far those were off (full-size pixels), how far the
+    // camera turned and the pitch they say on this image and how sure it is (radians); whether it was taken, and
+    // whether the turns hold the pitch now (the camera's pitch is theirs), how sure of it. And how far the points say
+    // it tilted (radians, + down; since the evening of 2026-11-15, for the mouse's counts: bench --ground).
+    int turnPoints = 0;
+    int turnAgreeing = 0;
+    bool turnFitted = false;
+    bool turnTaken = false;
+    bool turnHolds = false;
+    float turnMiss = 0.0f;
+    float turnTurn = 0.0f;
+    float turnTilt = 0.0f;
+    float turnPitch = 0.0f;
+    float turnSpread = 0.0f;
+    float turnHoldSpread = 0.0f;
+    float turnMs = 0.0f; // How long it took (milliseconds).
 };
 
 // How a depth map went (Grounding::depth; F3's numbers, the bench's notes). Plain data, as GroundHints.

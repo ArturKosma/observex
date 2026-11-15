@@ -1,8 +1,10 @@
 #pragma once
 
+#include "core/Costs.h"
 #include "core/Detection.h"
 #include "core/Ground.h"
 #include "core/Heuristics.h"
+#include "core/MouseCamera.h"
 #include "core/TripleBuffer.h"
 #include "core/UiLayout.h"
 #include "engine/Gpu.h"
@@ -38,6 +40,10 @@ struct GroundFinderStats {
     float depthMeasured = 0.0f;   // of them the share that said the pitch,
     float depthOffDegrees = 0.0f; // how far the camera's was from it on average,
     float depthAvgMs = 0.0f;      // and how long each took.
+    float turnsHeld = 0.0f;       // Of the images, the share whose pitch the camera's turns held (heuristics/TurnPitch),
+    float turnsTaken = 0.0f;      // and whose turn said it,
+    float turnsAvgMs = 0.0f;      // following their points this long on average (part of fitting).
+    CostPart costs;               // Its work on every image it takes (followed or turned), step by step (Debug tab).
 };
 
 // The camera as the ground finder knows it on the newest image it took.
@@ -78,7 +84,10 @@ public:
 
     // Starts on the images of `channel`, with a device of its own on `gpu` (the channel's), following with
     // `heuristics`' (polled by the app). Returns at once. Throws on failure.
-    GroundFinder(IDXGIAdapter1* gpu, ImageChannel& channel, std::shared_ptr<const HeuristicsSource> heuristics);
+    // `mouse` (may be null): the camera by the mouse's counts, which turns and tilts the camera followed (GroundHints'
+    // mouse) and which what the follower sees anchors (anchorMouse).
+    GroundFinder(IDXGIAdapter1* gpu, ImageChannel& channel, std::shared_ptr<const HeuristicsSource> heuristics,
+                 std::shared_ptr<SharedMouseCamera> mouse = nullptr);
     // Stops. Destroy it before the channel.
     ~GroundFinder();
 
@@ -120,6 +129,7 @@ private:
     GpuDevice gpu_;
     std::unique_ptr<ImageReader> reader_;
     std::shared_ptr<const HeuristicsSource> heuristics_;
+    std::shared_ptr<SharedMouseCamera> mouse_;
     unsigned width_ = 0;
     unsigned height_ = 0;
     TripleBuffer<Hint> hints_;

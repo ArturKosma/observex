@@ -28,7 +28,7 @@ from pathlib import Path
 import torch
 
 from marks import model_folder
-from train import load_live, utf8_output
+from train import live_resolution, load_live, utf8_output
 
 
 class WithFeatures(torch.nn.Module):
@@ -89,7 +89,7 @@ def save_kind_head(model, info_file: Path) -> None:
 def export_onnx(category: str) -> Path:
     """Writes models/<category>/model.onnx from model.pth, and its kind head into model.json. Returns the path."""
     folder = model_folder(category)
-    model = load_live(folder / "model.pth")
+    model = load_live(folder / "model.pth", live_resolution(category))
     target = folder / "model.onnx"
     with tempfile.TemporaryDirectory(dir=folder) as work:
         os.replace(write_onnx(model, Path(work)), target)  # Whole, or not at all: observex may read it at any time.

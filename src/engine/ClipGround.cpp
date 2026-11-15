@@ -1,5 +1,6 @@
 #include "engine/ClipGround.h"
 
+#include "core/MouseCamera.h"
 #include "engine/ClipPlayer.h"
 #include "engine/DepthStore.h"
 #include "engine/GreyMaker.h"
@@ -33,7 +34,8 @@ ClipGround::~ClipGround() {
 std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& follower,
                                              const std::filesystem::path& video, const ClipText& clip,
                                              const Guesses& shown, UiLayout* layout, std::stop_token stop,
-                                             std::atomic<float>* progress, Stats* stats, bool notes) {
+                                             std::atomic<float>* progress, Stats* stats, bool notes,
+                                             std::vector<ClipCameraLine>* mouseCameras) {
     follower.clear();
     ClipReader reader(device, video);
     GreyMaker greys(device, reader.width(), reader.height(), 1);
@@ -100,6 +102,23 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
     };
 
 
+    // The camera by the mouse's counts (clips since the evening of 2026-11-15), given the reports before each frame as
+    // live; the game's window filled the screen recorded (its middle the clip's).
+    MouseCamera::Settings mouseSettings;
+    mouseSettings.keepMs = 1e12;
+    MouseCamera mouse(mouseSettings);
+    mouse.middle(width / 2, height / 2);
+    std::size_t reported = 0;
+    if (mouseCameras != nullptr) {
+        mouseCameras->clear();
+    }
+    // The Camera card on the frame of `image` shown at `timeMs`, as live (core/MouseCamera's cameraOf).
+    const auto noteCamera = [&](unsigned long long image, double timeMs) {
+        if (mouseCameras != nullptr && !clip.mice.empty()) {
+            mouseCameras->push_back({image, timeMs, cameraOf(mouse.at(timeMs), mouse.yawOff(), mouse.pitchOff())});
+        }
+    };
+
     double nextUiMs = -1e300;
     const std::size_t frames = reader.times().size();
     ClipReader::Frame frame;
@@ -112,9 +131,14 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
         if (index < clip.frameImage.size()) {
             giveDepths(clip.frameImage[index]);
         }
+        for (; reported < clip.mice.size() && clip.mice[reported].timeMs <= timeMs; ++reported) {
+            mouse.add(clip.mice[reported]);
+        }
+        const MouseCamera::View byCounts = mouse.at(timeMs);
+        const unsigned long long frameImage = index < clip.frameImage.size() ? clip.frameImage[index] : 0;
         bool due = false;
         if (!followed.empty()) {
-            const unsigned long long image = index < clip.frameImage.size() ? clip.frameImage[index] : 0;
+            const unsigned long long image = frameImage;
             while (nextFollowed < followed.size() && followed[nextFollowed] <= image) {
                 ++nextFollowed;
                 due = true;
@@ -129,6 +153,7 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
             GroundHints hints;
             hints.windows = windows.data();
             hints.windowCount = static_cast<int>(windows.size());
+            mouseHints(byCounts, hints);
             const int count = follower.headAreas(timeMs, hints, full.data(), static_cast<int>(full.size()));
             context->CopySubresourceRegion(greys.input(), 0, 0, 0, 0, frame.texture, frame.subresource, nullptr);
             greys.make(context.Get(), frame.number);
@@ -146,6 +171,7 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
             }
             counted.headMs +=
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - headStart).count();
+            noteCamera(frameImage, timeMs);
             continue;
         }
         const auto start = std::chrono::steady_clock::now();
@@ -194,6 +220,7 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
         hints.avoidCount = static_cast<int>(avoid.size());
         hints.windows = windows.data();
         hints.windowCount = static_cast<int>(windows.size());
+        mouseHints(byCounts, hints);
 
         follower.begin(timeMs, width, height, hints);
         if (!findUi) {
@@ -210,11 +237,18 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
         cameras.push_back(camera);
 
         const GroundNote note = follower.note();
+        anchorMouse(mouse, timeMs, note, camera);
+        noteCamera(frameImage, timeMs);
         if (notes) {
             counted.frames.push_back({timeMs, note.learned, note.found, note.moved, note.motion, note.agreeing,
                                       note.searchTurn, note.searchMatch, note.headed ? note.heading : -1.0f,
                                       camera.yaw, camera.pitch, camera.distance});
+            counted.frames.back().note = note;
         }
+        counted.turnsFitted += note.turnFitted ? 1 : 0;
+        counted.turnsTaken += note.turnTaken ? 1 : 0;
+        counted.turnsHeld += note.turnHolds ? 1 : 0;
+        counted.turnMs += note.turnMs;
         ++counted.images;
         counted.headed += note.headed ? 1 : 0;
         if (note.followed) {
@@ -233,6 +267,7 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
         if (counted.images > 0) {
             stats->matches /= counted.images;
             stats->workMs /= counted.images;
+            stats->turnMs /= counted.images;
         }
         if (counted.heads > 0) {
             stats->headMs /= counted.heads;
@@ -254,7 +289,8 @@ void ClipGround::run(std::stop_token stop, ComPtr<IDXGIAdapter1> gpu) {
         UiLayout layout;
         layout.load(uiFolder_, nullptr); // Only framed windows if it cannot be read, as live.
         const GpuDevice device = createGpuDevice(gpu.Get(), true);
-        cameras_ = follow(device.device.Get(), *ground_, video_, *clip_, shown_, &layout, stop, &progress_);
+        cameras_ = follow(device.device.Get(), *ground_, video_, *clip_, shown_, &layout, stop, &progress_, nullptr,
+                          false, &mouseCameras_);
         state_.store(State::Done, std::memory_order_release);
     } catch (const std::exception& e) {
         error_ = e.what();

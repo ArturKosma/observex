@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <exception>
@@ -37,8 +38,8 @@ std::string nameProblem(const std::string& name) {
     if (name.empty()) {
         return {};
     }
-    if (name.find('_') != std::string::npos) {
-        return "A skill's name has no _ in it.";
+    if (name.find('_') != std::string::npos || name.find('|') != std::string::npos) {
+        return "A skill's name has no _ or | in it."; // The profile's lists of skills are joined by |.
     }
     if (name.size() > kMaxName) {
         return "At most 31 letters.";
@@ -109,12 +110,29 @@ bool SkillIcons::draw(ImDrawList* drawList, std::string_view name, ImVec2 min, I
 }
 
 void SkillsView::draw(const theme::Fonts& fonts, ID3D11Device* device, StateTreeView& profile,
-                      const SkillIcons& icons, const MiniatureSource& source, float dpi) {
-    // + Add Skill at the top left, and whose skills these are.
+                      const std::filesystem::path& folder, const SkillIcons& icons, const MiniatureSource& source,
+                      const KeyTyped& keyTyped, const RefreshButton& refresh, float dpi) {
+    // The profile at the top left as in the State tile, + Add Skill and Refresh after it (under it in a narrow tile).
+    const float left = ImGui::GetCursorScreenPos().x;
+    const float rowTop = ImGui::GetCursorScreenPos().y;
+    profile.drawProfileBar(fonts, folder);
     BarButton add;
     add.icon = Icon::Plus;
     add.text = "Add Skill";
     add.open = ImGui::IsPopupOpen(kAddPopup);
+    BarButton again;
+    again.icon = Icon::Refresh;
+    again.text = "Refresh";
+    again.open = refresh.running; // Highlighted while it runs, how far along its bottom; a click stops it.
+    again.progress = refresh.running ? refresh.progress : -1.0f;
+    const float gap = std::round(12.0f * dpi);
+    const float buttonGap = std::round(8.0f * dpi);
+    ImGui::SameLine(0.0f, gap);
+    if (add.width(fonts) + buttonGap + again.width(fonts) <= ImGui::GetContentRegionAvail().x) {
+        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, rowTop));
+    } else {
+        ImGui::SetCursorScreenPos(ImVec2(left, rowTop + std::round(BarButton::kHeight * dpi) + std::round(8.0f * dpi)));
+    }
     if (add.draw("##add-skill-button", fonts)) {
         asked_ = source.ask ? source.ask() : 0;
         shown_.reset();
@@ -126,37 +144,66 @@ void SkillsView::draw(const theme::Fonts& fonts, ID3D11Device* device, StateTree
         ImGui::OpenPopup(kAddPopup);
     }
     const ImVec2 popupAt(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + std::round(6.0f * dpi));
-    const float barTop = ImGui::GetItemRectMin().y;
     const float barBottom = ImGui::GetItemRectMax().y;
-    ImGui::SameLine(0.0f, std::round(12.0f * dpi));
-    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x,
-                                     std::round((barTop + barBottom - ImGui::GetTextLineHeight()) * 0.5f)));
-    ImGui::TextDisabled("In the profile %s", profile.name().c_str());
+    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetItemRectMax().x + buttonGap, ImGui::GetItemRectMin().y)); // Right of it.
+    if (again.draw("##refresh-skills", fonts) && refresh.click) {
+        refresh.click();
+    }
     ImGui::SetNextWindowPos(popupAt);
     if (ImGui::BeginPopup(kAddPopup)) {
         drawAddSkill(fonts, device, profile, source, dpi);
         ImGui::EndPopup();
     }
-    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, barBottom + std::round(12.0f * dpi)));
+    ImGui::SetCursorScreenPos(ImVec2(left, barBottom + std::round(8.0f * dpi)));
+    if (!profile.fileError().empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::kRecord);
+        ImGui::TextWrapped("%s", profile.fileError().c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::SetCursorScreenPos(ImVec2(left, ImGui::GetCursorScreenPos().y + std::round(4.0f * dpi)));
 
     std::vector<statetree::Skill>& skills = profile.skills();
     if (skills.empty()) {
         ImGui::TextDisabled("No skills yet: Add Skill picks one from the screen.");
         return;
     }
-    // Each a card the tile's width: its icon, its name, Has Cooldown, X.
+    // Each a card the tile's width: its icon, its name, MP Cost, Shortcut, Has Cooldown, X.
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const float width = ImGui::GetContentRegionAvail().x;
     const float pad = std::round(8.0f * dpi);
     const float iconSide = std::round(36.0f * dpi);
     const float rounding = std::round(8.0f * dpi);
+    const float frame = ImGui::GetFrameHeight();
+    const float inner = ImGui::GetStyle().ItemInnerSpacing.x;
+    const char* label = "Has Cooldown";
+    const char* caption = "Shortcut";
+    const char* mpCaption = "MP Cost";
+    const float checkWidth = frame + inner + ImGui::CalcTextSize(label).x;
+    const float keyWidth = std::round(64.0f * dpi);
+    const float mpWidth = std::round(52.0f * dpi);
+    // From the card's right edge to MP Cost's caption: X, Has Cooldown, Shortcut and MP Cost.
+    const float controlsWidth = pad + frame + pad + checkWidth + pad * 2.0f + keyWidth + inner +
+                                ImGui::CalcTextSize(caption).x + pad * 2.0f + mpWidth + inner +
+                                ImGui::CalcTextSize(mpCaption).x;
+    ImGui::PushFont(fonts.medium, 0.0f);
+    float widestName = 0.0f;
+    for (const statetree::Skill& skill : skills) {
+        widestName = std::max(widestName, ImGui::CalcTextSize(skill.name.c_str()).x);
+    }
+    ImGui::PopFont();
+    // Every name whole left of the fields, or, in a tile too narrow for that, the fields on a line of their own under
+    // the names (MP Cost had squeezed the names out of a narrow tile).
+    const float lineGap = std::round(6.0f * dpi);
+    const bool oneLine = pad + iconSide + pad * 1.5f + widestName + pad * 2.0f + controlsWidth <= width;
+    const float cardHeight = (oneLine ? iconSide : std::max(iconSide, frame * 2.0f + lineGap)) + pad * 2.0f;
     int removed = -1;
     bool changed = false;
+    std::vector<std::pair<std::string, std::string>> typedKeys; // Skill, key: learned once saved.
     for (std::size_t i = 0; i < skills.size(); ++i) {
         statetree::Skill& skill = skills[i];
         ImGui::PushID(static_cast<int>(i));
         const ImVec2 min = ImGui::GetCursorScreenPos();
-        const ImVec2 max(min.x + width, min.y + iconSide + pad * 2.0f);
+        const ImVec2 max(min.x + width, min.y + cardHeight);
         drawList->AddRectFilled(min, max, theme::kSurface, rounding);
         drawList->AddRect(min, max, theme::kBorder, rounding);
         const ImVec2 iconMin(min.x + pad, min.y + pad);
@@ -164,17 +211,91 @@ void SkillsView::draw(const theme::Fonts& fonts, ID3D11Device* device, StateTree
         if (!icons.draw(drawList, skill.name, iconMin, iconMax, std::round(4.0f * dpi), theme::kSurface)) {
             drawList->AddRectFilled(iconMin, iconMax, theme::kSurfaceActive, std::round(4.0f * dpi));
         }
-        const float middle = std::round((min.y + max.y) * 0.5f);
-        ImGui::PushFont(fonts.medium, 0.0f);
-        drawList->AddText(ImVec2(iconMax.x + pad * 1.5f, std::round(middle - ImGui::GetFontSize() * 0.5f)),
-                          theme::kText, skill.name.c_str());
-        ImGui::PopFont();
-        // Has Cooldown and X at the right.
-        const float frame = ImGui::GetFrameHeight();
-        const char* label = "Has Cooldown";
-        const float checkWidth = frame + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(label).x;
+        // The name's line and the fields' line (one, in a wide tile).
+        const float nameMiddle =
+            oneLine ? std::round((min.y + max.y) * 0.5f) : std::round(min.y + pad + frame * 0.5f);
+        const float middle = oneLine ? nameMiddle : std::round(nameMiddle + frame + lineGap);
+        // MP Cost, Shortcut, Has Cooldown and X at the right; the name between the icon and them (cut short if it must
+        // be).
         const float right = max.x - pad;
-        ImGui::SetCursorScreenPos(ImVec2(right - frame - pad - checkWidth, std::round(middle - frame * 0.5f)));
+        const float checkLeft = right - frame - pad - checkWidth;
+        const float keyLeft = checkLeft - pad * 2.0f - keyWidth;
+        const float captionLeft = keyLeft - inner - ImGui::CalcTextSize(caption).x;
+        const float mpLeft = captionLeft - pad * 2.0f - mpWidth;
+        const float mpCaptionLeft = mpLeft - inner - ImGui::CalcTextSize(mpCaption).x;
+        const float textTop = std::round(middle - ImGui::GetFontSize() * 0.5f);
+        ImGui::PushFont(fonts.medium, 0.0f);
+        const ImVec4 nameClip(iconMax.x, min.y, oneLine ? mpCaptionLeft - pad : right, max.y);
+        drawList->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                          ImVec2(iconMax.x + pad * 1.5f, std::round(nameMiddle - ImGui::GetFontSize() * 0.5f)),
+                          theme::kText, skill.name.c_str(), nullptr, 0.0f, &nameClip);
+        ImGui::PopFont();
+        // The MP it costs (the user asked, 2026-11-15: Use Skill is done once the game took it); empty: not set.
+        drawList->AddText(ImVec2(mpCaptionLeft, textTop), theme::kTextMuted, mpCaption);
+        ImGui::SetCursorScreenPos(ImVec2(mpLeft, std::round(middle - frame * 0.5f)));
+        ImGui::SetNextItemWidth(mpWidth);
+        std::string mpText = mpEditing_ == static_cast<int>(i) ? mpEdit_
+                             : skill.mp > 0                    ? std::to_string(skill.mp)
+                                                               : std::string();
+        const bool mpEntered = ImGui::InputTextWithHint(
+            "##mp", "\xE2\x80\x93", &mpText,
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_AutoSelectAll);
+        const bool mpActive = ImGui::IsItemActive();
+        if ((mpEntered || ImGui::IsItemDeactivatedAfterEdit()) && mpEditing_ == static_cast<int>(i)) {
+            int mp = 0;
+            const char* first = mpText.data();
+            const auto read = std::from_chars(first, first + mpText.size(), mp);
+            mp = read.ec == std::errc() ? std::clamp(mp, 0, 99999) : 0; // Empty or not a number: not set.
+            if (mp != skill.mp) {
+                skill.mp = mp;
+                changed = true;
+            }
+            mpEditing_ = -1;
+        } else if (mpActive) {
+            mpEditing_ = static_cast<int>(i);
+            mpEdit_ = mpText;
+        } else if (mpEditing_ == static_cast<int>(i)) {
+            mpEditing_ = -1; // Left with Escape: the cost stays.
+        }
+        if (ImGui::IsItemHovered() && !mpActive) {
+            ImGui::SetTooltip("The MP it costs: Use Skill is done once that much MP was taken (or its cast ended).");
+        }
+        drawList->AddText(ImVec2(captionLeft, textTop), theme::kTextMuted, caption);
+        // The key on its hotbar slot, as read while it is ready (or typed: then learned from its slot).
+        const bool partly = skill.key.find('?') != std::string::npos;
+        ImGui::SetCursorScreenPos(ImVec2(keyLeft, std::round(middle - frame * 0.5f)));
+        ImGui::SetNextItemWidth(keyWidth);
+        std::string keyText = keyEditing_ == static_cast<int>(i) ? keyEdit_ : skill.key;
+        ImGui::PushStyleColor(ImGuiCol_Text, partly ? theme::kWarning : theme::kText);
+        const bool keyEntered = ImGui::InputTextWithHint(
+            "##key", "\xE2\x80\x93", &keyText,
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CharsUppercase |
+                ImGuiInputTextFlags_CharsNoBlank | ImGuiInputTextFlags_AutoSelectAll);
+        ImGui::PopStyleColor();
+        const bool keyActive = ImGui::IsItemActive();
+        if ((keyEntered || ImGui::IsItemDeactivatedAfterEdit()) && keyEditing_ == static_cast<int>(i)) {
+            // Empty: the slot has no key. At most what a reading holds (GameGauge's key).
+            std::string typed = keyText.empty() ? std::string("-") : keyText.substr(0, 15);
+            if (typed != skill.key) {
+                skill.key = typed;
+                changed = true;
+                typedKeys.emplace_back(skill.name, typed);
+            }
+            keyEditing_ = -1;
+        } else if (keyActive) {
+            keyEditing_ = static_cast<int>(i);
+            keyEdit_ = keyText;
+        } else if (keyEditing_ == static_cast<int>(i)) {
+            keyEditing_ = -1; // Left with Escape: the key stays.
+        }
+        if (ImGui::IsItemHovered() && !keyActive) {
+            ImGui::SetTooltip("%s", skill.key.empty() ? "Not read yet: it is read off its hotbar slot while it is ready."
+                                    : skill.key == "-" ? "No key is written on its hotbar slot."
+                                    : partly ? "Letters with ? are not known yet: type the key to teach them."
+                                             : "The key on its hotbar slot, for the Pico to press. Follows the skill when "
+                                               "you move it to another slot.");
+        }
+        ImGui::SetCursorScreenPos(ImVec2(checkLeft, std::round(middle - frame * 0.5f)));
         if (ImGui::Checkbox(label, &skill.cooldown)) {
             changed = true;
         }
@@ -192,6 +313,11 @@ void SkillsView::draw(const theme::Fonts& fonts, ID3D11Device* device, StateTree
     }
     if (changed) {
         profile.saveSkills();
+    }
+    for (const auto& [name, key] : typedKeys) {
+        if (keyTyped) {
+            keyTyped(name, key);
+        }
     }
 }
 

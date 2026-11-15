@@ -1,9 +1,12 @@
 #include "app/App.h"
 
+#include "app/DebugView.h"
 #include "app/Overlay.h"
 #include "app/Snapshot.h"
 #include "app/StatsPanel.h"
 #include "app/Widgets.h"
+#include "engine/CrashLog.h"
+#include "heuristics/KeyLabels.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -36,6 +39,7 @@ constexpr char kGuessesPopup[] = "guesses";
 constexpr char kCategoryPopup[] = "What are we looking for?";
 constexpr char kRecordPopup[] = "What do we record?";
 constexpr char kRecordingsPopup[] = "recordings";
+constexpr char kHandmadePopup[] = "handmade";
 constexpr char kReviewPopup[] = "What do we review?";
 constexpr char kClipsPopup[] = "clips";
 constexpr char kRemoveClipPopup[] = "Remove this clip?";
@@ -392,6 +396,14 @@ int App::run() {
     }
 
     while (window_->pumpMessages()) {
+        // The app's own frame, step by step (the Debug tab), summed up once a second; then the clip buffer has every
+        // part's numbers (a clip says what to optimize).
+        if (const auto now = std::chrono::steady_clock::now(); now - frameCostsSince_ >= std::chrono::seconds(1)) {
+            frameCosts_ = frameMeter_.take(std::chrono::duration<double>(now - frameCostsSince_).count());
+            frameCostsSince_ = now;
+            noteCostsInClip();
+        }
+        frameMeter_.begin();
         // Recording works while the window is minimized or behind a game, so this comes before drawing.
         if (recorder_ && recorder_->failed()) {
             recordingError_ = "Recording stopped. " + recorder_->error();
@@ -421,6 +433,7 @@ int App::run() {
                 addLog(clipSaveError_);
             }
         }
+        pollShots(); // Shift+Win works while the window is minimized or behind the game too.
 
         // Starting and stopping happen here, outside an ImGui frame, so no draw data points at freed images.
         if (closeReview_) {
@@ -441,8 +454,9 @@ int App::run() {
         }
         if (review_) {
             review_->update(); // The finder's progress, also while minimized.
-            // Then the GPU is free for the other reviewed recordings' guesses, until the review closes.
-            if (!review_->finding() && !refresher_) {
+            // Then the GPU is free for the other reviewed recordings' guesses, until the review closes (for the kind
+            // update: only a category with kinds).
+            if (!review_->finding() && !refresher_ && !review_->category().kinds.empty()) {
                 const Category& category = review_->category();
                 refresher_ = std::make_unique<Refresher>(settings_.recordingsFolder, category.id, kindIdsOf(category),
                                                          modelFolder(category.id), review_->folder());
@@ -494,18 +508,31 @@ int App::run() {
         }
         // The profile open (also while the State tile is not shown), and its skills to the readers when they changed.
         stateTree_.ensureProfile(settings_.brainsFolder);
+        frameMeter_.lap(FrameStep::Housekeeping);
+        followSkills();
         syncSkills();
-        keepStats();
+        frameMeter_.lap(FrameStep::Skills);
+        keepStats(); // Its laps: Stats, Geodata (only on a new reading).
+        watchLoot();
+        frameMeter_.lap(FrameStep::Loot);
         tickBrain();
+        frameMeter_.lap(FrameStep::Brain);
         const bool away = review_ || clipView_;
+        // The drop finder always (the user asked, 2026-11-15: drops lie where the camera turned away from, or where
+        // the character runs by while seeking monsters), the Show flag Drops on or off.
+        pipeline_.setDropsEnabled(dropFinder_ && dropFinder_->state() != DropFinder::State::Failed && !away);
         pipeline_.setRecognitionEnabled(recognizer_ && recognizer_->state() != Recognizer::State::Failed && !away);
         pipeline_.setSnapEnabled(snapper_ && snapper_->state() != BoxSnapper::State::Failed && !away);
         // The UI finder goes on with it, the Show flag UI on or off (the user asked, 2026-11-12: the flag only draws
         // what it found).
         pipeline_.setUiEnabled(uiFinder_ && uiFinder_->state() != UiFinder::State::Failed && !away);
-        // The ground finder only while its flag is on (nothing else needs it yet), afresh each time it starts again.
-        const bool following =
-            groundFinder_ && groundFinder_->state() != GroundFinder::State::Failed && !away && settings_.showGround;
+        // The ground finder only while something needs its camera (Ground draws its grid, Geodata lays the
+        // geodata's grid with it, the Stats tab's Camera card: the mouse's counts are anchored by what it follows;
+        // the user asked, 2026-11-15, after its Pitch stayed "Not read yet" with both flags off), afresh each time it
+        // starts again. The grid is drawn only with Ground on; the depth finder still waits for its flags.
+        const bool cameraShown = settings_.showGameStats && !settings_.showSkills;
+        const bool following = groundFinder_ && groundFinder_->state() != GroundFinder::State::Failed && !away &&
+                               (settings_.showGround || settings_.showGeodata || cameraShown);
         if (following && !groundFollowing_) {
             groundFinder_->restart();
         }
@@ -518,7 +545,7 @@ int App::run() {
         // only with their flags on): Depth draws its maps (shaded only then), Ground tilts the grid's pitch by them.
         // Made the first time one is on while observing; with both off it is handed no images (the network stays
         // loaded). It leaves out the interface the UI finder found.
-        const bool depthNeeded = settings_.showDepth || settings_.showGround;
+        const bool depthNeeded = settings_.showDepth || settings_.showGround || settings_.showGeodata;
         if (depthNeeded && !away && observed_ && !depthFinder_ && depthFinderError_.empty() &&
             pipeline_.depth() != nullptr) {
             startDepth();
@@ -537,12 +564,15 @@ int App::run() {
         // recogniser saw. Meanwhile it repeats the last image, so a clip saved right after still plays (still, with no
         // looks).
         pipeline_.setClipEnabled(clipRecorder_ && clipRecorder_->state() != ClipRecorder::State::Failed && !away);
+        frameMeter_.lap(FrameStep::Steering);
         if (!window_->prepareFrame()) {
             pipeline_.setPreviewEnabled(false); // Minimized: nobody sees it.
             groundDrawn_.drawn = false;          // Nor the grid,
             noteGroundInClip();
             depthDrawn_ = 0; // nor the depth.
             noteDepthInClip();
+            noteBrainInClip();
+            noteCameraInClip();
             picker_->close();
             Sleep(10);
             continue;
@@ -555,9 +585,11 @@ int App::run() {
             previewMs_ = groundMs(stamp.shownQpc);
             previewQpc_ = stamp.shownQpc;
             previewImage_ = stamp.number;
+            frameMeter_.lap(FrameStep::Preview);
         }
         if (clipView_) {
             clipView_->update();
+            frameMeter_.lap(FrameStep::Clip);
         }
 
         // While reviewing or playing a clip, the arrow keys, Tab and Space belong to them, not to moving between
@@ -574,13 +606,18 @@ int App::run() {
         ImGui::NewFrame();
         groundDrawn_.drawn = false; // Until the live view draws the grid,
         depthDrawn_ = 0;            // and the depth.
-        drawFrame();
+        drawFrame(); // Its laps: New frame, Brain acting.
         noteGroundInClip();
         noteDepthInClip();
+        noteBrainInClip(); // After the tasks ran (drawFrame's actuateBrain).
+        noteCameraInClip();
+        frameMeter_.lap(FrameStep::Drawing);
         ImGui::Render();
 
         window_->bindBackBuffer();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        frameMeter_.lap(FrameStep::Rendering);
+        frameMeter_.end();
         if (saveSnapshot) {
             try {
                 savePng(gpu_.device.Get(), gpu_.context.Get(), window_->backBuffer().Get(), snapshot_->path.c_str());
@@ -603,6 +640,7 @@ int App::run() {
     return 0;
 }
 
+
 void App::init() {
     // Per-monitor DPI awareness: sharp UI, and required by the capture API (DuplicateOutput1).
     ImGui_ImplWin32_EnableDpiAwareness();
@@ -621,9 +659,21 @@ void App::init() {
         }
     }
     // The log: what earlier runs logged comes back.
-    log_ = std::make_unique<LogBook>((snapshot_ ? std::filesystem::path(snapshot_->path).parent_path() : appFolder()) /
-                                     L"observex.log");
+    const std::filesystem::path logFolder =
+        snapshot_ ? std::filesystem::path(snapshot_->path).parent_path() : appFolder();
+    log_ = std::make_unique<LogBook>(logFolder / L"observex.log");
+    // A crash says where it was in the log (with the call chain) and leaves a dump in crashes/ (the user asked,
+    // 2026-11-15, after a crash in TensorRT that Windows' own report kept from us). Again once observing, as CUDA and
+    // TensorRT may put their own handler in.
+    crashLogFile_ = logFolder / L"observex.log";
+    crashFolder_ = logFolder / L"crashes";
+    installCrashLog(crashLogFile_, crashFolder_);
     addLog("observex started");
+    // Where the character is and the geodata round it (the flag Geodata): models/geodata has the server's .l2j files.
+    geodata_ = std::make_unique<GeodataView>(modelFolder("geodata"));
+    if (settings_.minimapScale > 0.0f) {
+        geodata_->setScale(settings_.minimapScale);
+    }
 
     // observex_heuristics.dll next to the exe (the Release build puts both in the project folder), and
     // observex_stats.dll likewise.
@@ -652,6 +702,8 @@ void App::init() {
 }
 
 void App::shutdown() {
+    stopActing();         // The brain no longer drives the controller (release anything held).
+    mouseTest_.stop();    // TEMPORARY (the Mouse debug sweep, 2026-11-15): no more cursor moves.
     stateTree_.flush();   // A State tile field still being typed in is saved into its profile.
     refresher_.reset();   // Its finder writes nothing.
     review_.reset();      // Closing observex while reviewing makes no kind update.
@@ -679,6 +731,30 @@ void App::observe(const Screen& screen) {
     stopObserving();
     observed_ = screen;
     error_.clear();
+    // Win+Esc starts or stops the Brain while a screen is observed, whatever is in front (the user asked, 2026-11-15:
+    // it must work while the game is focused; the game runs as administrator, so a keyboard hook never saw its keys,
+    // and plain Escape is the game's). Not in snapshot mode.
+    if (!brainKey_ && !snapshot_) {
+        try {
+            brainKey_ = std::make_unique<HotKey>(MOD_WIN, VK_ESCAPE);
+        } catch (const std::exception& e) {
+            addLog(std::string("Win+Esc will not start or stop the brain: ") + e.what());
+        }
+    }
+    // Shift+Win, the training screenshot, likewise only while observing (it saves the observed screen).
+    if (!shotHook_ && !snapshot_) {
+        try {
+            shotHook_ = std::make_unique<ShotHook>();
+        } catch (const std::exception& e) {
+            addLog(std::string("Shift+Win training screenshots will not work: ") + e.what());
+        }
+        // Its hook hears nothing typed into a game that runs as administrator unless observex is one (app/ShotHook);
+        // Win+Esc, a registered hot key, is heard either way.
+        if (!runsAsAdministrator()) {
+            addLog("Not running as administrator: Shift+Win is not heard while Lineage 2 is in front "
+                   "(start observex again and say Yes when Windows asks)");
+        }
+    }
     // Before the loop starts, so its very first image reaches the UI and the recogniser.
     pipeline_.setPreviewEnabled(true);
     pipeline_.setRecognitionEnabled(true);
@@ -700,8 +776,28 @@ void App::observe(const Screen& screen) {
     try {
         clipRecorder_ = std::make_shared<ClipRecorder>(screen, *pipeline_.clip());
         pipeline_.setClipEnabled(true);
+        brainNoted_ = false;  // Its first brain line on the next frame,
+        dropsNoted_ = false;  // drops line
+        cameraNoted_ = false; // and camera line.
     } catch (const std::exception& e) {
         clipError_ = e.what();
+    }
+    // The camera by the mouse's counts: the game fills the screen observed, so it puts the cursor in its middle when
+    // it starts turning.
+    mouseCamera_ = std::make_shared<SharedMouseCamera>();
+    mouseCamera_->middle(static_cast<int>((screen.bounds.left + screen.bounds.right) / 2),
+                         static_cast<int>((screen.bounds.top + screen.bounds.bottom) / 2));
+    try {
+        mouseWatch_ = std::make_unique<MouseWatch>(
+            [clip = clipRecorder_, camera = mouseCamera_](const MouseInput& input) {
+                if (clip) {
+                    clip->moused(input);
+                }
+                camera->add({groundMs(input.qpc), input.dx, input.dy, input.held, input.buttons, input.wheel,
+                             input.cursorX, input.cursorY});
+            });
+    } catch (const std::exception& e) {
+        addLog(std::string("Could not watch the mouse: ") + e.what());
     }
     addLog("Observing " + screen.monitor);
 
@@ -735,8 +831,24 @@ void App::observe(const Screen& screen) {
     try {
         uiFinder_ = std::make_unique<UiFinder>(screen.adapter.Get(), *pipeline_.ui(), modelFolder("ui"), stats_);
         uiFinder_->setSkills(skillsToFind()); // The profile's.
+        uiFinder_->setLook(lookAsked_);       // And the monster Select Target looks at, if any.
     } catch (const std::exception& e) {
         uiFinderError_ = e.what();
+    }
+
+    // The drop finder: drops anywhere on the screen, looked at closely round a kill or drops found (the user asked,
+    // 2026-11-15), once there is a drop model.
+    dropFinderError_.clear();
+    lootWatch_.reset();
+    loot_ = {};
+    if (std::error_code missing; std::filesystem::exists(modelFolder("drop") / L"model.onnx", missing)) {
+        try {
+            dropFinder_ = std::make_unique<DropFinder>(screen.adapter.Get(), *pipeline_.drops(), modelFolder("drop"));
+        } catch (const std::exception& e) {
+            dropFinderError_ = e.what();
+        }
+    } else {
+        dropFinderError_ = "No drop model yet: review Drops on your Shift+Win screenshots, then train one.";
     }
 
     // The ground finder: the game's camera, for the Show flag Ground (the user asked, 2026-11-12).
@@ -744,24 +856,41 @@ void App::observe(const Screen& screen) {
     groundFollowing_ = false;
     depthFinderError_.clear(); // The depth finder is made when the Depth or Ground flag first needs it (startDepth).
     try {
-        groundFinder_ = std::make_unique<GroundFinder>(screen.adapter.Get(), *pipeline_.ground(), heuristics_);
+        groundFinder_ =
+            std::make_unique<GroundFinder>(screen.adapter.Get(), *pipeline_.ground(), heuristics_, mouseCamera_);
     } catch (const std::exception& e) {
         groundFinderError_ = e.what();
     }
+    installCrashLog(crashLogFile_, crashFolder_); // Ours again after the models' libraries loaded.
 }
 
 void App::stopObserving() {
+    stopActing();      // No screen to act on.
+    mouseTest_.stop(); // TEMPORARY (the Mouse debug sweep, 2026-11-15): there are no monsters to sweep now.
+    brainKey_.reset(); // Win+Esc only lives during an observing session.
     if (observed_ && pipeline_.state() != Pipeline::State::Stopped) {
         addLog("Stopped observing " + observed_->monitor);
     }
     xpWatch_ = {}; // Another screen or character next: its XP only starts it.
     liveStats_ = {};    // And nothing is read.
+    targetWatch_ = {};  // Nor is a target watched,
+    watchLook_ = {};    // nor its plate looked at.
+    sendLook();
     pauseRecording();    // The recorder reads from the pipeline's channel; it goes first.
+    shotHook_.reset();
+    logSavedShots();       // The last screenshots saved still get their Log lines.
+    shotRecorder_.reset(); // Reads from the pipeline's shots channel; a screenshot being saved is written first.
+    shotPackage_.reset();
     recognizer_.reset(); // So does the recogniser (it hands looks to the clip buffer and the snapper, so before them).
     pipeline_.setSnapEnabled(false);
     snapper_.reset(); // Reads from the pipeline's snap channel.
     pipeline_.setUiEnabled(false);
     uiFinder_.reset(); // Reads from its ui channel.
+    pipeline_.setDropsEnabled(false);
+    dropFinder_.reset(); // Reads from its drops channel.
+    lootWatch_.reset();  // No kill on another screen.
+    loot_ = {};
+    deadNow_ = 0;
     statsHistory_.clear(); // A new pipeline numbers its images from 1 again.
     pipeline_.setGroundEnabled(false);
     groundFinder_.reset(); // Reads from its ground channel.
@@ -772,6 +901,8 @@ void App::stopObserving() {
     depthShowing_ = false;
     depthUploaded_ = 0;
     pipeline_.setClipEnabled(false);
+    mouseWatch_.reset(); // Hands the clip buffer the mouse: before it.
+    mouseCamera_.reset();
     clipRecorder_.reset(); // Reads from the pipeline's clip channel; a save still being written finishes first.
     clipSaving_ = false;
     preview_.reset(); // Before the pipeline frees the channel it reads from.
@@ -920,6 +1051,74 @@ void App::stopRecording(const char* why) {
     recording_.reset();
 }
 
+void App::takeShot() {
+    if (!observed_ || pipeline_.state() != Pipeline::State::Running || pipeline_.shots() == nullptr) {
+        addLog("Training screenshot not taken: no screen is observed");
+        return;
+    }
+    // The hour's package: made with its first screenshot, its recorder kept while the hour lasts.
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    const std::filesystem::path folder =
+        settings_.recordingsFolder / handmadeFolderName(now.wYear, now.wMonth, now.wDay, now.wHour);
+    if (!shotRecorder_ || !shotPackage_ || shotPackage_->folder != folder) {
+        logSavedShots(); // The hour before's last ones.
+        shotRecorder_.reset();
+        shotPackage_.reset();
+        RecordingInfo info = readRecordingInfo(folder); // Taken earlier this hour, before a restart: on from there.
+        if (info.started.empty()) {
+            info.started = handmadeStarted(now.wYear, now.wMonth, now.wDay, now.wHour);
+            info.screen = observed_->monitor;
+            info.width = pipeline_.width();
+            info.height = pipeline_.height();
+            info.kind = RecordKind::Handmade;
+            std::error_code error;
+            std::filesystem::create_directories(folder, error);
+            // Without the file the review would not list the package.
+            if (!writeRecordingInfo(folder, info)) {
+                addLog("Training screenshot not taken: could not write " + toUtf8((folder / kRecordingFile).c_str()));
+                return;
+            }
+        }
+        ShotPackage package{folder, handmadeTitle(info.started), nextImageNumber(listImages(folder)), 0};
+        try {
+            shotRecorder_ = std::make_unique<Recorder>(*observed_, *pipeline_.shots(), folder, package.first, nullptr,
+                                                       ImageFormat::Png);
+        } catch (const std::exception& e) {
+            addLog(std::string("Training screenshot not taken: ") + e.what());
+            return;
+        }
+        shotPackage_ = std::move(package);
+    }
+    pipeline_.takeShot(); // The next new image; the Log says once it is saved.
+}
+
+void App::pollShots() {
+    if (shotHook_ && shotHook_->takePressed()) {
+        takeShot();
+    }
+    if (snapshot_ && snapshot_->shot && !snapshotShot_ && pipeline_.state() == Pipeline::State::Running) {
+        snapshotShot_ = true;
+        takeShot();
+    }
+    logSavedShots();
+}
+
+void App::logSavedShots() {
+    if (!shotRecorder_ || !shotPackage_) {
+        return;
+    }
+    for (const unsigned saved = shotRecorder_->saved(); shotPackage_->logged < saved; ++shotPackage_->logged) {
+        addLog("Training screenshot " + std::to_string(shotPackage_->first + shotPackage_->logged) +
+               " saved in handmade " + shotPackage_->title);
+    }
+    if (shotRecorder_->failed()) {
+        addLog("Training screenshots stopped: " + shotRecorder_->error());
+        shotRecorder_.reset(); // The next Shift+Win tries again.
+        shotPackage_.reset();
+    }
+}
+
 bool App::canSaveClip() const {
     return clipRecorder_ && clipRecorder_->state() == ClipRecorder::State::Running &&
            clipRecorder_->saveState() != ClipRecorder::SaveState::Saving;
@@ -941,9 +1140,13 @@ void App::saveClip() {
         about.model = liveModelAbout();
         about.kinds = recognizer_->kinds();
     }
+    if (mouseWatch_) {
+        about.mouse = MouseWatch::pointerSettings();
+    }
     noteInClip("save last 10 s");
-    // Before the save, so the clip has it too.
+    // Before the save, so the clip has it too, and the costs up to now.
     addLog("Saved last 10 s as clip " + nameOf(folder));
+    noteCostsInClip();
     clipSaveError_.clear();
     const std::filesystem::path statsFolder = folder;
     if (clipRecorder_->save(std::move(folder), std::move(about))) {
@@ -994,6 +1197,21 @@ void App::keepStats() {
     if (const auto change = xpWatch_.read(stats.find("Status", "XP"), shownSeconds)) {
         addLog(change->text, static_cast<std::int64_t>(change->seconds * ticksPerSecond));
     }
+    watchTarget(stats);
+    frameMeter_.lap(FrameStep::Stats);
+    // Where the character is (the minimap followed, /loc read from the chat), the Geodata flag on or off.
+    if (geodata_) {
+        std::vector<std::string> lines;
+        geodata_->read(stats, groundMs(stats.shownQpc), lines);
+        for (std::string& line : lines) {
+            addLog(std::move(line), stats.shownQpc);
+        }
+        if (const float scale = geodata_->scale(); scale > 0.0f && std::fabs(scale - settings_.minimapScale) > 0.01f) {
+            settings_.minimapScale = scale; // Learned (or bettered) from two /loc: kept for the next start.
+            saveSettings();
+        }
+        frameMeter_.lap(FrameStep::Geodata);
+    }
     LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency);
     const auto kept = static_cast<std::int64_t>(kStatsKeptSeconds * static_cast<double>(frequency.QuadPart));
@@ -1003,7 +1221,11 @@ void App::keepStats() {
 }
 
 void App::tickBrain() {
-    // A clip's frame read with today's rules, else the live reading; nothing while reviewing or not reading.
+    // The brain only advances while it is active (the user asked, 2026-11-15: an inactive one must not transition on
+    // its own). Starting it again starts from Root (toggleActing).
+    if (!brainActs_) {
+        return;
+    }
     const GameStats* stats = nullptr;
     if (clipView_) {
         stats = clipStatsShown(true);
@@ -1011,9 +1233,7 @@ void App::tickBrain() {
         stats = &liveStats_;
     }
     if (stats == nullptr) {
-        brainImage_ = 0;
-        stateTree_.stop();
-        return;
+        return; // Not reading: freeze, do not reset.
     }
     if (stats->image != brainImage_) { // One step a reading.
         brainImage_ = stats->image;
@@ -1022,40 +1242,81 @@ void App::tickBrain() {
 }
 
 float App::imageWorkMs(std::string* parts) {
-    // Each part's time on one screen image, on average over the last second (each finder's own numbers, refreshed once
-    // a second), added up.
-    float total = 0.0f;
-    const auto add = [&](const char* name, float ms) {
-        total += ms;
-        if (parts != nullptr) {
+    // Each part's run on one screen image, on average over the last second (each part's own numbers, refreshed once a
+    // second), added up.
+    const std::vector<CostPart> all = costs();
+    if (parts != nullptr) {
+        for (const CostPart& part : all) {
             char text[64];
-            std::snprintf(text, sizeof(text), "%s%s %.2f", parts->empty() ? "" : "  \xC2\xB7  ", name,
-                          static_cast<double>(ms));
+            std::snprintf(text, sizeof(text), "%s%s %.2f", parts->empty() ? "" : "  \xC2\xB7  ", part.run.name.data(),
+                          static_cast<double>(part.run.eachMs));
             *parts += text;
+        }
+    }
+    return costTotalMs(all);
+}
+
+std::vector<CostPart> App::costs() {
+    std::vector<CostPart> parts;
+    const auto add = [&parts](const CostPart& part, const char* name) {
+        if (part.run.perSecond > 0.0f) { // It took images that second.
+            parts.push_back(part);
+            nameCost(parts.back().run, name);
         }
     };
     if (pipeline_.state() == Pipeline::State::Running) {
-        add("Capture", pipeline_.stats().workAvgMs);
+        add(pipeline_.stats().costs, "Capture");
     }
     if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
-        add(kLive.name, recognizer_->stats().workAvgMs);
-        if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
-            add("Snapping", snapper_->stats().workAvgMs);
-        }
+        add(recognizer_->stats().costs, kLive.name);
+    }
+    if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+        add(snapper_->stats().costs, "Snapping");
     }
     if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
-        const UiFinderStats& ui = uiFinder_->stats();
-        add("UI", ui.workAvgMs);
-        add("Stats", ui.statsAvgMs);
+        add(uiFinder_->stats().costs, "UI and stats");
     }
-    if (groundFollowing_ && groundFinder_->state() == GroundFinder::State::Running) {
-        add("Ground", groundFinder_->stats().workAvgMs);
+    if (groundFinder_ && groundFollowing_ && groundFinder_->state() == GroundFinder::State::Running) {
+        add(groundFinder_->stats().costs, "Ground");
     }
-    if (depthRunning_ && depthFinder_->state() == DepthFinder::State::Running) {
-        const DepthFinderStats& depth = depthFinder_->stats();
-        add("Depth", depth.networkAvgMs + depth.shadeAvgMs + depth.packAvgMs);
+    if (depthFinder_ && depthRunning_ && depthFinder_->state() == DepthFinder::State::Running) {
+        add(depthFinder_->stats().costs, "Depth");
     }
-    return total;
+    if (dropFinder_ && dropFinder_->state() == DropFinder::State::Running) {
+        add(dropFinder_->stats().costs, "Drops");
+    }
+    if (clipRecorder_ && clipRecorder_->state() == ClipRecorder::State::Running) {
+        add(clipRecorder_->stats().costs, "Clip buffer");
+    }
+    add(frameCosts_, "App frame");
+    return parts;
+}
+
+void App::noteCostsInClip() {
+    // Not while a review or a clip is open: the buffer pauses then.
+    if (clipRecorder_ && clipRecorder_->state() == ClipRecorder::State::Running && !review_ && !clipView_) {
+        clipRecorder_->costed(qpcNow(), costs());
+    }
+}
+
+void App::drawDebug() {
+    if (clipView_) {
+        // As recorded: the look at the costs whose second holds the frame shown.
+        const std::span<const ClipCostLine> lines = clipView_->recordedCosts();
+        std::vector<CostPart> parts;
+        for (const ClipCostLine& line : lines) {
+            parts.push_back(line.part);
+        }
+        char when[96] = "";
+        if (!lines.empty()) {
+            const double seconds = std::max(0.0, lines.front().timeMs / 1000.0);
+            std::snprintf(when, sizeof(when), "as recorded over the second up to %d:%04.1f of the clip",
+                          static_cast<int>(seconds / 60.0), std::fmod(seconds, 60.0));
+        }
+        drawCosts(parts, when, "Not recorded in this clip", fonts_, dpiScale_);
+        return;
+    }
+    drawCosts(costs(), "over the last second", "Nothing measured yet", fonts_, dpiScale_);
 }
 
 void App::writeClipStats(const std::filesystem::path& folder) {
@@ -1125,7 +1386,19 @@ void App::drawGameStats() {
     if (problem.empty() && !stats_->error().empty()) {
         problem = stats_->error(); // observex_stats.dll could not be loaded: the app's own rules read.
     }
-    statsTile_.draw(fonts_, stats, empty.c_str(), problem.c_str(), stateTree_.skills(), skillIcons_, dpiScale_);
+    // The camera by the mouse's counts on the frame shown: live, or the clip's (Recorded: its camera lines; Today: by
+    // its mouse lines, the ground followed over it for the anchors).
+    CameraShown camera;
+    std::string cameraProblem;
+    if (!clipView_) {
+        camera = liveCamera();
+    } else if (const CameraShown* shown = clipView_->guesser() == ClipView::Guesser::Recorded
+                                              ? clipView_->recordedCamera(cameraProblem)
+                                              : clipView_->todayCamera(cameraProblem)) {
+        camera = *shown;
+    }
+    statsTile_.draw(fonts_, stats, empty.c_str(), problem.c_str(), stateTree_.skills(), skillIcons_, dpiScale_,
+                    camera, cameraProblem.c_str());
 }
 
 void App::drawSkills() {
@@ -1141,7 +1414,13 @@ void App::drawSkills() {
             return running() ? &uiFinder_->miniatures() : nullptr;
         };
     }
-    skillsView_.draw(fonts_, gpu_.device.Get(), stateTree_, skillIcons_, source, dpiScale_);
+    RefreshButton refresh;
+    refresh.running = skillRefresher_.running();
+    refresh.progress = skillRefresher_.progress();
+    refresh.click = [this] { toggleRefresh(); };
+    skillsView_.draw(fonts_, gpu_.device.Get(), stateTree_, settings_.brainsFolder, skillIcons_, source,
+                     [this](const std::string& name, const std::string& key) { keyTyped(name, key); }, refresh,
+                     dpiScale_);
 }
 
 void App::syncSkills() {
@@ -1183,6 +1462,132 @@ std::vector<SkillToFind> App::skillsToFind() const {
     return skills;
 }
 
+namespace {
+
+// A skill seen this many readings in a row (the UI finder reads 10 a second) on one slot with one key is taken: not
+// while it is dragged, nor on one image read wrong.
+constexpr int kFollowReadings = 3;
+
+// Two places of a miniature are one slot when this near (it is found a pixel either way; slots are ~47 apart).
+bool sameSlot(const StatsArea& a, const StatsArea& b) {
+    return a.x1 > a.x0 && b.x1 > b.x0 && std::abs(a.x0 - b.x0) <= 3 && std::abs(a.y0 - b.y0) <= 3;
+}
+
+} // namespace
+
+void App::followSkills() {
+    // Live only: never from a clip or a review (the UI finder is off while one is open).
+    if (review_ || clipView_ || !uiFinder_ || uiFinder_->state() != UiFinder::State::Running) {
+        return;
+    }
+    const UiSkillPictures& seen = uiFinder_->skillPictures();
+    if (seen.image == 0 || seen.image == skillPicturesImage_) {
+        return;
+    }
+    skillPicturesImage_ = seen.image;
+    std::vector<statetree::Skill>& skills = stateTree_.skills();
+    bool changed = false;
+    for (int i = 0; i < seen.count; ++i) {
+        const UiSkillPictures::Picture& picture = seen.pictures[static_cast<std::size_t>(i)];
+        const std::string name(picture.name.data(), strnlen(picture.name.data(), picture.name.size()));
+        const auto skill = std::ranges::find(skills, name, &statetree::Skill::name);
+        const int side = picture.at.x1 - picture.at.x0;
+        if (skill == skills.end() || side <= 0 || side > UiSkillPictures::kSide) {
+            continue;
+        }
+        auto follow = std::ranges::find(skillFollow_, name, &SkillFollow::name);
+        if (follow == skillFollow_.end()) {
+            follow = skillFollow_.insert(skillFollow_.end(), SkillFollow{name});
+        }
+        const std::string key(picture.key.data(), strnlen(picture.key.data(), picture.key.size()));
+        if (sameSlot(follow->at, picture.at) && follow->key == key) {
+            ++follow->same;
+        } else {
+            follow->at = picture.at;
+            follow->key = key;
+            follow->same = 1;
+        }
+        follow->side = side;
+        follow->bgra.assign(picture.bgra.begin(), picture.bgra.begin() + static_cast<std::ptrdiff_t>(side * side * 4));
+        if (follow->same < kFollowReadings) {
+            continue;
+        }
+        if (sameSlot(follow->held, picture.at)) {
+            continue; // A key typed for it on this slot stands.
+        }
+        follow->held = {};
+        const bool moved = follow->taken.x1 > follow->taken.x0 && !sameSlot(follow->taken, picture.at);
+        const bool newKey = key != skill->key;
+        follow->taken = picture.at;
+        if (!moved && !newKey) {
+            continue;
+        }
+        // Its shortcut and its miniature on the slot it is in now (found by its picture without the key's corner, it
+        // is the same skill; the miniature shows the slot's key as the icon).
+        std::string line = skill->name + ":";
+        if (newKey) {
+            line += " shortcut " + (key == "-" ? std::string("none") : key) +
+                    (skill->key.empty() ? std::string() : " (was " + skill->key + ")");
+            skill->key = key;
+        }
+        if (moved) {
+            line += newKey ? ", moved to another slot" : " moved to another slot";
+        }
+        skill->side = side;
+        skill->bgr.resize(static_cast<std::size_t>(side * side) * 3);
+        for (std::size_t p = 0; p < static_cast<std::size_t>(side * side); ++p) {
+            skill->bgr[p * 3] = picture.bgra[p * 4];
+            skill->bgr[p * 3 + 1] = picture.bgra[p * 4 + 1];
+            skill->bgr[p * 3 + 2] = picture.bgra[p * 4 + 2];
+        }
+        addLog(line + ", miniature updated");
+        changed = true;
+    }
+    if (changed) {
+        stateTree_.saveSkills(); // syncSkills, next, hands the new miniatures to the readers and the icons.
+    }
+}
+
+void App::keyTyped(const std::string& name, const std::string& key) {
+    const auto skill = std::ranges::find(stateTree_.skills(), name, &statetree::Skill::name);
+    if (skill == stateTree_.skills().end()) {
+        return;
+    }
+    // Its newest picture seen live, else the profile's.
+    const auto follow = std::ranges::find(skillFollow_, name, &SkillFollow::name);
+    KeyPicture picture{skill->bgr.data(), static_cast<std::size_t>(skill->side) * 3, 3, skill->side};
+    if (follow != skillFollow_.end()) {
+        follow->held = follow->taken.x1 > follow->taken.x0 ? follow->taken : follow->at; // It stands there.
+        if (follow->side > 0) {
+            picture = {follow->bgra.data(), static_cast<std::size_t>(follow->side) * 4, 4, follow->side};
+        }
+    }
+    const auto pixels = static_cast<std::size_t>(picture.side) * static_cast<std::size_t>(picture.side);
+    if (key.empty() || key == "-" || key.find('?') != std::string::npos || picture.side <= 0 ||
+        (picture.step == 3 && skill->bgr.size() != pixels * 3)) {
+        return; // No key, or letters not known: nothing to learn.
+    }
+    KeyFont font;
+    std::string error;
+    const std::filesystem::path file = modelFolder("ui") / kKeysFile;
+    if (!font.load(file, &error)) {
+        addLog(name + ": could not learn its shortcut " + key + " (" + error + ")");
+        return;
+    }
+    if (font.read(picture) == key) {
+        return; // Read so already.
+    }
+    const int learned = font.teach(picture, key);
+    if (learned == 0) {
+        addLog(name + ": no letters on its miniature to learn the shortcut " + key + " from");
+    } else if (!font.save(file, &error)) {
+        addLog(name + ": could not learn its shortcut " + key + " (" + error + ")");
+    } else {
+        addLog(name + ": learned the shortcut " + key + " from its slot (" + std::to_string(learned) +
+               (learned == 1 ? " glyph)" : " glyphs)"));
+    }
+}
+
 void App::addLiveNearby(GameStats& stats) {
     // What drawFound shows: the snapper's boxes while it runs, else the recogniser's.
     const bool looking = recognizer_ && recognizer_->state() == Recognizer::State::Running;
@@ -1199,6 +1604,671 @@ void App::addLiveNearby(GameStats& stats) {
         kinds = recognizer_->kinds();
     }
     addNearby(stats, looking, things, kinds);
+}
+
+std::vector<MouseTarget> App::visibleMonsters() {
+    // TEMPORARY (the Mouse debug sweep, 2026-11-15).
+    std::vector<MouseTarget> targets;
+    for (const SelectableMonster& m : selectableMonsters()) {
+        targets.push_back({m.id, m.x, m.y, m.w, m.h});
+    }
+    return targets;
+}
+
+std::vector<SelectableMonster> App::selectableMonsters() {
+    // The monsters shown now, as addLiveNearby reads them: the snapper's boxes while it runs, else the recogniser's.
+    std::vector<SelectableMonster> monsters;
+    if (!observed_ || !recognizer_ || recognizer_->state() != Recognizer::State::Running) {
+        return monsters;
+    }
+    const Found* found = &recognizer_->found();
+    if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+        if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+            found = &snapped;
+        }
+    }
+    const std::vector<std::string>& kinds = recognizer_->kinds();
+    const auto it = std::find(kinds.begin(), kinds.end(), "monster");
+    if (it == kinds.end()) {
+        return monsters; // A model without a "monster" kind: nothing to sweep.
+    }
+    const auto monsterKind = static_cast<std::uint8_t>(it - kinds.begin());
+    const RECT& bounds = observed_->bounds; // The monitor's desktop rectangle, in the same pixels as GetCursorPos.
+    const double sx = static_cast<double>(bounds.right - bounds.left) / std::max(1u, pipeline_.width());
+    const double sy = static_cast<double>(bounds.bottom - bounds.top) / std::max(1u, pipeline_.height());
+    for (int i = 0; i < found->count; ++i) {
+        const Tracked& thing = found->things[static_cast<std::size_t>(i)];
+        if (thing.kind != monsterKind || thing.held || kindSureOf(thing) < kTellKind) {
+            continue; // Only monsters it is sure of and sees right now (not held through a gap).
+        }
+        const double cx = thing.x + thing.width * 0.5;
+        const double cy = thing.y + thing.height * 0.5;
+        const StatsArea box{static_cast<int>(std::lround(thing.x)), static_cast<int>(std::lround(thing.y)),
+                            static_cast<int>(std::lround(thing.x + thing.width)),
+                            static_cast<int>(std::lround(thing.y + thing.height))};
+        monsters.push_back({thing.id, box, static_cast<int>(std::lround(bounds.left + cx * sx)),
+                            static_cast<int>(std::lround(bounds.top + cy * sy)),
+                            static_cast<int>(std::lround(thing.width * sx)),
+                            static_cast<int>(std::lround(thing.height * sy))});
+    }
+    return monsters;
+}
+
+namespace {
+
+// How long a Use Skill / Click Mouse press is held before release, so the game registers it (a 1 ms tap was missed).
+constexpr auto kHoldMs = std::chrono::milliseconds(80);
+
+// A skill's hotbar shortcut (heuristics/KeyLabels, e.g. "F2", "Ctrl+1", "A") as a HID modifier + key code, for the
+// controller to press. Handles single keys (F1-F12, A-Z, 0-9) with optional Ctrl / Alt / Shift / Win modifiers joined
+// by '+'. False for anything else (an odd label), so the caller can say it does not know how to press it.
+bool hidForKey(const std::string& key, std::uint8_t& modifier, std::uint8_t& code) {
+    modifier = 0;
+    code = 0;
+    std::vector<std::string> parts;
+    std::string token;
+    for (const char c : key) {
+        if (c == '+') {
+            if (!token.empty()) {
+                parts.push_back(token);
+            }
+            token.clear();
+        } else {
+            token.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        }
+    }
+    if (!token.empty()) {
+        parts.push_back(token);
+    }
+    if (parts.empty()) {
+        return false;
+    }
+    for (std::size_t i = 0; i + 1 < parts.size(); ++i) { // All but the last are modifiers.
+        const std::string& m = parts[i];
+        if (m == "CTRL" || m == "CONTROL") {
+            modifier |= 0x01;
+        } else if (m == "SHIFT") {
+            modifier |= 0x02;
+        } else if (m == "ALT") {
+            modifier |= 0x04;
+        } else if (m == "WIN" || m == "GUI" || m == "CMD" || m == "META") {
+            modifier |= 0x08;
+        } else {
+            return false; // An unknown modifier: do not guess.
+        }
+    }
+    const std::string& k = parts.back();
+    if (k.size() == 1) {
+        const char c = k[0];
+        if (c >= 'A' && c <= 'Z') {
+            code = static_cast<std::uint8_t>(0x04 + (c - 'A'));
+            return true;
+        }
+        if (c >= '1' && c <= '9') {
+            code = static_cast<std::uint8_t>(0x1E + (c - '1'));
+            return true;
+        }
+        if (c == '0') {
+            code = 0x27;
+            return true;
+        }
+        return false;
+    }
+    if (k.size() >= 2 && k[0] == 'F') {
+        int n = 0;
+        if (std::from_chars(k.data() + 1, k.data() + k.size(), n).ec == std::errc() && n >= 1 && n <= 12) {
+            code = static_cast<std::uint8_t>(0x3A + (n - 1)); // HID_KEY_F1 is 0x3A.
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void App::toggleActing() {
+    if (brainActs_) {
+        stopActing();
+        return;
+    }
+    // Why it cannot start goes into the Log (the Brain button has no tooltip: the user asked, 2026-11-15).
+    if (!observed_ || review_ || clipView_) {
+        addLog("Brain not started: observe a game screen first");
+        return;
+    }
+    stopRefresh("Refresh stopped: the brain started"); // Both drive the controller: one at a time.
+    mouseTest_.stop(); // The Mouse debug sweep and acting both drive the controller: one at a time.
+    if (!controller_.open()) {
+        addLog("Brain not started: controller: " + controller_.error());
+        return;
+    }
+    if (controller_.ping() < 0.0) {
+        addLog("Brain not started: the controller did not answer; is the firmware running?");
+        return;
+    }
+    brainActs_ = true;
+    stateTree_.restart(); // The whole tree afresh, from Root (the user asked, 2026-11-15).
+    brainImage_ = 0;      // Its first step on the reading there is now.
+    actingTaskStart_ = ~std::uint64_t{0}; // The task that runs starts afresh,
+    parallelRuns_.clear();                // and the Parallel ones.
+    addLog("Brain active: from Root, it drives the mouse and keyboard through the controller");
+}
+
+void App::stopActing() {
+    if (!brainActs_) {
+        return;
+    }
+    brainActs_ = false;
+    lookAt({});
+    parallelRuns_.clear();
+    heldButtons_ = 0;
+    keyHeld_ = false;
+    if (controller_.isOpen()) {
+        controller_.moveMouse(0, 0, 0, 0);    // Release any held mouse button,
+        controller_.pressKeys(0, nullptr, 0); // and any held key.
+    }
+    addLog("Brain inactive");
+}
+
+void App::actuateBrain() {
+    if (!brainActs_) {
+        return;
+    }
+    // Only while a live screen is observed and the link holds; otherwise stop (releasing anything held).
+    if (review_ || clipView_ || !observed_ || !controller_.isOpen()) {
+        stopActing();
+        return;
+    }
+    const double dt = std::max(0.0, static_cast<double>(ImGui::GetIO().DeltaTime));
+    // Release a held key or mouse button once its short hold is up (a press is held, not tapped, so the game registers
+    // it; the user asked, 2026-11-15: Use Skill input was not being sent).
+    const auto now = std::chrono::steady_clock::now();
+    if (keyHeld_ && now >= keyReleaseAt_) {
+        controller_.pressKeys(0, nullptr, 0);
+        keyHeld_ = false;
+    }
+    if (heldButtons_ != 0 && now >= buttonReleaseAt_) {
+        controller_.moveMouse(0, 0, 0, 0);
+        heldButtons_ = 0;
+    }
+    runParallelTasks(now); // Alongside the one below, the whole time their states are active.
+    // The task that runs: one at a time, in order, each until it is done (the user asked, 2026-11-15; core/StateTree's
+    // TaskKind says when each is). After the last nothing runs until the state is entered again.
+    const statetree::State* state = stateTree_.currentState();
+    const int index = stateTree_.currentTask();
+    if (state == nullptr || index < 0 || index >= static_cast<int>(state->tasks.size())) {
+        lookAt({});
+        return;
+    }
+    const statetree::Task& task = state->tasks[static_cast<std::size_t>(index)];
+    if (stateTree_.taskStarts() != actingTaskStart_) { // A task starts (or starts again): afresh.
+        actingTaskStart_ = stateTree_.taskStarts();
+        taskPressed_ = false;
+        selector_.start();
+        skillUser_.start();
+    }
+    if (task.kind != statetree::TaskKind::SelectTarget) {
+        lookAt({});
+    }
+    const bool pressing = keyHeld_ || heldButtons_ != 0; // A press still held: the next one waits for its release.
+    switch (task.kind) {
+    case statetree::TaskKind::SelectTarget: {
+        // Onto the monster, a click once the game shows it hovered, done once it shows it as the target
+        // (core/TargetSelect), on the stats reader's name plate over it (asked for here) and its target window.
+        LARGE_INTEGER frequency;
+        LARGE_INTEGER counter;
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&counter);
+        const double ticks = static_cast<double>(frequency.QuadPart);
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        const std::vector<SelectableMonster> monsters = selectableMonsters();
+        TargetSelector::Input in;
+        in.now = static_cast<double>(counter.QuadPart) / ticks;
+        in.dt = dt;
+        in.cursorX = cursor.x;
+        in.cursorY = cursor.y;
+        in.monsters = monsters;
+        if (liveStats_.image > 0) {
+            in.seen.image = liveStats_.image;
+            in.seen.shown = static_cast<double>(liveStats_.shownQpc) / ticks;
+            in.seen.plate = liveStats_.plate;
+            in.seen.hasTarget = liveStats_.hasTarget;
+            in.seen.targetName = liveStats_.targetName.data();
+            const GameGauge* hp = liveStats_.find(kTargetPiece, "HP");
+            in.seen.targetHp = hp != nullptr ? hp->full : -1.0f;
+        }
+        const TargetSelector::Output out = selector_.step(in);
+        lookAt(out.look);
+        if ((out.dx != 0 || out.dy != 0) && heldButtons_ == 0) { // A click is pressed and let go where it was pressed.
+            controller_.moveMouse(out.dx, out.dy, 0);
+        }
+        if (out.click) {
+            heldButtons_ = 0x01;
+            controller_.moveMouse(0, 0, heldButtons_, 0); // Press; held kHoldMs, then released at the top.
+            buttonReleaseAt_ = now + kHoldMs;
+        }
+        if (!out.log.empty()) {
+            addLog(out.log);
+        }
+        if (out.done) {
+            lookAt({});
+            stateTree_.finishTask();
+        }
+        break;
+    }
+    case statetree::TaskKind::ClickMouse:
+        // Done once clicked: pressed, held kHoldMs and let go.
+        if (!taskPressed_ && !pressing) {
+            heldButtons_ = task.button == statetree::ClickButton::Right ? 0x02 : 0x01;
+            controller_.moveMouse(0, 0, heldButtons_, 0); // Press; held kHoldMs, then released at the top.
+            buttonReleaseAt_ = now + kHoldMs;
+            taskPressed_ = true;
+        } else if (taskPressed_ && heldButtons_ == 0) {
+            addLog(std::string("Click Mouse: ") + statetree::nameOf(task.button) + " button clicked");
+            stateTree_.finishTask();
+        }
+        break;
+    case statetree::TaskKind::UseSkill: {
+        // Of its skills, top to bottom, the first ready one is pressed; done once its cast ended or its MP cost was
+        // taken, with fallbacks (core/SkillUse). On the newest live reading.
+        std::vector<UsableSkill> usable;
+        usable.reserve(task.skills.size());
+        for (const std::string& name : task.skills) {
+            const statetree::Skill* skill = stateTree_.tree().skill(name);
+            std::uint8_t mod = 0;
+            std::uint8_t code = 0;
+            usable.push_back({name, skill != nullptr ? skill->key : std::string(),
+                              skill != nullptr && hidForKey(skill->key, mod, code),
+                              skill == nullptr || skill->cooldown, skill != nullptr ? skill->mp : 0});
+        }
+        LARGE_INTEGER frequency;
+        LARGE_INTEGER counter;
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&counter);
+        const double ticks = static_cast<double>(frequency.QuadPart);
+        SkillUser::Input in;
+        in.now = static_cast<double>(counter.QuadPart) / ticks;
+        in.canPress = !pressing;
+        in.skills = usable;
+        if (liveStats_.image > 0) {
+            if (liveStats_.image != skillVariablesImage_) {
+                skillVariablesImage_ = liveStats_.image;
+                skillVariables_ = statetree::variablesOf(liveStats_);
+            }
+            in.image = liveStats_.image;
+            in.shown = static_cast<double>(liveStats_.shownQpc) / ticks;
+            in.variables = &skillVariables_;
+        }
+        const SkillUser::Output out = skillUser_.step(in);
+        if (out.press >= 0) {
+            std::uint8_t mod = 0;
+            std::uint8_t code = 0;
+            hidForKey(usable[static_cast<std::size_t>(out.press)].key, mod, code);
+            const std::uint8_t keys[1] = {code};
+            controller_.pressKeys(mod, keys, 1); // Press; held kHoldMs, then released at the top.
+            keyHeld_ = true;
+            keyReleaseAt_ = now + kHoldMs;
+        }
+        if (!out.log.empty()) {
+            addLog(out.log);
+        }
+        if (out.done && !keyHeld_) { // Done once its key was let go too.
+            stateTree_.finishTask();
+        }
+        break;
+    }
+    case statetree::TaskKind::DebugPrint:
+        // Where the brain is, written once; done.
+        addLog("Debug Print: " + statetree::whereText(stateTree_.tree(), state->id, index));
+        stateTree_.finishTask();
+        break;
+    }
+}
+
+void App::runParallelTasks(std::chrono::steady_clock::time_point now) {
+    const std::vector<statetree::TaskAt> running = stateTree_.parallelTasks();
+    const statetree::Tree& tree = stateTree_.tree();
+    const auto taskAt = [&tree](const statetree::TaskAt& at) -> const statetree::Task& {
+        return tree.find(at.state)->tasks[static_cast<std::size_t>(at.task)];
+    };
+    // Its state left, or the task there changed: it stops (in its state again, it starts afresh).
+    std::erase_if(parallelRuns_, [&](const ParallelRun& run) {
+        return std::ranges::find(running, run.at) == running.end() || taskAt(run.at).kind != run.kind;
+    });
+    const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(statetree::kDebugPrintSeconds));
+    for (const statetree::TaskAt& at : running) {
+        const statetree::Task& task = taskAt(at);
+        auto run = std::ranges::find(parallelRuns_, at, &ParallelRun::at);
+        if (run == parallelRuns_.end()) { // Its state became active: it starts, due at once.
+            parallelRuns_.push_back({at, task.kind, now});
+            run = parallelRuns_.end() - 1;
+        }
+        switch (task.kind) {
+        case statetree::TaskKind::DebugPrint:
+            // Where the brain is, every kDebugPrintSeconds (from when it last wrote; after a stall, from now).
+            if (now >= run->next) {
+                const statetree::State* current = stateTree_.currentState();
+                addLog("Debug Print: " + statetree::whereText(tree, current != nullptr ? current->id : tree.root(),
+                                                              stateTree_.currentTask()));
+                run->next = std::max(run->next + period, now);
+            }
+            break;
+        case statetree::TaskKind::UseSkill:
+        case statetree::TaskKind::SelectTarget:
+        case statetree::TaskKind::ClickMouse:
+            break; // Never Parallel (statetree::canRunParallel): they share the keyboard and mouse.
+        }
+    }
+}
+
+std::vector<RefreshSkill> App::refreshSkills() const {
+    std::vector<RefreshSkill> skills;
+    const std::vector<statetree::Skill>& profile = stateTree_.skills();
+    skills.reserve(profile.size());
+    const bool live = observed_ && liveStats_.image > 0 && pipeline_.width() > 0 && pipeline_.height() > 0;
+    for (const statetree::Skill& skill : profile) {
+        RefreshSkill one;
+        one.name = skill.name;
+        const GameGauge* gauge = live ? liveStats_.find(kSkillsPiece, skill.name) : nullptr;
+        if (gauge != nullptr && gauge->seen && gauge->at.x1 > gauge->at.x0) {
+            const RECT& bounds = observed_->bounds; // The monitor on the desktop, in GetCursorPos' pixels.
+            const double sx = static_cast<double>(bounds.right - bounds.left) / pipeline_.width();
+            const double sy = static_cast<double>(bounds.bottom - bounds.top) / pipeline_.height();
+            const StatsArea& at = gauge->at;
+            one.seen = true;
+            one.at = at;
+            one.x = static_cast<int>(std::lround(bounds.left + (at.x0 + at.x1) * 0.5 * sx));
+            one.y = static_cast<int>(std::lround(bounds.top + (at.y0 + at.y1) * 0.5 * sy));
+            one.side = static_cast<int>(std::lround((at.x1 - at.x0) * sx));
+        }
+        skills.push_back(std::move(one));
+    }
+    return skills;
+}
+
+void App::toggleRefresh() {
+    if (skillRefresher_.running()) {
+        stopRefresh("Refresh stopped");
+        return;
+    }
+    // Why it cannot start goes into the Log, as the Brain's.
+    if (!observed_ || review_ || clipView_) {
+        addLog("Refresh not started: observe a game screen first");
+        return;
+    }
+    if (brainActs_) {
+        addLog("Refresh not started: stop the brain first (both drive the mouse)");
+        return;
+    }
+    if (!uiFinder_ || uiFinder_->state() != UiFinder::State::Running || liveStats_.image == 0) {
+        addLog("Refresh not started: nothing is read from the screen yet");
+        return;
+    }
+    const std::vector<RefreshSkill> skills = refreshSkills();
+    if (skills.empty()) {
+        addLog("Refresh not started: the profile has no skills (Add Skill adds them)");
+        return;
+    }
+    const auto first = std::find_if(skills.begin(), skills.end(), [](const RefreshSkill& skill) { return skill.seen; });
+    if (first == skills.end()) {
+        addLog("Refresh not started: none of the profile's skills is seen on the hotbar");
+        return;
+    }
+    mouseTest_.stop(); // The Mouse debug sweep drives the controller too: one at a time.
+    if (!controller_.open()) {
+        addLog("Refresh not started: controller: " + controller_.error());
+        return;
+    }
+    if (controller_.ping() < 0.0) {
+        addLog("Refresh not started: the controller did not answer; is the firmware running?");
+        return;
+    }
+    // The game in front, so it shows its tooltips (observex is in front: its button was just clicked).
+    if (HWND game = GetAncestor(WindowFromPoint(POINT{first->x, first->y}), GA_ROOT);
+        game != nullptr && (!window_ || game != window_->handle()) && !SetForegroundWindow(game)) {
+        addLog("Refresh: could not bring the game to the front; its tooltips may not show");
+    }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    skillRefresher_.start(cursor.x, cursor.y);
+    refreshAsked_ = 0;
+    addLog("Refresh: the mouse goes over each of " + std::to_string(skills.size()) +
+           " skills to read its MP cost off its tooltip (Win+Esc stops it)");
+}
+
+void App::stopRefresh(const std::string& why) {
+    if (!skillRefresher_.running()) {
+        return;
+    }
+    skillRefresher_ = SkillRefresher(); // Not running; it only moves the cursor, so nothing is held to let go.
+    refreshAsked_ = 0;
+    addLog(why);
+}
+
+void App::driveRefresh() {
+    if (!skillRefresher_.running()) {
+        return;
+    }
+    if (review_ || clipView_ || !observed_ || !uiFinder_ || uiFinder_->state() != UiFinder::State::Running) {
+        stopRefresh("Refresh stopped: the game screen is no longer observed");
+        return;
+    }
+    if (!controller_.isOpen()) {
+        stopRefresh("Refresh stopped: the controller was lost");
+        return;
+    }
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    const double ticks = static_cast<double>(frequency.QuadPart);
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    const std::vector<RefreshSkill> skills = refreshSkills();
+    SkillRefresher::Input in;
+    in.now = static_cast<double>(counter.QuadPart) / ticks;
+    in.dt = std::max(0.0, static_cast<double>(ImGui::GetIO().DeltaTime));
+    in.cursorX = cursor.x;
+    in.cursorY = cursor.y;
+    in.imageWidth = static_cast<int>(pipeline_.width());
+    in.imageHeight = static_cast<int>(pipeline_.height());
+    in.skills = skills;
+    if (refreshAsked_ != 0) {
+        const UiText& text = uiFinder_->text();
+        if (text.request == refreshAsked_) {
+            in.answered = true;
+            in.shown = static_cast<double>(text.shownQpc) / ticks;
+            in.text = text.text.data();
+            refreshAsked_ = 0;
+        }
+    }
+    const SkillRefresher::Output out = skillRefresher_.step(in);
+    if (out.dx != 0 || out.dy != 0) {
+        controller_.moveMouse(out.dx, out.dy, 0);
+    }
+    if (out.read) {
+        refreshAsked_ = uiFinder_->readText(out.area);
+    }
+    if (out.learned) {
+        std::vector<statetree::Skill>& profile = stateTree_.skills();
+        const auto skill = std::find_if(profile.begin(), profile.end(),
+                                        [&](const statetree::Skill& one) { return one.name == out.name; });
+        if (skill != profile.end()) {
+            char line[200];
+            if (skill->mp == out.mp) {
+                std::snprintf(line, sizeof(line), "Refresh %s: MP cost %d, as it was", out.name.c_str(), out.mp);
+            } else {
+                const std::string was = skill->mp > 0 ? std::to_string(skill->mp) : std::string("not set");
+                std::snprintf(line, sizeof(line), "Refresh %s: MP cost %d (was %s)", out.name.c_str(), out.mp,
+                              was.c_str());
+                skill->mp = out.mp;
+                stateTree_.saveSkills(); // Into the profile at once (Ctrl+Z in the State tile undoes it).
+            }
+            addLog(line);
+        }
+    }
+    if (!out.log.empty()) {
+        addLog(out.log);
+    }
+}
+
+void App::lookAt(const PlateLook& look) {
+    brainLook_ = look;
+    sendLook();
+}
+
+void App::sendLook() {
+    const PlateLook& look = brainLook_.id != 0 ? brainLook_ : watchLook_;
+    if (look == lookAsked_) {
+        return;
+    }
+    lookAsked_ = look;
+    if (uiFinder_) {
+        uiFinder_->setLook(look);
+    }
+}
+
+std::vector<WatchedThing> App::thingsShown() {
+    std::vector<WatchedThing> things;
+    if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+        const Found* found = &recognizer_->found();
+        if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+            if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+                found = &snapped;
+            }
+        }
+        things.reserve(static_cast<std::size_t>(found->count));
+        for (int i = 0; i < found->count; ++i) {
+            const Tracked& thing = found->things[static_cast<std::size_t>(i)];
+            things.push_back({thing.id, {static_cast<int>(std::lround(thing.x)), static_cast<int>(std::lround(thing.y)),
+                                         static_cast<int>(std::lround(thing.x + thing.width)),
+                                         static_cast<int>(std::lround(thing.y + thing.height))}});
+        }
+    }
+    return things;
+}
+
+void App::watchTarget(const GameStats& stats) {
+    const std::vector<WatchedThing> things = thingsShown();
+    const GameGauge* hp = stats.find(kTargetPiece, "HP");
+    TargetWatch::Input in;
+    in.image = stats.image;
+    in.hasTarget = stats.hasTarget;
+    in.target = stats.target.data();
+    in.targetHp = hp != nullptr ? hp->full : -1.0f;
+    in.plate = stats.plate;
+    in.things = things;
+    const TargetWatch::Output out = targetWatch_.step(in);
+    if (out.dead != 0 && recognizer_) {
+        recognizer_->markDead(out.dead); // Shown dead from its next look on.
+    }
+    if (out.dead != 0) {
+        deadNow_ = out.dead; // Its drops are looked for round it (watchLoot).
+        deadName_ = stats.target.data();
+    }
+    if (!out.log.empty()) {
+        addLog(out.log, stats.shownQpc);
+    }
+    watchLook_ = out.look;
+    sendLook();
+}
+
+void App::watchLoot() {
+    const std::uint32_t dead = std::exchange(deadNow_, 0);
+    if (!dropFinder_ || dropFinder_->state() == DropFinder::State::Failed || review_ || clipView_) {
+        loot_ = {}; // Nothing looks meanwhile; the watch goes on when it can again.
+        lootShown_.clear();
+        noteDropsInClip();
+        return;
+    }
+    const std::vector<WatchedThing> things = thingsShown();
+    // The game's interface (the UI finder's pieces): the cast bar and the minimap's arrow looked like drops to the
+    // first drop model, and nothing on it lies on the ground.
+    std::span<const UiPiece> ui;
+    if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+        const UiPieces& pieces = uiFinder_->found();
+        ui = {pieces.pieces.data(), static_cast<std::size_t>(pieces.count)};
+    }
+    std::vector<DropSeen> close;
+    std::vector<DropSeen> sweep;
+    lootShown_.clear();
+    LootWatch::Input in;
+    if (dropFinder_->state() == DropFinder::State::Running) {
+        const FoundDrops& found = dropFinder_->found();
+        const auto keep = [&ui](const DropLook& look, std::vector<DropSeen>& kept, std::vector<Detection>* shown) {
+            for (int i = 0; i < look.count; ++i) {
+                const Detection& drop = look.drops[static_cast<std::size_t>(i)];
+                const float x = drop.x + drop.width * 0.5f;
+                const float y = drop.y + drop.height * 0.5f;
+                if (std::any_of(ui.begin(), ui.end(), [x, y](const UiPiece& piece) {
+                        return x >= static_cast<float>(piece.x0) && x < static_cast<float>(piece.x1) &&
+                               y >= static_cast<float>(piece.y0) && y < static_cast<float>(piece.y1);
+                    })) {
+                    continue;
+                }
+                kept.push_back({{static_cast<int>(std::lround(drop.x)), static_cast<int>(std::lround(drop.y)),
+                                 static_cast<int>(std::lround(drop.x + drop.width)),
+                                 static_cast<int>(std::lround(drop.y + drop.height))},
+                                drop.sure});
+                if (shown != nullptr) {
+                    shown->push_back(drop);
+                }
+            }
+        };
+        keep(found.close, close, &lootShown_);
+        keep(found.sweep, sweep, nullptr);
+        in.close.looked = found.close.image;
+        in.sweep.looked = found.sweep.image;
+        lootImage_ = found.close.image;
+    }
+    in.ms = static_cast<double>(qpcNow()) * 1000.0 / qpcFrequency();
+    in.width = static_cast<int>(pipeline_.width());
+    in.height = static_cast<int>(pipeline_.height());
+    in.dead = dead;
+    in.name = deadName_;
+    in.things = things;
+    in.close.drops = close;
+    in.sweep.drops = sweep;
+    loot_ = lootWatch_.step(in);
+    dropFinder_->lookAt(loot_.square);
+    if (loot_.drops == 0) {
+        lootShown_.clear(); // The newest close look may be of an earlier spot until this one's first.
+    }
+    if (!loot_.log.empty()) {
+        addLog(loot_.log);
+    }
+    noteDropsInClip();
+}
+
+void App::noteDropsInClip() {
+    if (!clipRecorder_) {
+        return;
+    }
+    // What drawDrops draws, whatever the flag says (the drop finder looks either way, as the recogniser does): a line
+    // whenever it changes, by a new close look or another spot, or nothing drawn any more.
+    const bool drawn = dropFinder_ && dropFinder_->state() == DropFinder::State::Running && !lootShown_.empty();
+    const LootSquare square = drawn ? loot_.square : LootSquare{};
+    const std::uint64_t image = drawn ? lootImage_ : 0;
+    const bool kill = drawn && loot_.kill;
+    if (dropsNoted_ && square == dropsNotedSquare_ && image == dropsNotedImage_ && kill == dropsNotedKill_) {
+        return;
+    }
+    dropsNoted_ = true;
+    dropsNotedSquare_ = square;
+    dropsNotedImage_ = image;
+    dropsNotedKill_ = kill;
+    clipRecorder_->dropsShown(qpcNow(), image, kill, square,
+                              drawn ? std::span<const Detection>(lootShown_) : std::span<const Detection>());
+}
+
+void App::drawDrops(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
+    // Drops a close look found (one sweep look alone may be a look-alike: not drawn).
+    if (!dropFinder_ || dropFinder_->state() != DropFinder::State::Running || lootShown_.empty()) {
+        return;
+    }
+    drawLoot(drawList, fonts_.medium, min, max, static_cast<float>(pipeline_.width()), lootShown_, dpiScale_);
 }
 
 const GameStats* App::clipStatsShown(bool today) {
@@ -1235,6 +2305,54 @@ void App::noteDepthInClip() {
     clipRecorder_->depthShown(previewQpc_, previewImage_, depthDrawn_);
 }
 
+CameraShown App::liveCamera() const {
+    if (!mouseCamera_) {
+        return {};
+    }
+    float coneOff = 0.0f;
+    float turnsOff = 0.0f;
+    mouseCamera_->offs(coneOff, turnsOff);
+    return cameraOf(mouseCamera_->at(previewMs_), coneOff, turnsOff);
+}
+
+void App::noteCameraInClip() {
+    if (!clipRecorder_ || previewQpc_ == 0) {
+        return;
+    }
+    // What the Camera card shows (whatever the tab shows): a line whenever it changes, so every frame it turns.
+    const CameraShown camera = liveCamera();
+    if (cameraNoted_ && camera == notedCamera_) {
+        return;
+    }
+    cameraNoted_ = true;
+    notedCamera_ = camera;
+    clipRecorder_->cameraShown(previewQpc_, previewImage_, camera);
+}
+
+void App::noteBrainInClip() {
+    if (!clipRecorder_ || previewQpc_ == 0) {
+        return;
+    }
+    // What the State tile shows green: the current state and its task that runs, while the brain acts; nothing while
+    // not. A line whenever it changes, by the state's names (a profile read again gets other ids).
+    const statetree::State* state = brainActs_ ? stateTree_.currentState() : nullptr;
+    const int id = state != nullptr ? state->id : 0;
+    const int task = state != nullptr ? stateTree_.currentTask() : -1;
+    if (brainNoted_ && id == brainNotedState_ && task == brainNotedTask_) {
+        return;
+    }
+    brainNoted_ = true;
+    brainNotedState_ = id;
+    brainNotedTask_ = task;
+    statetree::BrainShown brain;
+    brain.acting = state != nullptr;
+    brain.task = task;
+    if (state != nullptr) {
+        brain.state = statetree::statePath(stateTree_.tree(), id);
+    }
+    clipRecorder_->brained(previewQpc_, previewImage_, std::move(brain));
+}
+
 void App::saveSettings() {
     if (!settingsFile_.empty()) {
         settings_.save(settingsFile_);
@@ -1251,9 +2369,12 @@ void App::openReviewChooser() {
 
 void App::readRecordings() {
     recordings_.clear();
+    handmade_.clear();
     for (RecordingEntry& entry : listRecordings(settings_.recordingsFolder)) {
         RecordingRow row;
-        row.when = describeWhen(entry.info.started);
+        const bool handmade = entry.info.kind == RecordKind::Handmade;
+        // A handmade package by the user's name for it: "15/11/2026 - 15:00".
+        row.when = handmade ? handmadeTitle(entry.info.started) : describeWhen(entry.info.started);
         const std::vector<std::string> images = listImages(entry.folder);
         row.images = images.size();
         for (const std::string& image : images) { // UTF-8.
@@ -1280,7 +2401,7 @@ void App::readRecordings() {
             row.lastReviewed = "Last reviewed " + when;
         }
         row.entry = std::move(entry);
-        recordings_.push_back(std::move(row));
+        (handmade ? handmade_ : recordings_).push_back(std::move(row));
     }
 }
 
@@ -1325,8 +2446,9 @@ void App::closeReview() {
     noteInClip("review closed: " + nameOf(review_->folder()));
     refresher_.reset(); // Its finder writes nothing.
     review_.reset();    // Saves when, if it changed the answers.
-    // Not in snapshot mode: it would write into models/, which tests must leave alone.
-    if (!snapshot_) {
+    // Not in snapshot mode: it would write into models/, which tests must leave alone. Only for a category with kinds
+    // (not Drops: a drop is a drop, there are no kinds to learn).
+    if (!snapshot_ && !category.kinds.empty()) {
         kindUpdater_.reset(); // One still at work stops first: the new one learns from everything it would.
         kindUpdater_ = std::make_unique<KindUpdater>(settings_.recordingsFolder, category.id, kindIdsOf(category),
                                                      modelFolder(category.id));
@@ -1338,7 +2460,7 @@ void App::openClip(const ClipEntry& clip) {
     closeClip();
     clipView_ = std::make_unique<ClipView>(gpuAdapter_.Get(), gpu_.device.Get(), clip.folder, clip.info,
                                            *todaysHeuristics(), todaysSnapping(), todaysGround(), todaysDepth(),
-                                           modelFolder("ui"), stats_);
+                                           modelFolder("ui"), stats_, modelFolder("drop"));
     clipView_->setSkills(skillsToFind()); // The profile's, read again on its frames.
     ++clipsOpened_; // The Log tile's lines are this clip's now.
     noteInClip("clip opened: " + nameOf(clip.folder));
@@ -1450,7 +2572,7 @@ bool App::playSnapshot() {
             const float t = static_cast<float>(frame - 1) / static_cast<float>(moveFrames);
             io.AddMousePosEvent(input.from.x + (input.to.x - input.from.x) * t,
                                 input.from.y + (input.to.y - input.from.y) * t);
-        } else if (frame == 2 + moveFrames) {
+        } else if (frame == 2 + moveFrames && input.release) {
             io.AddMouseButtonEvent(input.button, false);
         }
         return false;
@@ -1468,6 +2590,51 @@ void App::drawFrame() {
     if (ImGui::IsKeyPressed(ImGuiKey_F3, false)) {
         showStats_ = !showStats_;
     }
+    // Win+Esc (a hot key, so it works while the game is in front) starts or stops the Brain.
+    if (brainKey_ && brainKey_->pressed()) {
+        if (skillRefresher_.running()) {
+            stopRefresh("Refresh stopped (Win+Esc)"); // It stops Refresh first, as it would the brain.
+        } else {
+            toggleActing();
+        }
+    }
+    // TEMPORARY (the Mouse debug sweep, 2026-11-15): drive it one step this frame from the real cursor and the
+    // monsters shown now, and draw its countdown big over everything.
+    if (mouseTest_.active()) {
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        mouseTest_.tick(visibleMonsters(), cursor.x, cursor.y,
+                        static_cast<double>(ImGui::GetIO().DeltaTime) * 1000.0);
+    }
+    if (mouseTest_.countingDown()) {
+        const ImGuiViewport* countdownView = ImGui::GetMainViewport();
+        ImDrawList* front = ImGui::GetForegroundDrawList();
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%d", std::max(1, static_cast<int>(std::ceil(mouseTest_.countdownLeft()))));
+        const float big = std::round(140.0f * dpiScale_);
+        const ImVec2 textSize = fonts_.medium->CalcTextSizeA(big, FLT_MAX, 0.0f, buf);
+        const ImVec2 at(countdownView->Pos.x + std::round((countdownView->Size.x - textSize.x) * 0.5f),
+                        countdownView->Pos.y + std::round((countdownView->Size.y - textSize.y) * 0.5f));
+        const float shadow = std::round(3.0f * dpiScale_);
+        front->AddText(fonts_.medium, big, ImVec2(at.x + shadow, at.y + shadow), IM_COL32(0, 0, 0, 160), buf);
+        front->AddText(fonts_.medium, big, at, theme::kAccent, buf);
+    }
+    frameMeter_.lap(FrameStep::NewFrame);
+    actuateBrain(); // While acting: run the current state's tasks (drive the controller).
+    driveRefresh(); // While the Skills tab's Refresh runs: the cursor over the skills, their MP costs read.
+    frameMeter_.lap(FrameStep::Acting);
+    if (observed_) {
+        // Whether the brain drives the mouse/keyboard, seen even from the corner of the eye while watching the game
+        // (the user asked, 2026-11-15): a border round the whole window, green while it is active, red while a screen
+        // is observed and it is not; none while no screen is.
+        const ImGuiViewport* actView = ImGui::GetMainViewport();
+        ImDrawList* front = ImGui::GetForegroundDrawList();
+        const float thick = std::round(3.0f * dpiScale_);
+        front->AddRect(ImVec2(actView->Pos.x + thick * 0.5f, actView->Pos.y + thick * 0.5f),
+                       ImVec2(actView->Pos.x + actView->Size.x - thick * 0.5f,
+                              actView->Pos.y + actView->Size.y - thick * 0.5f),
+                       brainActs_ ? theme::kYes : theme::kRecord, 0.0f, 0, thick);
+    }
     picker_->setObserved(observed_ ? observed_->name : std::string(), observedImage_.get());
 
     // The view before the bar over it: while the State tile has the keyboard, it takes the keys pressed this frame
@@ -1483,15 +2650,20 @@ void App::drawFrame() {
     drawTabs(tabsHeight);
     const ImVec2 pos = ImGui::GetWindowPos();
     const ImVec2 size = ImGui::GetWindowSize();
-    // The Log tile a narrower column at the right, the others left of it.
+    // The Debug tile a narrower column at the right, the Log tile one left of it, the others left of them.
     const float tileGap = std::round(kTileGap * dpiScale_);
     TileRect area{pos.x, pos.y + tabsHeight, pos.x + size.x, pos.y + size.y};
+    const bool leftTiles = settings_.showLive || settings_.showGameStats || settings_.showState || settings_.showSkills;
+    TileRect debugTile;
+    if (settings_.showDebug) {
+        TileRect others;
+        debugTile = placeColumn(area, leftTiles || settings_.showLog, debugSplit_, tileGap, others);
+        area = others;
+    }
     TileRect logTile;
     if (settings_.showLog) {
         TileRect others;
-        logTile = placeLog(area,
-                           settings_.showLive || settings_.showGameStats || settings_.showState || settings_.showSkills,
-                           logSplit_, tileGap, others);
+        logTile = placeColumn(area, leftTiles, logSplit_, tileGap, others);
         area = others;
     }
     // Skills, while open, covers the column of Stats and State, whichever are on (the user asked, 2026-11-14): it goes
@@ -1517,7 +2689,23 @@ void App::drawFrame() {
     };
     if (tiles.state.shown()) { // First: see above.
         beginTile("##state", tiles.state, ImGuiWindowFlags_HorizontalScrollbar);
-        stateTree_.draw(fonts_, settings_.brainsFolder);
+        // Its Brain button (the top bar's State tree button until 2026-11-15) starts or stops acting. With a clip open,
+        // the brain as recorded at the frame shown is green (the user asked, 2026-11-15), its condition dots on the
+        // reading the Stats tile shows (Recorded's or Today's).
+        StateTreeView::Replay replay;
+        statetree::Variables clipVariables;
+        if (clipView_) {
+            replay.recorded = clipView_->brainRecorded();
+            replay.brain = clipView_->recordedBrain();
+            const bool today = clipView_->guesser() == ClipView::Guesser::Today;
+            if (const GameStats* stats = clipStatsShown(today); stats != nullptr) {
+                clipVariables = statetree::variablesOf(*stats);
+                replay.variables = &clipVariables;
+            }
+        }
+        if (stateTree_.draw(fonts_, settings_.brainsFolder, skillIcons_, brainActs_, clipView_ ? &replay : nullptr)) {
+            toggleActing();
+        }
         ImGui::EndChild();
     }
     if (stateTree_.name() != settings_.brainName) { // Saved or loaded under another name: loaded again at start.
@@ -1544,7 +2732,12 @@ void App::drawFrame() {
         drawLog();
         ImGui::EndChild();
     }
-    drawTileLines(tiles, logTile, pos.x);
+    if (debugTile.shown()) {
+        beginTile("##debug", debugTile, ImGuiWindowFlags_None);
+        drawDebug();
+        ImGui::EndChild();
+    }
+    drawTileLines(tiles, logTile, debugTile, pos.x);
     if (!tiles.live.shown()) {
         drawErrors(ImVec2(pos.x + size.x - inset, pos.y + tabsHeight + inset));
     }
@@ -1569,6 +2762,7 @@ void App::drawTabs(float height) {
         {"##tab-stats", "Stats", &settings_.showGameStats},
         {"##tab-skills", "Skills", &settings_.showSkills},
         {"##tab-log", "Log", &settings_.showLog},
+        {"##tab-debug", "Debug", &settings_.showDebug},
     };
     // Stats and State under Skills are not shown: drawn off, and a click on one closes Skills and shows it.
     const auto under = [this](const bool* on) {
@@ -1595,9 +2789,37 @@ void App::drawTabs(float height) {
         }
         x = ImGui::GetItemRectMax().x + std::round(2.0f * dpiScale_);
     }
+
+    // Controller light right of the tabs (after Log; the user asked, 2026-11-15, moved from the row's far right): a
+    // green/red dot, "Controller", and in smaller, dimmer text whether the reactor's Raspberry Pi Pico is plugged in.
+    // All three centred on the tab names' middle by their capitals (the user asked, 2026-11-15: centring the words'
+    // line boxes set "Connected" 1-2 px higher than "Controller" and the group above the tab names).
+    {
+        const bool connected = picoLink_.connected();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        ImFont* font = ImGui::GetFont();
+        const float fontSize = ImGui::GetFontSize();
+        const float smallSize = std::round(fontSize * 0.82f);
+        const float radius = std::round(5.0f * dpiScale_);
+        const float dotGap = std::round(8.0f * dpiScale_);
+        const float stateGap = std::round(9.0f * dpiScale_);
+        const char* name = "Controller";
+        const char* state = connected ? "Connected" : "Not Connected";
+        const ImVec2 nameSize = ImGui::CalcTextSize(name);
+        const float startX = x + std::round(26.0f * dpiScale_); // Set a little apart from the last tab.
+        const float midY = tabTextMiddle(pos.y, height, fonts_);
+        const ImU32 color = connected ? theme::kYes : theme::kRecord;
+        const ImVec2 center(startX + radius, midY);
+        drawList->AddCircleFilled(center, radius, color, 16);
+        drawList->AddCircle(center, radius, theme::faded(color, 0.45f), 16, std::round(1.0f * dpiScale_));
+        const ImVec2 nameAt(startX + radius * 2.0f + dotGap, std::round(midY - capsMiddle(font, fontSize)));
+        drawList->AddText(nameAt, theme::kText, name);
+        const ImVec2 stateAt(nameAt.x + nameSize.x + stateGap, std::round(midY - capsMiddle(font, smallSize)));
+        drawList->AddText(font, smallSize, stateAt, theme::faded(theme::kTextMuted, 0.8f), state);
+    }
 }
 
-void App::drawTileLines(const Tiles& tiles, const TileRect& log, float left) {
+void App::drawTileLines(const Tiles& tiles, const TileRect& log, const TileRect& debug, float left) {
     // A line in the gap from `min` to `max` (`across`: a horizontal one); dragging it sets `share`, of `length` from
     // `start` (where the tiles it parts begin).
     const float gap = std::round(kTileGap * dpiScale_);
@@ -1632,6 +2854,10 @@ void App::drawTileLines(const Tiles& tiles, const TileRect& log, float left) {
     if (log.shown() && (tiles.live.shown() || tiles.stats.shown() || tiles.state.shown())) {
         line("##log-line", ImVec2(log.left - gap, log.top), ImVec2(log.left, log.bottom), false, left,
              log.right - left, &logSplit_);
+    }
+    if (debug.shown() && (log.shown() || tiles.live.shown() || tiles.stats.shown() || tiles.state.shown())) {
+        line("##debug-line", ImVec2(debug.left - gap, debug.top), ImVec2(debug.left, debug.bottom), false, left,
+             debug.right - left, &debugSplit_);
     }
 }
 
@@ -1678,7 +2904,7 @@ void App::drawLive() {
             }
         }
         clipView_->draw(fonts_, settings_.showCharacters, settings_.showKinds, settings_.showUi, settings_.showGround,
-                        settings_.showDepth, dpiScale_);
+                        settings_.showDepth, settings_.showDrops, dpiScale_);
     } else if (observed_) {
         drawObservedScreen();
     } else {
@@ -1845,7 +3071,8 @@ void App::drawTopBar(float height) {
         reviewButton.icon = Icon::Picture;
         reviewButton.text = "Review";
         reviewButton.open = ImGui::IsPopupOpen(kReviewPopup) || ImGui::IsPopupOpen(kRecordingsPopup) ||
-                            ImGui::IsPopupOpen(kClipsPopup) || ImGui::IsPopupOpen(kCategoryPopup);
+                            ImGui::IsPopupOpen(kHandmadePopup) || ImGui::IsPopupOpen(kClipsPopup) ||
+                            ImGui::IsPopupOpen(kCategoryPopup);
     }
     x -= std::round(8.0f * dpiScale_) + reviewButton.width(fonts_);
     ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
@@ -1859,9 +3086,9 @@ void App::drawTopBar(float height) {
         }
     }
     if (ImGui::IsItemHovered() && !review_ && !clipView_ && !reviewButton.open) {
-        ImGui::SetTooltip("Answer what observex found in a training recording, or play a clip");
+        ImGui::SetTooltip("Answer what observex found in a training recording or your screenshots, or play a clip");
     }
-    // The chooser and both lists hang under the button.
+    // The chooser and the lists hang under the button.
     const ImVec2 reviewCorner(ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + popupGap);
     ImGui::SetNextWindowPos(reviewCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     drawReviewChooser();
@@ -1870,7 +3097,9 @@ void App::drawTopBar(float height) {
         openList_ = nullptr;
     }
     ImGui::SetNextWindowPos(reviewCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    drawRecordings();
+    drawRecordings(kRecordingsPopup, "Review a recording", recordings_, false);
+    ImGui::SetNextWindowPos(reviewCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    drawRecordings(kHandmadePopup, "Review your screenshots", handmade_, true);
     ImGui::SetNextWindowPos(reviewCorner, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     drawClips();
     if (openCategory_) { // Here, not inside the list's popup, so the chooser's name means the same popup.
@@ -1878,6 +3107,8 @@ void App::drawTopBar(float height) {
         ImGui::OpenPopup(kCategoryPopup);
     }
     drawCategoryChooser();
+    // The brain's start/stop is in the State tile now (its Brain button; the user asked, 2026-11-15), not here.
+
     const float stepsRight = x - std::round(16.0f * dpiScale_); // Left of the Review button.
     if (review_) {
         drawReviewSteps(height, stepsRight);
@@ -1944,9 +3175,11 @@ void App::drawTopBar(float height) {
         BarButton guessesButton;
         guessesButton.icon = Icon::Guesses;
         guessesButton.caption = "Guesses";
-        guessesButton.text = !settings_.showCharacters && !settings_.showGround && !settings_.showDepth ? "Hidden"
-                             : clipView_->guesser() == ClipView::Guesser::Recorded                       ? "Recorded"
-                                                                                                         : "Today";
+        guessesButton.text =
+            !settings_.showCharacters && !settings_.showGround && !settings_.showDepth && !settings_.showDrops
+                ? "Hidden"
+            : clipView_->guesser() == ClipView::Guesser::Recorded ? "Recorded"
+                                                                  : "Today";
         guessesButton.arrow = true;
         guessesButton.open = ImGui::IsPopupOpen(kGuessesPopup);
         ImGui::SetCursorScreenPos(ImVec2(screenMax.x + std::round(8.0f * dpiScale_), buttonY));
@@ -1971,21 +3204,15 @@ void App::drawTopBar(float height) {
         const ImVec2 maxSize(std::min(960.0f * dpiScale_, viewport->Size.x - 80.0f * dpiScale_),
                              std::min(380.0f * dpiScale_, viewport->Size.y * 0.6f));
         const ImVec2 size = picker_->fit(maxSize);
-        if (const Screen* chosen = picker_->draw(ImVec2(size.x, maxSize.y), theme::kSurface)) {
-            chosen_ = *chosen;
+        // While a screen is observed, its None tile (left of the screens) stops observing (the user asked,
+        // 2026-11-12; a tile since 2026-11-15, the user asked: the line under the screens was hard to see).
+        const ScreenPicker::Choice choice = picker_->draw(ImVec2(size.x, maxSize.y), theme::kSurface);
+        if (choice.screen != nullptr) {
+            chosen_ = *choice.screen;
             ImGui::CloseCurrentPopup();
-        }
-        // None: stop observing (the user asked, 2026-11-12), while a screen is observed.
-        if (observed_) {
-            ImGui::Dummy(ImVec2(0.0f, 2.0f * dpiScale_));
-            const float left = ImGui::GetCursorPosX();
-            if (ImGui::Selectable("None##observe-none", false, ImGuiSelectableFlags_AllowOverlap,
-                                  ImVec2(size.x, 0.0f))) {
-                chosenNone_ = true;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine(left + ImGui::CalcTextSize("None").x + 10.0f * dpiScale_);
-            ImGui::TextDisabled("stops all observation: no capture, recognition, recording or clip buffer");
+        } else if (choice.none) {
+            chosenNone_ = true;
+            ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
@@ -2059,6 +3286,40 @@ void App::drawSettings() {
     // applies from the next recording.
     if (ImGui::Checkbox("Log what the model sees while recording", &settings_.liveLog)) {
         saveSettings();
+    }
+
+    // TEMPORARY DEBUG TEST (the user asked, 2026-11-15; to be removed). The "Mouse debug" sweep: clicked, it counts
+    // down 3 s, then the Pico controller moves the real cursor onto each visible monster, resting 2 s on each, looping
+    // until the mouse is moved. Remove this block with app/MouseTest.*, engine/PicoController.* and the
+    // controller_/mouseTest_/mouseTestStatus_ members.
+    ImGui::Dummy(ImVec2(0.0f, sectionGap));
+    ImGui::TextDisabled("Mouse debug (test)");
+    if (mouseTest_.active()) {
+        if (ImGui::Button("Stop mouse debug")) {
+            mouseTest_.stop();
+            mouseTestStatus_.clear();
+        }
+    } else if (ImGui::Button("Mouse debug")) {
+        mouseTestStatus_.clear();
+        if (!observed_) {
+            mouseTestStatus_ = "Observe the game screen first.";
+        } else if (!controller_.open()) {
+            mouseTestStatus_ = "Controller: " + controller_.error();
+        } else if (const double ms = controller_.ping(); ms < 0.0) {
+            mouseTestStatus_ =
+                "Opened " + controller_.port() + ", but the controller did not answer. Is the firmware running?";
+        } else {
+            stopActing(); // The sweep and the brain both drive the controller: one at a time.
+            mouseTest_.begin(controller_);
+            char msg[96];
+            std::snprintf(msg, sizeof(msg), "Linked on %s (ping %.1f ms).", controller_.port().c_str(), ms);
+            mouseTestStatus_ = msg;
+        }
+    }
+    if (const std::string& line = mouseTest_.active() ? mouseTest_.status() : mouseTestStatus_; !line.empty()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(420.0f * dpiScale_));
+        ImGui::TextDisabled("%s", line.c_str());
+        ImGui::PopTextWrapPos();
     }
 }
 
@@ -2164,6 +3425,30 @@ void App::drawShowFlags() {
         ImGui::Unindent(indent);
     }
 
+    // Drops (the user asked, 2026-11-15): the spot looked at closely (round a kill, or drops the sweep found) and the
+    // drops found there. Only while it cannot draw, why.
+    if (ImGui::Checkbox("Drops", &settings_.showDrops)) {
+        saveSettings();
+        noteInClip(settings_.showDrops ? "show Drops on" : "show Drops off");
+    }
+    why[0] = '\0';
+    if (!dropFinder_) {
+        std::snprintf(why, sizeof(why), "%s",
+                      dropFinderError_.empty() ? "Not looking: the screen is not captured." : dropFinderError_.c_str());
+    } else if (dropFinder_->state() == DropFinder::State::Starting && dropFinder_->progress() > 0.0f) {
+        std::snprintf(why, sizeof(why), "Preparing the drop model for this GPU: %.0f%%",
+                      static_cast<double>(dropFinder_->progress() * 100.0f));
+    } else if (dropFinder_->state() == DropFinder::State::Failed) {
+        std::snprintf(why, sizeof(why), "%s", dropFinder_->error().c_str());
+    }
+    if (why[0] != '\0') {
+        ImGui::Indent(indent);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::round(340.0f * dpiScale_));
+        ImGui::TextDisabled("%s", why);
+        ImGui::PopTextWrapPos();
+        ImGui::Unindent(indent);
+    }
+
     // Ground (the user asked, 2026-11-12): the ground plane the camera sees, turning with it: the first step to
     // knowing how far things are.
     if (ImGui::Checkbox("Ground", &settings_.showGround)) {
@@ -2171,6 +3456,13 @@ void App::drawShowFlags() {
         noteInClip(settings_.showGround ? "show Ground on" : "show Ground off");
     }
     // No words under Ground and Depth (the user asked, 2026-11-12).
+
+    // Geodata (the user asked, 2026-11-15): the server's own map of the ground (its geodata) round the character, as a
+    // grid fixed to the world; while observex is not sure where the character is, "Type /loc" in the middle.
+    if (ImGui::Checkbox("Geodata", &settings_.showGeodata)) {
+        saveSettings();
+        noteInClip(settings_.showGeodata ? "show Geodata on" : "show Geodata off");
+    }
 
     // Depth (the user asked, 2026-11-12): how near each pixel is, the depth network's guess, nearer brighter, over the
     // screen instead of it.
@@ -2188,7 +3480,7 @@ void App::showCharacters(bool on) {
 
 void App::pickGuesser(ClipView::Guesser guesser) {
     clipView_->setGuesser(guesser);
-    if (!settings_.showCharacters && !settings_.showGround && !settings_.showDepth) {
+    if (!settings_.showCharacters && !settings_.showGround && !settings_.showDepth && !settings_.showDrops) {
         showCharacters(true);
     }
 }
@@ -2221,8 +3513,9 @@ void App::drawGuessers() {
     // characters, and whose grid (Recorded's as drawn live).
     ImGui::Indent(indent);
     for (const Choice& choice : choices) {
-        ImGui::BeginDisabled((!settings_.showCharacters && !settings_.showGround && !settings_.showDepth) ||
-                             !missing.empty());
+        ImGui::BeginDisabled(
+            (!settings_.showCharacters && !settings_.showGround && !settings_.showDepth && !settings_.showDrops) ||
+            !missing.empty());
         if (ImGui::RadioButton(choice.name, clipView_->guesser() == choice.guesser)) {
             pickGuesser(choice.guesser);
         }
@@ -2277,6 +3570,18 @@ void App::drawGuessers() {
     // under Ground and Depth (the user asked, 2026-11-12).
     if (ImGui::Checkbox("Depth", &settings_.showDepth)) {
         saveSettings();
+    }
+    // Drops (the user asked, 2026-11-15: missing here): Recorded's as Show > Drops drew them live, Today's what
+    // today's drop model finds on the frame shown. Only why there are none to draw.
+    if (ImGui::Checkbox("Drops", &settings_.showDrops)) {
+        saveSettings();
+    }
+    if (const std::string why = clipView_->dropsProblem(); settings_.showDrops && !why.empty()) {
+        ImGui::Indent(indent);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+        ImGui::TextDisabled("%s", why.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Unindent(indent);
     }
 }
 
@@ -2509,6 +3814,13 @@ void App::drawReviewChooser() {
         openList_ = kRecordingsPopup;
         ImGui::CloseCurrentPopup();
     }
+    // The training screenshots taken by hand (the user asked, 2026-11-15), a package an hour.
+    std::snprintf(description, sizeof(description), "%s %s  \xC2\xB7  your Shift+Win screenshots, to draw boxes on",
+                  formatCount(handmade_.size()).c_str(), handmade_.size() == 1 ? "package" : "packages");
+    if (choiceTile("handmade", "Handmade", description, tileSize, fonts_, dpi)) {
+        openList_ = kHandmadePopup;
+        ImGui::CloseCurrentPopup();
+    }
     std::snprintf(
         description, sizeof(description), "%s %s  \xC2\xB7  the last %.0f s, saved with Save last %.0f s, to play",
         formatCount(clips_.size()).c_str(), clips_.size() == 1 ? "clip" : "clips", kClipSeconds, kClipSeconds);
@@ -2645,16 +3957,17 @@ void App::drawRemoveClip() {
     ImGui::EndPopup();
 }
 
-void App::drawRecordings() {
-    // The Review button's list: every recording in the recordings folder, newest first, each with a picture of its
-    // first image (the user asked, 2026-11-02). Picking one asks what to look for in it next.
-    if (!ImGui::BeginPopup(kRecordingsPopup)) {
+void App::drawRecordings(const char* popup, const char* title, const std::vector<RecordingRow>& rows,
+                         bool handmade) {
+    // The Review button's lists: every recording (or handmade package) in the recordings folder, newest first, each
+    // with a picture of its first image (the user asked, 2026-11-02). Picking one asks what to look for in it next.
+    if (!ImGui::BeginPopup(popup)) {
         return;
     }
     const float dpi = dpiScale_;
     const ImVec2 tileSize(std::round(520.0f * dpi), std::round(88.0f * dpi));
     ImGui::PushFont(fonts_.medium, 18.0f);
-    ImGui::TextUnformatted("Review a recording");
+    ImGui::TextUnformatted(title);
     ImGui::PopFont();
     // Wrapped to the list, so a long folder path does not stretch the popup.
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + tileSize.x + ImGui::GetStyle().ScrollbarSize);
@@ -2662,18 +3975,19 @@ void App::drawRecordings() {
     ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0.0f, 4.0f * dpi));
 
-    if (recordings_.empty()) {
-        ImGui::TextUnformatted("No recordings yet.");
-        ImGui::TextDisabled("Observe a screen and press Record.");
+    if (rows.empty()) {
+        ImGui::TextUnformatted(handmade ? "No screenshots yet." : "No recordings yet.");
+        ImGui::TextDisabled(handmade ? "Observe a screen and press Shift+Win: each goes into the hour's package."
+                                     : "Observe a screen and press Record.");
         ImGui::EndPopup();
         return;
     }
     const float spacing = ImGui::GetStyle().ItemSpacing.y;
-    const float listHeight = std::min(static_cast<float>(recordings_.size()) * (tileSize.y + spacing) - spacing,
+    const float listHeight = std::min(static_cast<float>(rows.size()) * (tileSize.y + spacing) - spacing,
                                       std::round(ImGui::GetMainViewport()->Size.y * 0.6f));
     ImGui::BeginChild("##recordings", ImVec2(tileSize.x + ImGui::GetStyle().ScrollbarSize, listHeight));
-    for (std::size_t i = 0; i < recordings_.size(); ++i) {
-        const RecordingRow& row = recordings_[i];
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const RecordingRow& row = rows[i];
         // Each row: a picture of its first image, when, then the details, then when the user last changed answers
         // in a review of it, if ever (the user asked, 2026-11-07). The details: how long, how many images, and how
         // far each category's review got: "00:34 · 12 images · Characters 11 of 12 reviewed".
@@ -2683,7 +3997,9 @@ void App::drawRecordings() {
             formatDuration(duration, sizeof(duration), std::chrono::seconds(row.entry.info.seconds));
             detail = std::string(duration) + "  \xC2\xB7  ";
         }
-        detail += std::to_string(row.images) + (row.images == 1 ? " image" : " images");
+        const char* noun = handmade ? (row.images == 1 ? " screenshot" : " screenshots")
+                                    : (row.images == 1 ? " image" : " images");
+        detail += std::to_string(row.images) + noun;
         if (row.bytes > 0) { // All its images together (the user asked, 2026-11-11).
             char size[24];
             formatBytes(size, sizeof(size), row.bytes);
@@ -2719,11 +4035,12 @@ void App::drawRecordings() {
         if (pictureRow(static_cast<int>(i), tileSize, *thumbnails_, row.firstImage, row.when,
                        {detail, row.lastReviewed}, fonts_, dpi)) {
             if (row.images == 0) {
-                reviewError_ = "No images in the recording of " + row.when;
+                reviewError_ = (handmade ? "No screenshots in the package " : "No images in the recording of ") +
+                               row.when;
             } else {
                 reviewFolder_ = row.entry.folder;
-                reviewWhen_ = row.when;
-                reviewFolderImages_ = row.images;
+                reviewAbout_ = (handmade ? "Handmade " : "Recorded ") + row.when + "  \xC2\xB7  " +
+                               std::to_string(row.images) + noun;
                 openCategory_ = true;
             }
             ImGui::CloseCurrentPopup();
@@ -2734,7 +4051,7 @@ void App::drawRecordings() {
 }
 
 void App::drawCategoryChooser() {
-    // After the recording: what to look for. Only characters for now; more categories are more tiles.
+    // After the recording or handmade package: what to look for (characters or drops; more categories, more tiles).
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
         ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + viewport->Size.y * 0.4f), ImGuiCond_Always,
@@ -2748,9 +4065,7 @@ void App::drawCategoryChooser() {
     ImGui::PushFont(fonts_.medium, 18.0f);
     ImGui::TextUnformatted(kCategoryPopup);
     ImGui::PopFont();
-    char where[300];
-    std::snprintf(where, sizeof(where), "Recorded %s  \xC2\xB7  %zu images", reviewWhen_.c_str(), reviewFolderImages_);
-    ImGui::TextDisabled("%s", where);
+    ImGui::TextDisabled("%s", reviewAbout_.c_str());
     ImGui::Dummy(ImVec2(0.0f, 6.0f * dpi));
 
     const ImVec2 tileSize(std::round(340.0f * dpi), std::round(60.0f * dpi));
@@ -2789,8 +4104,11 @@ void App::drawChooseScreen() {
 
     ImGui::SetCursorPos(ImVec2(std::round((ImGui::GetWindowWidth() - maxSize.x) * 0.5f),
                                std::round(top + logoSize + gap * 0.5f + titleHeight + gap)));
-    if (const Screen* chosen = picker_->draw(ImVec2(maxSize.x, size.y), theme::kBackground)) {
-        chosen_ = *chosen;
+    const ScreenPicker::Choice choice = picker_->draw(ImVec2(maxSize.x, size.y), theme::kBackground);
+    if (choice.screen != nullptr) {
+        chosen_ = *choice.screen;
+    } else if (choice.none) {
+        chosenNone_ = true;
     }
 }
 
@@ -2845,14 +4163,45 @@ void App::drawObservedScreen() {
         }
     }
     // The ground under them too, as the camera is on the image shown (it follows fewer images: moved on to it).
+    GroundCamera shownCamera; // Unknown until the ground finder has followed an image.
     if (groundFollowing_ && groundFinder_->state() == GroundFinder::State::Running) {
         if (const GroundSeen& seen = groundFinder_->seen(); seen.image > 0) {
-            groundDrawn_ = {true, previewImage_, seen.followed, groundAt(seen.camera, previewMs_)};
-            drawGround(drawList, min, max, static_cast<float>(pipeline_.width()), groundDrawn_.camera, dpiScale_);
+            shownCamera = groundAt(seen.camera, previewMs_);
+            // Turned on and tilted as the mouse's counts say from the image followed to the one shown: exact on every
+            // frame, not along the follow's speeds.
+            if (mouseCamera_ && shownCamera.known) {
+                if (const MouseCamera::View now = mouseCamera_->at(previewMs_); now.known) {
+                    const MouseCamera::View then = mouseCamera_->at(seen.camera.timeMs);
+                    shownCamera.yaw = static_cast<float>(
+                        std::remainder(static_cast<double>(seen.camera.yaw) + now.turned - then.turned,
+                                       2.0 * 3.14159265358979323846));
+                    if (now.pitchKnown) {
+                        shownCamera.pitch = now.pitch;
+                    }
+                }
+            }
+            if (settings_.showGround) {
+                groundDrawn_ = {true, previewImage_, seen.followed, shownCamera};
+                drawGround(drawList, min, max, static_cast<float>(pipeline_.width()), shownCamera, dpiScale_);
+            }
         }
+    }
+    // The geodata's ground (the flag Geodata), laid where the camera sees it (no camera: no grid, but what to do
+    // still shows), the interface left clear.
+    if (settings_.showGeodata && geodata_) {
+        std::span<const UiPiece> pieces;
+        if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+            const UiPieces& found = uiFinder_->found();
+            pieces = {found.pieces.data(), static_cast<std::size_t>(found.count)};
+        }
+        geodata_->draw(drawList, fonts_, min, max, static_cast<float>(pipeline_.width()),
+                       static_cast<float>(pipeline_.height()), shownCamera, pieces, previewMs_, dpiScale_);
     }
     if (settings_.showCharacters && recognizer_ && recognizer_->state() == Recognizer::State::Running) {
         drawFound(drawList, min, max);
+    }
+    if (settings_.showDrops) {
+        drawDrops(drawList, min, max);
     }
 
     const float inset = 12.0f * dpiScale_;
@@ -2893,12 +4242,22 @@ void App::drawObservedScreen() {
                 static_cast<double>(ui.imagesPerSecond), static_cast<double>(ui.workAvgMs),
                 static_cast<double>(ui.findAvgMs), static_cast<double>(ui.workMaxMs));
         }
+        if (dropFinder_ && dropFinder_->state() == DropFinder::State::Running) {
+            const DropFinderStats& drops = dropFinder_->stats();
+            add("%sDrops %.0f/s, %.2f ms each, %.2f slowest", length > 0 ? "  \xC2\xB7  " : "",
+                static_cast<double>(drops.looksPerSecond), static_cast<double>(drops.workAvgMs),
+                static_cast<double>(drops.workMaxMs));
+            if (!loot_.square.empty()) {
+                add(", close square %d px", loot_.square.side);
+            }
+        }
         if (groundFollowing_ && groundFinder_->state() == GroundFinder::State::Running) {
             const GroundFinderStats& ground = groundFinder_->stats();
             const GroundCamera& camera = groundFinder_->seen().camera;
             add("%sGround %.0f/s, %.2f ms each (fitting %.2f), fitted %.0f%% (searched %.0f%%), %.0f of %.0f patches "
                 "agree (%.1f px off), pitch %.0f\xC2\xB0 distance %.1f, minimap %.0f%%, turned by it %.0f/s (%.2f ms), "
-                "depth %.0f/s said the pitch %.0f%% (%.1f\xC2\xB0 off, %.2f ms)",
+                "depth %.0f/s said the pitch %.0f%% (%.1f\xC2\xB0 off, %.2f ms), turns held the pitch %.0f%% (said "
+                "it %.0f%%, %.2f ms)",
                 length > 0 ? "  \xC2\xB7  " : "", static_cast<double>(ground.imagesPerSecond),
                 static_cast<double>(ground.workAvgMs), static_cast<double>(ground.fitAvgMs),
                 static_cast<double>(ground.fitted * 100.0f), static_cast<double>(ground.searched * 100.0f),
@@ -2908,7 +4267,8 @@ void App::drawObservedScreen() {
                 static_cast<double>(ground.headed * 100.0f), static_cast<double>(ground.headsPerSecond),
                 static_cast<double>(ground.headAvgMs), static_cast<double>(ground.depthPerSecond),
                 static_cast<double>(ground.depthMeasured * 100.0f), static_cast<double>(ground.depthOffDegrees),
-                static_cast<double>(ground.depthAvgMs));
+                static_cast<double>(ground.depthAvgMs), static_cast<double>(ground.turnsHeld * 100.0f),
+                static_cast<double>(ground.turnsTaken * 100.0f), static_cast<double>(ground.turnsAvgMs));
         }
         if (depthRunning_ && depthFinder_->state() == DepthFinder::State::Running) { // While Depth or Ground is on.
             const DepthFinderStats& depth = depthFinder_->stats();
@@ -2958,9 +4318,10 @@ void App::hintGround() {
     if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
         pieces = &uiFinder_->found();
     }
-    // And the depth finder's newest map: the camera's pitch by it.
+    // And the depth finder's newest map: the camera's pitch by it (only while it runs: with its flags off its last map
+    // would be old, and the ground finder may follow for the Camera card alone).
     std::shared_ptr<const DepthMade> depth;
-    if (depthFinder_ && depthFinder_->state() == DepthFinder::State::Running) {
+    if (depthFinder_ && depthRunning_ && depthFinder_->state() == DepthFinder::State::Running) {
         depth = depthFinder_->made();
     }
     groundFinder_->hint(things, ownKind, pieces, std::move(depth));

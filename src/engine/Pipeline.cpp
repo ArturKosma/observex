@@ -4,6 +4,7 @@
 #include "engine/ImageChannel.h"
 #include "engine/ScreenCapture.h"
 #include "engine/DepthFinder.h"
+#include "engine/DropFinder.h"
 #include "engine/GroundFinder.h"
 #include "engine/UiFinder.h"
 
@@ -39,6 +40,8 @@ bool Pipeline::start(const Screen& screen) {
                                                   ScreenCapture::kImageFormat);
         recording_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                     ScreenCapture::kImageFormat);
+        shots_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                                ScreenCapture::kImageFormat);
         recognition_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                       ScreenCapture::kImageFormat);
         clip_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
@@ -50,6 +53,8 @@ bool Pipeline::start(const Screen& screen) {
         ground_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                  ScreenCapture::kImageFormat);
         depth_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
+                                                ScreenCapture::kImageFormat);
+        drops_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                 ScreenCapture::kImageFormat);
     } catch (const std::exception& e) {
         stop();
@@ -75,12 +80,14 @@ void Pipeline::stop() {
     }
     preview_.reset();
     recording_.reset();
+    shots_.reset();
     recognition_.reset();
     clip_.reset();
     snap_.reset();
     ui_.reset();
     ground_.reset();
     depth_.reset();
+    drops_.reset();
     capture_.reset();
     gpu_ = {};
     state_.store(State::Stopped, std::memory_order_release);
@@ -106,12 +113,17 @@ void Pipeline::run(std::stop_token stop) {
 
     StatWindow latency;
     StatWindow work;
+    // The Debug tab's steps: each channel the image is copied into.
+    enum Step { kRecognition, kSnap, kClip, kUi, kGround, kDepth, kDrops, kPreview, kShot, kRecording };
+    CostMeter meter({"To recogniser", "To snapper", "To clip buffer", "To UI finder", "To ground finder",
+                     "To depth finder", "To drop finder", "To preview", "To screenshot", "To recording"});
     std::uint64_t images = 0;
     std::uint64_t merged = 0;
     std::int64_t windowStart = qpcNow();
     std::int64_t nextRecording = 0; // When the next image is due for recording.
     std::int64_t nextUi = 0;        // And for the UI finder,
-    std::int64_t nextDepth = 0;     // and the depth finder.
+    std::int64_t nextDepth = 0;     // and the depth finder,
+    std::int64_t nextDrops = 0;     // and the drop finder.
     ScreenCapture::Frame frame;
 
     while (!stop.stop_requested()) {
@@ -126,30 +138,47 @@ void Pipeline::run(std::stop_token stop) {
             // Recognition first: the newest image goes to the recogniser the moment it arrives (it takes it on its
             // own thread and device), and to the snapper. React will run here too.
             const ImageStamp stamp{images, frame.presentQpc};
+            meter.begin();
             if (recognitionEnabled_.load(std::memory_order_relaxed)) {
                 recognition_->write(gpu_.context.Get(), frame.texture, stamp);
+                meter.lap(kRecognition);
             }
             if (snapEnabled_.load(std::memory_order_relaxed)) {
                 snap_->write(gpu_.context.Get(), frame.texture, stamp);
+                meter.lap(kSnap);
             }
             if (clipEnabled_.load(std::memory_order_relaxed)) {
                 clip_->write(gpu_.context.Get(), frame.texture, stamp);
+                meter.lap(kClip);
             }
             if (uiEnabled_.load(std::memory_order_relaxed) && now >= nextUi) {
                 ui_->write(gpu_.context.Get(), frame.texture, stamp);
                 nextUi = now + frequency.QuadPart / UiFinder::kImagesPerSecond;
+                meter.lap(kUi);
             }
             if (groundEnabled_.load(std::memory_order_relaxed)) { // Every image: it reads the minimap's cone on each.
                 ground_->write(gpu_.context.Get(), frame.texture, stamp);
+                meter.lap(kGround);
             }
             if (depthEnabled_.load(std::memory_order_relaxed) && now >= nextDepth) {
                 depth_->write(gpu_.context.Get(), frame.texture, stamp);
                 // Steady at its rate on average (a frame late now, a frame early next), unless it fell a gap behind.
                 const std::int64_t gap = frequency.QuadPart / DepthFinder::kImagesPerSecond;
                 nextDepth = now - nextDepth < gap ? nextDepth + gap : now + gap;
+                meter.lap(kDepth);
+            }
+            if (dropsEnabled_.load(std::memory_order_relaxed) && now >= nextDrops) {
+                drops_->write(gpu_.context.Get(), frame.texture, stamp);
+                nextDrops = now + frequency.QuadPart / DropFinder::kImagesPerSecond;
+                meter.lap(kDrops);
             }
             if (previewEnabled_.load(std::memory_order_relaxed)) {
                 preview_->write(gpu_.context.Get(), frame.texture, stamp);
+                meter.lap(kPreview);
+            }
+            if (shotNow_.load(std::memory_order_relaxed) && shotNow_.exchange(false, std::memory_order_relaxed)) {
+                shots_->write(gpu_.context.Get(), frame.texture, stamp);
+                meter.lap(kShot);
             }
             const unsigned recordingInterval = recordingInterval_.load(std::memory_order_relaxed);
             if (recordingInterval != 0) {
@@ -179,7 +208,9 @@ void Pipeline::run(std::stop_token stop) {
                     nextRecording = now + frequency.QuadPart * recordingInterval;
                     question_.drop(); // A mark may come while asked; the next due time asks afresh.
                 }
+                meter.lap(kRecording);
             }
+            meter.end();
             work.add(static_cast<float>(static_cast<double>(qpcNow() - now) * msPerTick));
         } else if (status == ScreenCapture::Status::Lost) {
             if (!reconnect(stop)) {
@@ -204,6 +235,7 @@ void Pipeline::run(std::stop_token stop) {
             stats.latencyMaxMs = latencySummary.max;
             stats.workAvgMs = workSummary.average;
             stats.workMaxMs = workSummary.max;
+            stats.costs = meter.take(static_cast<double>(elapsed) * msPerTick / 1000.0);
             stats_->publish();
             windowStart = now;
         }

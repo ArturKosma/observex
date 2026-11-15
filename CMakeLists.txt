@@ -37,23 +37,32 @@ add_library(observex_core STATIC
     src/core/BoxLearner.cpp
     src/core/ClipGuesses.cpp
     src/core/ClipLines.cpp
+    src/core/Costs.cpp
     src/core/Depth.cpp
     src/core/Features.cpp
     src/core/GameStats.cpp
+    src/core/Geodata.cpp
     src/core/Ground.cpp
     src/core/ImageView.cpp
     src/core/KindLearner.cpp
     src/core/LiveLines.cpp
+    src/core/MouseCamera.cpp
     src/core/Log.cpp
+    src/core/LootWatch.cpp
     src/core/Marks.cpp
     src/core/Mirror.cpp
     src/core/ModelInfo.cpp
     src/core/Recordings.cpp
     src/core/ReviewHistory.cpp
     src/core/ReviewLines.cpp
+    src/core/SkillRefresh.cpp
+    src/core/SkillUse.cpp
     src/core/StateTree.cpp
+    src/core/TargetSelect.cpp
+    src/core/TargetWatch.cpp
     src/core/Tiles.cpp
     src/core/UiLayout.cpp
+    src/core/WorldPosition.cpp
     src/core/XpWatch.cpp)
 target_include_directories(observex_core PUBLIC src)
 target_link_libraries(observex_core PRIVATE observex_warnings)
@@ -67,14 +76,19 @@ add_library(observex_rules STATIC
     src/heuristics/DepthRules.cpp
     src/heuristics/DepthTilt.cpp
     src/heuristics/GroundMotion.cpp
+    src/heuristics/KeyLabels.cpp
+    src/heuristics/LocationReader.cpp
     src/heuristics/Miniatures.cpp
     src/heuristics/MinimapCone.cpp
+    src/heuristics/MinimapScroll.cpp
+    src/heuristics/NamePlate.cpp
     src/heuristics/Rules.cpp
     src/heuristics/SnapRules.cpp
     src/heuristics/Snapper.cpp
     src/heuristics/StatsReader.cpp
     src/heuristics/TextOcr.cpp
-    src/heuristics/Tracker.cpp)
+    src/heuristics/Tracker.cpp
+    src/heuristics/TurnPitch.cpp)
 # windowsapp: Windows' own OCR (heuristics/TextOcr, through C++/WinRT), for the target's name.
 target_link_libraries(observex_rules PUBLIC observex_core windowsapp PRIVATE observex_warnings)
 add_library(observex_heuristics SHARED src/heuristics/DepthPlugin.cpp src/heuristics/Plugin.cpp)
@@ -94,13 +108,16 @@ set_target_properties(observex_stats PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE
 add_library(observex_engine STATIC
     src/engine/BoxSnapper.cpp
     src/engine/ClipPlayer.cpp
+    src/engine/ClipDrops.cpp
     src/engine/ClipGround.cpp
     src/engine/ClipRecorder.cpp
     src/engine/ClipSnapper.cpp
+    src/engine/CrashLog.cpp
     src/engine/DepthFinder.cpp
     src/engine/DepthNet.cpp
     src/engine/DepthStore.cpp
     src/engine/Detector.cpp
+    src/engine/DropFinder.cpp
     src/engine/Finder.cpp
     src/engine/Gpu.cpp
     src/engine/GreyMaker.cpp
@@ -110,6 +127,8 @@ add_library(observex_engine STATIC
     src/engine/ImageFile.cpp
     src/engine/KindUpdater.cpp
     src/engine/LiveLog.cpp
+    src/engine/MouseWatch.cpp
+    src/engine/PicoController.cpp
     src/engine/Pipeline.cpp
     src/engine/Recognizer.cpp
     src/engine/Recorder.cpp
@@ -121,7 +140,7 @@ add_library(observex_engine STATIC
 target_compile_definitions(observex_engine PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(observex_engine
     PUBLIC observex_core observex_rules d3d11 dxgi
-    PRIVATE windowscodecs d3dcompiler cabinet mfplat mfreadwrite mfuuid observex_nvenc observex_tensorrt observex_warnings)
+    PRIVATE windowscodecs d3dcompiler cabinet mfplat mfreadwrite mfuuid setupapi advapi32 dbghelp observex_nvenc observex_tensorrt observex_warnings)
 
 # App: the window and the UI. The icon and fonts are built into the exe (see src/app/observex.rc.in).
 set(OBSERVEX_SOURCE_DIR ${CMAKE_SOURCE_DIR})
@@ -129,14 +148,20 @@ configure_file(src/app/observex.rc.in ${CMAKE_BINARY_DIR}/observex.rc @ONLY)
 add_executable(observex
     src/app/App.cpp
     src/app/ClipView.cpp
+    src/app/GeodataView.cpp
+    src/app/DebugView.cpp
     src/app/LogView.cpp
     src/app/MainWindow.cpp
+    src/app/MouseTest.cpp
     src/app/Overlay.cpp
+    src/app/PicoLink.cpp
     src/app/Review.cpp
     src/app/ReviewLog.cpp
     src/app/ScreenImage.cpp
     src/app/ScreenPicker.cpp
     src/app/Settings.cpp
+    src/app/HotKey.cpp
+    src/app/ShotHook.cpp
     src/app/Snapshot.cpp
     src/app/StateTreeView.cpp
     src/app/SkillsView.cpp
@@ -146,7 +171,7 @@ add_executable(observex
     src/app/Widgets.cpp
     src/app/main.cpp
     ${CMAKE_BINARY_DIR}/observex.rc)
-target_link_libraries(observex PRIVATE observex_engine imgui dwmapi observex_warnings)
+target_link_libraries(observex PRIVATE observex_engine imgui dwmapi cfgmgr32 observex_warnings)
 add_dependencies(observex observex_heuristics observex_stats) # Building the app builds the DLLs it loads.
 
 # Debug builds keep a console window for stderr; other configs are a plain windowed app.
@@ -162,9 +187,23 @@ endif()
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT observex)
 
 # Bench: measures the pipeline from a console, without the app window (see bench/Bench.cpp).
-add_executable(observex_bench bench/Bench.cpp bench/DepthBench.cpp bench/StatsBench.cpp)
+add_executable(observex_bench bench/Bench.cpp bench/DepthBench.cpp bench/GeodataBench.cpp bench/StatsBench.cpp bench/TurnsBench.cpp)
 target_link_libraries(observex_bench PRIVATE observex_engine dwmapi observex_warnings)
 add_dependencies(observex_bench observex_heuristics) # For --heuristics.
+
+# Release keeps PDBs next to what it builds (observex.pdb and the DLLs' in the project folder), so a crash's call chain
+# in observex.log names our functions and lines (engine/CrashLog); it optimises as before.
+if(MSVC)
+    foreach(target observex_core observex_rules observex_engine observex_heuristics observex_stats observex
+                   observex_bench)
+        set_property(TARGET ${target} PROPERTY
+            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo,Release>:ProgramDatabase>")
+    endforeach()
+    foreach(target observex_heuristics observex_stats observex observex_bench)
+        target_link_options(${target} PRIVATE
+            $<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+    endforeach()
+endif()
 
 if(OBSERVEX_BUILD_TESTS)
     enable_testing()
@@ -172,28 +211,39 @@ if(OBSERVEX_BUILD_TESTS)
         tests/BoxLearnerTests.cpp
         tests/ClipGuessesTests.cpp
         tests/ClipLinesTests.cpp
+        tests/CostsTests.cpp
         tests/DepthTests.cpp
         tests/FeaturesTests.cpp
         tests/GameStatsTests.cpp
+        tests/GeodataTests.cpp
         tests/GroundTests.cpp
         tests/ImageViewTests.cpp
+        tests/KeyLabelsTests.cpp
         tests/KindLearnerTests.cpp
         tests/LiveLinesTests.cpp
         tests/LogTests.cpp
+        tests/LootWatchTests.cpp
         tests/MarksTests.cpp
         tests/MirrorTests.cpp
+        tests/MouseCameraTests.cpp
         tests/ModelInfoTests.cpp
         tests/QuestionTests.cpp
         tests/RecordingsTests.cpp
         tests/ReviewHistoryTests.cpp
         tests/ReviewLinesTests.cpp
+        tests/ShotKeyTests.cpp
+        tests/SkillRefreshTests.cpp
+        tests/SkillUseTests.cpp
         tests/StatWindowTests.cpp
         tests/SnapRulesTests.cpp
         tests/SnapperTests.cpp
         tests/StateTreeTests.cpp
+        tests/TargetSelectTests.cpp
+        tests/TargetWatchTests.cpp
         tests/TilesTests.cpp
         tests/TrackerTests.cpp
         tests/TripleBufferTests.cpp
+        tests/TurnPitchTests.cpp
         tests/UiLayoutTests.cpp
         tests/test_main.cpp)
     target_link_libraries(observex_tests PRIVATE observex_rules doctest::doctest observex_warnings)

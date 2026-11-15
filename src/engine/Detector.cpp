@@ -33,18 +33,21 @@ constexpr char kScoresName[] = "labels";
 // Per candidate: what the model's kind classifier reads (tools/train/export.py, since 2026-11-08; not in older ones).
 constexpr char kFeaturesName[] = "features";
 
-// Squeezes a BGRA screen image to the model's square input exactly as RF-DETR does in Python: bilinear with pixel
-// centres lined up and no smoothing (torch's resize with antialias off, which the training images also got), colours
-// 0 to 1, then normalised with the mean and spread of ImageNet. Writes the red, green and blue planes one after
-// another (NCHW), as 32-bit floats; mirrored left to right if asked (squeezing is the same both ways round).
+// Squeezes a BGRA screen image (or a part of it: `origin` is its top left) to the model's square input exactly as
+// RF-DETR does in Python with that part cut out: bilinear with pixel centres lined up and no smoothing (torch's resize
+// with antialias off, which the training images also got), colours 0 to 1, then normalised with the mean and spread
+// of ImageNet. Writes the red, green and blue planes one after another (NCHW), as 32-bit floats; mirrored left to
+// right if asked (squeezing is the same both ways round).
 constexpr char kSqueezeShader[] = R"(
 Texture2D<float4> image : register(t0);
 RWBuffer<float> tensor : register(u0);
 cbuffer Size : register(b0) {
-    float2 scale; // Image pixels per model pixel.
-    uint2 last;   // The image's last column and row.
-    uint size;    // The model's input is size x size.
-    uint mirror;  // 1: writes the image mirrored left to right.
+    float2 scale;  // Image pixels per model pixel.
+    float2 origin; // The part's top left in the image (0, 0: the whole image).
+    float2 low;    // The part's first and last pixel, as a cut-out image's edge pixels repeat outwards.
+    float2 high;
+    uint size;     // The model's input is size x size.
+    uint mirror;   // 1: writes the image mirrored left to right.
 };
 static const float3 kMean = float3(0.485, 0.456, 0.406);
 static const float3 kSpread = float3(0.229, 0.224, 0.225);
@@ -54,9 +57,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= size || id.y >= size) {
         return;
     }
-    const float2 source = max((float2(id.xy) + 0.5) * scale - 0.5, 0.0);
-    const uint2 a = min(uint2(source), last);
-    const uint2 b = min(a + 1, last);
+    const float2 source = clamp(origin + (float2(id.xy) + 0.5) * scale - 0.5, low, high);
+    const uint2 a = uint2(source);
+    const uint2 b = min(a + 1, uint2(high));
     const float2 t = source - float2(a);
     const float3 top = lerp(image.Load(int3(a.x, a.y, 0)).rgb, image.Load(int3(b.x, a.y, 0)).rgb, t.x);
     const float3 bottom = lerp(image.Load(int3(a.x, b.y, 0)).rgb, image.Load(int3(b.x, b.y, 0)).rgb, t.x);
@@ -71,11 +74,34 @@ void main(uint3 id : SV_DispatchThreadID) {
 
 struct SqueezeConstants {
     float scale[2];
-    std::uint32_t last[2];
+    float origin[2];
+    float low[2];
+    float high[2];
     std::uint32_t size;
     std::uint32_t mirror;
     std::uint32_t padding[2]; // Constant buffers come in 16-byte steps.
 };
+
+// The constants that squeeze `area` of a `width` x `height` image (all of it if its side is 0) to `size`.
+SqueezeConstants squeezeConstants(DetectArea area, unsigned width, unsigned height, unsigned size, bool mirrored) {
+    if (area.side <= 0) {
+        area = {0, 0, 0};
+    }
+    const float partWidth = area.side > 0 ? static_cast<float>(area.side) : static_cast<float>(width);
+    const float partHeight = area.side > 0 ? static_cast<float>(area.side) : static_cast<float>(height);
+    SqueezeConstants constants{};
+    constants.scale[0] = partWidth / static_cast<float>(size);
+    constants.scale[1] = partHeight / static_cast<float>(size);
+    constants.origin[0] = static_cast<float>(area.x);
+    constants.origin[1] = static_cast<float>(area.y);
+    constants.low[0] = static_cast<float>(area.x);
+    constants.low[1] = static_cast<float>(area.y);
+    constants.high[0] = static_cast<float>(area.x) + partWidth - 1.0f;
+    constants.high[1] = static_cast<float>(area.y) + partHeight - 1.0f;
+    constants.size = size;
+    constants.mirror = mirrored ? 1u : 0u;
+    return constants;
+}
 
 } // namespace
 
@@ -94,6 +120,7 @@ struct Detector::Impl {
     ComPtr<ID3D11UnorderedAccessView> tensorView;
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11Buffer> mirroredConstants;
+    ComPtr<ID3D11Buffer> areaConstants;
     ComPtr<ID3D11ComputeShader> squeeze;
 
     cudaStream_t stream = nullptr;
@@ -244,12 +271,7 @@ Detector::Detector(ID3D11Device* device, IDXGIAdapter* adapter, const fs::path& 
     check(device->CreateUnorderedAccessView(d.tensor.Get(), &viewDesc, &d.tensorView),
           "CreateUnorderedAccessView (model input)");
 
-    SqueezeConstants constants{};
-    constants.scale[0] = static_cast<float>(width) / static_cast<float>(d.size);
-    constants.scale[1] = static_cast<float>(height) / static_cast<float>(d.size);
-    constants.last[0] = width - 1;
-    constants.last[1] = height - 1;
-    constants.size = d.size;
+    SqueezeConstants constants = squeezeConstants({}, width, height, d.size, false);
     D3D11_BUFFER_DESC constantsDesc{};
     constantsDesc.ByteWidth = sizeof(constants);
     constantsDesc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -259,6 +281,11 @@ Detector::Detector(ID3D11Device* device, IDXGIAdapter* adapter, const fs::path& 
     constants.mirror = 1;
     check(device->CreateBuffer(&constantsDesc, &constantsData, &d.mirroredConstants),
           "CreateBuffer (detector constants, mirrored)");
+    // For a part of the image (detect's `area`): written before each such look.
+    D3D11_BUFFER_DESC areaDesc = constantsDesc;
+    areaDesc.Usage = D3D11_USAGE_DYNAMIC;
+    areaDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    check(device->CreateBuffer(&areaDesc, nullptr, &d.areaConstants), "CreateBuffer (detector constants, area)");
 
     ComPtr<ID3DBlob> code;
     ComPtr<ID3DBlob> errors;
@@ -355,13 +382,31 @@ bool Detector::setKindUpdate(KindUpdate update) {
     return true;
 }
 
-int Detector::detect(ID3D11DeviceContext* context, float minSure, Detection* found, int capacity, bool mirrored) {
+int Detector::detect(ID3D11DeviceContext* context, float minSure, Detection* found, int capacity, bool mirrored,
+                     DetectArea area) {
     Impl& d = *impl_;
 
-    // Squeeze the image into the model's input on the GPU.
+    // A part of the image: moved (not shrunk) to lie inside it, as tools/train/loot.py cuts its squares.
+    if (area.side > 0) {
+        area.side = std::min({area.side, static_cast<int>(d.width), static_cast<int>(d.height)});
+        area.x = std::clamp(area.x, 0, static_cast<int>(d.width) - area.side);
+        area.y = std::clamp(area.y, 0, static_cast<int>(d.height) - area.side);
+    }
+
+    // Squeeze the image (or the part) into the model's input on the GPU.
     ID3D11ShaderResourceView* imageView = d.imageView.Get();
     ID3D11UnorderedAccessView* tensorView = d.tensorView.Get();
     ID3D11Buffer* constants = mirrored ? d.mirroredConstants.Get() : d.constants.Get();
+    if (area.side > 0) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context->Map(d.areaConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            return -1;
+        }
+        const SqueezeConstants values = squeezeConstants(area, d.width, d.height, d.size, mirrored);
+        std::memcpy(mapped.pData, &values, sizeof(values));
+        context->Unmap(d.areaConstants.Get(), 0);
+        constants = d.areaConstants.Get();
+    }
     context->CSSetShader(d.squeeze.Get(), nullptr, 0);
     context->CSSetShaderResources(0, 1, &imageView);
     context->CSSetUnorderedAccessViews(0, 1, &tensorView, nullptr);
@@ -399,8 +444,11 @@ int Detector::detect(ID3D11DeviceContext* context, float minSure, Detection* fou
     const int slots = std::max(1, static_cast<int>(d.kinds.size()));
     const float minFirst = slots > 1 ? 1.0f - std::sqrt(1.0f - minSure) : minSure;
     const float minScore = std::log(minFirst / (1.0f - minFirst));
-    const float width = static_cast<float>(d.width);
-    const float height = static_cast<float>(d.height);
+    // Boxes come as shares of what was squeezed: the image, or the part (then moved to its place in the image).
+    const float width = area.side > 0 ? static_cast<float>(area.side) : static_cast<float>(d.width);
+    const float height = area.side > 0 ? static_cast<float>(area.side) : static_cast<float>(d.height);
+    const float left0 = static_cast<float>(area.x);
+    const float top0 = static_cast<float>(area.y);
     std::array<Detection, kMaxCandidates> all;
     int count = 0;
     for (int i = 0; i < d.candidates; ++i) {
@@ -432,7 +480,7 @@ int Detector::detect(ID3D11DeviceContext* context, float minSure, Detection* fou
         const float top = std::clamp((box[1] - box[3] * 0.5f) * height, 0.0f, height);
         const float bottom = std::clamp((box[1] + box[3] * 0.5f) * height, 0.0f, height);
         Detection& thing = all[static_cast<std::size_t>(count++)];
-        thing = {left, top, right - left, bottom - top, sure, static_cast<std::uint8_t>(kind)};
+        thing = {left0 + left, top0 + top, right - left, bottom - top, sure, static_cast<std::uint8_t>(kind)};
         thing.candidate = static_cast<std::uint16_t>(i);
         if (secondKind >= 0) {
             thing.secondKind = static_cast<std::uint8_t>(secondKind);

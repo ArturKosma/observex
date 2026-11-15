@@ -11,7 +11,14 @@ A place may end with `unlike FIRST LAST`: frames of the same clip before the pie
 only while casting, over a camera that hardly moves); a pixel within SAME_GREY of what was there then is the world's,
 so it is left out of the mask.
 
-    python tools/ui/make_anchors.py [--ui models/ui] [--clips recordings/clips]
+The line may end with `away X0 Y0 X1 Y1` (repeatable): a rectangle of the anchor (its own pixels, X1 Y1 just past)
+always left out of the mask; and with `keep LOW HIGH`: only pixels whose grey is at most LOW or at least HIGH are
+kept, for drawing over something that changes where no clip shows it changing (the Status window's "HP" and "MP",
+white letters with a dark outline over the bars' colours, which an empty bar darkens; 2026-11-15).
+
+    python tools/ui/make_anchors.py [--ui models/ui] [--clips recordings/clips] [--only NAME...]
+
+--only cuts just the anchors named (the others' files are left as they are).
 """
 import argparse
 import pathlib
@@ -41,6 +48,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ui", default=str(here / "models" / "ui"))
     parser.add_argument("--clips", default=str(here / "recordings" / "clips"))
+    parser.add_argument("--only", nargs="+", help="cut only these anchors")
     args = parser.parse_args()
     ui = pathlib.Path(args.ui)
 
@@ -48,16 +56,29 @@ def main():
     cuts = {}  # (clip, first, last) -> [(name, place, x, y)]; place ("unlike", n) for place n's frames before
     places = {}  # name -> one slot per place
     unlikes = {}  # name -> the places that have unlike frames
+    aways = {}  # name -> [(x0, y0, x1, y1)] always left out of the mask
+    keeps = {}  # name -> (low, high): only pixels at most low or at least high kept
     for line in (ui / "ui.txt").read_text(encoding="utf-8").splitlines():
         words = line.split()
         if len(words) < 11 or words[0] != "anchor" or words[5] != "from":
             continue
         name, w, h = words[1], int(words[3]), int(words[4])
+        if args.only and name not in args.only:
+            continue
         sizes[name] = (w, h)
         at = 5
         while at < len(words):
+            if words[at] == "away" and at + 5 <= len(words):
+                aways.setdefault(name, []).append(tuple(map(int, words[at + 1:at + 5])))
+                at += 5
+                continue
+            if words[at] == "keep" and at + 3 <= len(words):
+                keeps[name] = (int(words[at + 1]), int(words[at + 2]))
+                at += 3
+                continue
             if words[at] != "from" or at + 6 > len(words):
-                raise SystemExit(f"{name}: expected from CLIP FIRST LAST X Y [unlike FIRST LAST]")
+                raise SystemExit(f"{name}: expected from CLIP FIRST LAST X Y [unlike FIRST LAST], away X0 Y0 X1 Y1 "
+                                 "or keep LOW HIGH")
             clip = words[at + 1]
             first, last, x, y = map(int, words[at + 2:at + 6])
             place = len(places.setdefault(name, []))
@@ -114,6 +135,12 @@ def main():
             middle = np.mean(z, axis=0)
             evened = np.max([np.abs(each - middle) for each in z], axis=0) <= SAME
             steady &= evened | (np.max(means, axis=0) - np.min(means, axis=0) <= SAME_GREY)
+        for x0, y0, x1, y1 in aways.get(name, ()):
+            steady[y0:y1, x0:x1] = False
+        if name in keeps:
+            low, high = keeps[name]
+            pixels = np.round(np.mean(means, axis=0))
+            steady &= (pixels <= low) | (pixels >= high)
         mask = steady.astype(np.uint8) * 255
         write_pgm(ui / f"{name}.pgm", np.round(np.mean(means, axis=0)))
         write_pgm(ui / f"{name}-mask.pgm", mask)
@@ -129,6 +156,8 @@ def main():
         canvas[22:, :tile.shape[1]] = tile
         cv2.putText(canvas, name, (2, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, 255, 1)
         tiles.append(canvas)
+    if args.only:
+        return  # anchors.png shows them all: left as it is.
     width = max(t.shape[1] for t in tiles)
     rows = [np.pad(t, ((0, 8), (0, width - t.shape[1])), constant_values=20) for t in tiles]
     cv2.imwrite(str(ui / "anchors.png"), np.vstack(rows))

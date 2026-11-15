@@ -11,8 +11,9 @@ namespace observex {
 
 // What a recording saves; the Record button asks (the user asked, 2026-11-02).
 enum class RecordKind : std::uint8_t {
-    Every,  // An image every RecordingInfo::every seconds, whatever is on the screen.
-    Unsure, // When an image is due, only if the model sees it differently mirrored (Recognizer::kMirrorDisagrees).
+    Every,    // An image every RecordingInfo::every seconds, whatever is on the screen.
+    Unsure,   // When an image is due, only if the model sees it differently mirrored (Recognizer::kMirrorDisagrees).
+    Handmade, // Training screenshots the user takes by hand (Shift+Win), a package an hour: see handmadeFolderName.
 };
 
 // Every stops by itself after this many images, so the Stop button can show how far a recording is and how long is
@@ -35,10 +36,23 @@ double recordingSecondsLeft(RecordKind kind, unsigned every, unsigned saved, dou
 // How far a recording of `kind` is, 0 to 1, as recordingDone counts.
 float recordingProgress(RecordKind kind, unsigned saved, double elapsed);
 
-// The kind's word in recording.observex and observex.cfg ("every", "unsure"), and back (Every if unknown; "auto",
-// the kind of 2026-11-02 and 03 that went on to only unsure, as Unsure).
+// The kind's word in recording.observex and observex.cfg ("every", "unsure", "handmade"), and back (Every if unknown;
+// "auto", the kind of 2026-11-02 and 03 that went on to only unsure, as Unsure).
 const char* recordKindId(RecordKind kind);
 RecordKind parseRecordKind(std::string_view id);
+
+// Training screenshots taken by hand (the user asked, 2026-11-15: Shift+Win while observing, e.g. a killed monster's
+// drops from several angles and distances, to draw boxes on in the review) go into a package an hour: a recording
+// folder of kind Handmade inside the recordings folder, so training finds its answers like any recording's. Named
+// "handmade_2026-11-15_15-00", started at the hour ("2026-11-15 15:00:00"), its images PNG (drops are a few pixels).
+std::string handmadeFolderName(unsigned year, unsigned month, unsigned day, unsigned hour);
+std::string handmadeStarted(unsigned year, unsigned month, unsigned day, unsigned hour);
+// A package's name in the review (the user's): "15/11/2026 - 15:00", from when it started ("2026-11-15 15:00:00");
+// `started` as it is if it is not such a time.
+std::string handmadeTitle(std::string_view started);
+// The number after the highest numbered image ("000007.png" -> 8; names not starting with a number left out), 1 if
+// there is none: a new image never replaces one, even after some were deleted.
+unsigned nextImageNumber(const std::vector<std::string>& images);
 
 // What observex knows about one recording, kept in the recording's folder as recording.observex: a few
 // "key=value" lines, written when the recording starts and again when it stops, and a "reviewed-<category>" line

@@ -1,14 +1,19 @@
 #pragma once
 
+#include "core/ClipLines.h"
+#include "core/Costs.h"
 #include "core/Detection.h"
 #include "core/Ground.h"
 #include "core/Heuristics.h"
 #include "core/Log.h"
+#include "core/LootWatch.h"
 #include "core/Recordings.h"
+#include "core/StateTree.h"
 #include "core/TripleBuffer.h"
 #include "engine/DepthStore.h"
 #include "engine/Gpu.h"
 #include "engine/ImageChannel.h"
+#include "engine/MouseWatch.h"
 
 #include <atomic>
 #include <cstdint>
@@ -32,6 +37,7 @@ struct ClipRecorderStats {
     std::uint64_t bytes = 0;   // The compressed video it holds.
     std::uint64_t dropped = 0; // Looks and snapped images it had no room for since it started (never waits).
     std::uint64_t depthBytes = 0; // The depth maps it holds, packed (while the Show flag Depth is on).
+    CostPart costs;               // Its thread's work on each frame (the Debug tab).
 };
 
 // What a saved clip says about where it came from (clip.observex and the head of clip.txt).
@@ -40,6 +46,7 @@ struct ClipAbout {
     std::string screen;             // The monitor's name.
     std::string model;              // As in ClipInfo::model; empty if the recogniser is not running.
     std::vector<std::string> kinds; // The model's kinds (Recognizer::kinds()), so clip.txt's kind numbers can be read.
+    std::string mouse;              // MouseWatch::pointerSettings(); empty: the mouse was not watched.
 };
 
 // The clip buffer: keeps the last kClipSeconds (core/Recordings) of the observed screen in memory, all the time, and
@@ -104,6 +111,26 @@ public:
     // screen image `image` (shown at `shownQpc`); 0: nothing drawn from then on. So a clip's Recorded shows the depth
     // exactly as it was seen (core/ClipLines' depth line); the clip keeps only the maps drawn.
     void depthShown(std::int64_t shownQpc, std::uint64_t image, std::uint64_t map);
+    // UI thread, whenever what the Show flag Drops draws changes (whatever the flag says: the drop finder looks either
+    // way): from `qpc` on (when the app had it), the spot `square` (round a kill if `kill`; empty: nothing drawn) and
+    // the drops its newest close look found on screen image `image`. So a clip's Recorded shows the drops as the app
+    // had them (the user asked, 2026-11-15; core/ClipLines' drops line).
+    void dropsShown(std::int64_t qpc, std::uint64_t image, bool kill, LootSquare square,
+                    std::span<const Detection> drops);
+    // UI thread, whenever what the State tile shows of the brain changes (and once at the start): `brain` from screen
+    // image `image` on (shown at `shownQpc`). So a clip's review shows the active state and task as they were seen
+    // (the user asked, 2026-11-15; core/ClipLines' brain line).
+    void brained(std::int64_t shownQpc, std::uint64_t image, statetree::BrainShown brain);
+    // UI thread, whenever the Stats tab's Camera card would show something else (whatever the tab shows): `camera`
+    // from screen image `image` on (shown at `shownQpc`). So a clip shows the camera as it was (the user asked,
+    // 2026-11-15 night: "last 10s is not saving camera"; core/ClipLines' camera line).
+    void cameraShown(std::int64_t shownQpc, std::uint64_t image, const CameraShown& camera);
+    // UI thread, once a second and before a save: what each part of observex spent over the last second (the Debug
+    // tab; the user asked, 2026-11-15: a clip says what to optimize; core/ClipLines' cost lines).
+    void costed(std::int64_t qpc, std::vector<CostPart> parts);
+    // For the mouse watch's thread (engine/MouseWatch), each report of the mouse: so a clip says how far it moved
+    // while the camera turned (core/ClipLines' mouse line). Never waits long (a lock the other threads hold briefly).
+    void moused(const MouseInput& input);
 
     // UI thread: saves what it holds (the last kClipSeconds) into `folder` (created), in the background. False if a
     // save is still being written, it holds nothing yet or it is not running (state()).

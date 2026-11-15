@@ -81,6 +81,9 @@ void BoxSnapper::run(std::stop_token stop) {
     const auto msOf = [&](std::int64_t qpc) { return static_cast<double>(qpc - timeOrigin) * msPerTick; };
     StatWindow work;
     StatWindow late;
+    // The Debug tab's steps, in the order they run on each image.
+    enum Step { kGrey, kAreas, kReadBack, kLearn, kSnap, kClip };
+    CostMeter meter({"Grey image", "Areas", "Read back", "Learning", "Snapping", "To clip buffer"});
     std::uint64_t boxes = 0;
     std::uint64_t snapped = 0;
     std::uint64_t images = 0;
@@ -92,6 +95,7 @@ void BoxSnapper::run(std::stop_token stop) {
     while (!stop.stop_requested()) {
         if (reader_->waitForImage(kWaitMs)) {
             const std::int64_t start = qpcNow();
+            meter.begin();
             if (ID3D11Texture2D* image = reader_->useNewImage(&stamp)) {
                 // Its grey levels first, so the image goes back to the channel at once.
                 bool made = true;
@@ -105,6 +109,7 @@ void BoxSnapper::run(std::stop_token stop) {
                     fail("The GPU stopped making grey images (it may have been reset)");
                     return;
                 }
+                meter.lap(kGrey);
                 // New snapping once the app loaded a rebuilt DLL (if it cannot be made, the one it has goes on).
                 if (const std::uint64_t version = heuristics_->version(); version != heuristicsVersion) {
                     heuristicsVersion = version;
@@ -128,6 +133,7 @@ void BoxSnapper::run(std::stop_token stop) {
                 }
                 const int snapCount = snapping->snapAreas(timeMs, look != nullptr, lookMs, shown, snapAreas.data(),
                                                           static_cast<int>(snapAreas.size()));
+                meter.lap(kAreas);
                 const GreyView* grey = nullptr;
                 try {
                     if (look != nullptr) {
@@ -141,13 +147,16 @@ void BoxSnapper::run(std::stop_token stop) {
                     fail("The GPU stopped making grey images (it may have been reset)");
                     return;
                 }
+                meter.lap(kReadBack);
                 if (look != nullptr) {
                     snapping->looked(lookMs, greys->find(look->stamp.number), shown);
+                    meter.lap(kLearn);
                 }
                 Found& found = found_.writeSlot();
                 found.count = snapping->snap(timeMs, *grey, found.things.data(), Found::kMax);
                 found.image = ++images;
                 found_.publish();
+                meter.lap(kSnap);
                 const std::int64_t done = qpcNow();
                 work.add(static_cast<float>(static_cast<double>(done - start) * msPerTick));
                 late.add(static_cast<float>(static_cast<double>(done - shownQpc) * msPerTick));
@@ -160,7 +169,9 @@ void BoxSnapper::run(std::stop_token stop) {
                     clip->snapped(stamp, done, snapping->leadMs(),
                                   {found.things.data(), static_cast<std::size_t>(found.count)},
                                   look != nullptr ? look->stamp.number : 0, snapping->finds());
+                    meter.lap(kClip);
                 }
+                meter.end();
             }
         }
 
@@ -178,6 +189,7 @@ void BoxSnapper::run(std::stop_token stop) {
             stats.lateAvgMs = lateSummary.average;
             stats.snapped = boxes > 0 ? static_cast<float>(static_cast<double>(snapped) / static_cast<double>(boxes))
                                       : 0.0f;
+            stats.costs = meter.take(static_cast<double>(elapsed) * msPerTick / 1000.0);
             stats_.publish();
             boxes = 0;
             snapped = 0;

@@ -15,10 +15,12 @@
 // heuristics it has, until both are rebuilt. 2 since 2026-11-11: snapping; 3 since that evening: snapping's searches
 // recorded and replayed (SnapFind, GreyView::image); 4 since 2026-11-12: following the camera (the ground); 5 since
 // that evening: the ground turned by the minimap between follows (headAreas, head); 6 then: by the ground itself
-// (headFirstLevel); 7 later that night: the pitch by the depth network's maps (Grounding::depth).
+// (headFirstLevel); 7 later that night: the pitch by the depth network's maps (Grounding::depth); 8 since 2026-11-15:
+// the pitch by the camera's turns (GroundCamera::pitchByTurns, GroundNote's turns); 9 that evening:
+// GroundNote::turnTilt; 10 that night: the camera by the mouse's counts (GroundHints' mouse).
 extern "C" {
 
-inline constexpr std::uint32_t kObservexHeuristicsAbi = 7;
+inline constexpr std::uint32_t kObservexHeuristicsAbi = 10;
 
 struct ObservexHeuristicsApi {
     std::uint32_t abi;           // kObservexHeuristicsAbi when the DLL was built.

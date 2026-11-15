@@ -30,12 +30,12 @@ later loads that knowledge so it knows what to look for and how to react.
 ## Current state
 
 The UI is deliberately minimal: a top bar with the screen button and Show on the left and Review, Record and Settings
-on the right, then the tabs Live, State, Stats, Skills and Log, whose tiles share the view under them (see Tabs and tiles). Right
+on the right, then the tabs Live, State, Stats, Skills, Log and Debug, whose tiles share the view under them (see Tabs and tiles). Right
 of Show (while a screen is observed live), muted, what observex spends on a screen image in all ("12.3 ms"; the user
 asked, 2026-11-12, for the last frame's total: `App::imageWorkMs` adds each running part's own average time per image
-over the last second, as the finders publish their numbers once a second: capture, the recogniser, snapping, the UI
-finder and its stats reading, the ground finder, the depth finder's network + shading + packing; a tooltip on it lists
-each part).
+over the last second; a tooltip on it lists each part). Since 2026-11-15 it is the Debug tab's total (see Debug):
+`App::costs` (every part's `core/Costs` meter, published once a second) and `costTotalMs`; before, it counted the UI
+finder's stats reading twice and left out drops, the clip buffer and the app's own frame.
 The screen button looks like a dropdown (monitor icon, text, arrow) and reads "Choose a screen", or "Observing" and
 the observed monitor's name. It opens live miniatures of every
 screen, laid out the way the screens are arranged on the desktop, each labelled with its monitor's model name (from
@@ -158,6 +158,13 @@ pipeline hands it a new image every 100 ms (`UiFinder::kImagesPerSecond`, the ui
   covering the rest (the user's screenshot of 2026-11-12: Chat and Messages were lost where the Character Status
   window covered their right corners). A main anchor's hit well inside a framed window makes no piece (the
   Inventory's scroll arrows made a false Messages).
+The Status window has two anchors (2026-11-15 night): `status-left`, its bracket and the bars' left ends, lost the
+window whenever a bar's left end was empty (clip 2026-11-15_23-08-49: the XP at 0.04% after a level up, 0.858 against
+0.90; 0 MP or HP would do the same), so `status-labels` finds it by the bars' "HP" and "MP" letters, their white strokes
+and dark outline only (`keep 80 200`: the bars' colours behind left out); the window and its level box are see-through
+and its bracket is the target window's too (a bracket-and-level-box anchor scored 0.94 on the target window). Over the
+39 clips' pictures it scored 0.998-0.999 at the window and at most 0.60 anywhere else; the clip that had lost the window
+read 227/227 HP, 186/186 MP and 0.04% on all 50 frames checked.
 Pieces inside others are left out. ui.txt and its pictures are read again within a second of changing; while it
 cannot be read, the one before goes on (with none, only framed windows are found) and the reason shows under the
 flag. F3 adds "UI found 10/s, N ms each (finding N)". Measured 2026-11-12 with `observex_bench --ui CLIP` on 8 clips
@@ -240,8 +247,10 @@ and State area): Add Skill (the miniatures found, as before), each skill a row w
 cooldown|no-cooldown SIDE PIXELS NAME`, the miniature as hex BGR; `models/ui/skills` is no longer written). The Stats
 tile shows each skill's icon by its cooldown (no X there), Casting's skill name and icon, Target as a right column
 when the tile is wide enough, and **Nearby** (Characters, Monsters: the character model's tracked boxes; also numbers
-in Compare Number, `characters` / `monsters`). Tasks are hardcoded kinds (`TaskKind`: **Use Skill** + a skill picker;
-file `task ID use-skill SKILL`; a typed task of an older file is dropped). No Rename in the state menu (the name field
+in Compare Number, `characters` / `monsters`). Tasks are hardcoded kinds (`TaskKind`: **Use Skill** + a list of skills,
+**Select Target** + what (Nearest Monster), **Click Mouse** + a button; file `task ID use-skill SKILL|SKILL...`, `task ID
+select-target nearest-monster` (`lock-mouse`, Lock Mouse Onto's word before 2026-11-15, reads as it), `task ID
+click-mouse left|right`; a typed task of an older file is dropped). No Rename in the state menu (the name field
 does it); a quiet "Details" over the details; Load has a folder icon. Target Changed lines are gone from the Log.
 **Why lines**: every reading says why something is not read (`GameStats::why`, 512 chars, " | " between: "Target: no
 window", "Wind Strike: not at 1043,1376 (far 15.2, alike 0.37, no miniature edge)", "Name: read 'Woif' ... none
@@ -271,8 +280,184 @@ hotbar): no wrong HP/MP/XP/target/name read anywhere (before the pass: 61); left
 window, and a cooldown's seconds on the 12% lighter screen (its pale yellow clips to white; still "cooling"). 0.74 ms
 average a reading (1.1 ms slowest without OCR), OCR 2-10 ms only on a new name picture, all on the UI finder's
 thread. The bench's scratch tools (frame bank, stress variants and comparers) were not kept.
+**Profile and shortcuts in the Skills tab** (the user asked, 2026-11-15: the profile chooseable there "same like with
+State"; save each skill's hotbar key "next to Has Cooldown", for the Pico to press later; "keep observing if i change
+the skill's position on the skillbar ... update the miniature and the shortcut"; stats ABI 5). The tab's top is the
+State tile's Load + profile name field (`StateTreeView::drawProfileBar`, its own text buffer) and + Add Skill after it
+(under it in a narrow tile). Each skill row has **MP Cost** (2026-11-15, the user asked: "mana should be introduced
+in the Skills tab"; a 52 px number field left of Shortcut, "–" for none: Use Skill is done once that much MP was taken)
+and **Shortcut** (a field left of Has Cooldown; "–" while not read, amber
+with a tooltip while it has '?'; typed in, uppercased, empty = "-" none). In the profile: `skill cooldown key=F2 mp=10
+42 ...` (`key=` and `mp=` in any order, each left out while not known; older files read). A skill's name has no `_`
+or `|` in it (the file's spaces in `cooldown:SKILL` and its lists); its fields go on a line of their own under the
+name when the tile is too narrow for every name whole beside them. **Refresh** (right of + Add Skill; the user asked,
+2026-11-15: "takes control over mouse, hovers over every registered skills by first finding their icon on the skill
+bar, and copies the mana cost"; `core/SkillRefresh`'s `SkillRefresher`, unit tested; `App::toggleRefresh`,
+`driveRefresh`): only while a live screen is observed, the brain inactive (starting the brain stops it) and the
+controller answers; it brings the game's window (under the first skill seen) to the front, then for each profile
+skill in order moves the cursor onto its miniature's middle on the hotbar (where the stats reader last saw it, as the
+desktop's pixels; `core/CursorGlide`, the easing Select Target uses; not seen within 0.6 s: skipped), holds it there
+0.5 s for the game's tooltip, then asks the UI finder to read the area round it (`tooltipArea`: 12 miniature sides
+either way, 14 above, 5 below, on the image) by Windows OCR on the next image (`UiFinder::readText` / `text()`: the
+grey image's area turned over, levels 100..190 stretched, doubled smoothly; on the finder's thread), one read at a
+time. `readMpCost`: the skill's name in the words (as written, or a letter or two wrong: `sameName`) and the number
+after "MP" past cost words and marks ("MP Consumption 10", "MP: 10"), else "Consumes 10 MP", else "10 MP"; never one
+with '/' or '%' (the Status bar's "90/108"); O read as 0, l or I as 1. Two reads in a row with the name and the same
+cost: written into the profile (saved, Ctrl+Z undoes it); the name twice with no MP: its cost kept; nothing in 3 s:
+given up on. Then the cursor goes back where it was. The button is highlighted while it runs, how far along its
+bottom; a click or Win+Esc stops it. Log: "Refresh: the mouse goes over each of 3 skills to read its MP cost off its
+tooltip (Win+Esc stops it)", "Refresh Wind Strike: MP cost 10 (was not set)", "Refresh Sit: no MP cost on its
+tooltip, its cost kept", "Refresh Heal: not found on the hotbar, skipped", "Refresh Ice Bolt: its name not on its
+tooltip in 3 s (read: "...")", "Refresh done: 2 of 3 skills read (not read: Heal)", "Refresh not started: observe a
+game screen first". Not yet tried on the game (2026-11-15): the tooltip's look is not known here, so the first runs'
+log lines (what OCR read) are what to tune it by. **Reading the key** (`heuristics/KeyLabels`, `KeyFont`):
+the slot's label at a miniature's top left (cream letters, dark rim, proportional anti-aliased font, glyphs may touch,
+custom binds like "A+K1") is read by glyphs in `models/ui/keys.txt` (`glyph SIDE W H GREYHEX KINDS [TEXT]`, KINDS
+L letter / D rim / . not compared; per slot side = UI scale), not Windows OCR (it read "FIO"). Letter pixel grey >= 160
+and not bluish (B <= R+24, G+24), rim grey <= 100, rows 1 to 0.22 of the side, start in the first fifth; glyph by glyph
+from the left, each tried -1..+3 columns and a row either way, taken at correlation >= 0.8 with letters 60 lighter than
+their rim and at most 15% of its letter count of rimmed letter pixels it lacks; within 0.02 the wider glyph wins; letters
+no glyph knows give one '?' if 5+ rows tall from row <= 3 (a picture's corner under the label gives none). The stats
+reader reads it only while the skill is ready (`GameGauge::key`, "-" no letters, empty not read; `GameGauge::at` the
+miniature's box); a '?' adds a why line. Typing a key teaches (`App::keyTyped`): from the skill's newest live picture
+(else the profile's), the unknown parts get the typed letters between the known ones (one each when as many, else one
+glyph over them), a disagreement gives one glyph over the whole label; keys.txt is written (.tmp, rename) and the readers
+reload it within ~1 s (the UI folder's change watch); the typed key stands while the skill stays on that slot.
+**Following moves** (`App::followSkills`, live only, not clips/reviews): the UI finder publishes each ready skill's
+picture, box and key (`UiSkillPictures`); the same slot (3 px) and key on 3 readings in a row, on another slot than
+taken before or with another key than the profile's, replaces the profile's key and miniature (BGR), logs e.g. "Wind
+Strike: shortcut F4 (was F2), moved to another slot, miniature updated", saves (Ctrl+Z in State undoes); a key with '?'
+is saved too so the Pico never presses the old one. The skill is found on its new slot by the hotbar look-over (its
+picture is compared without the key's corner). Seeded 2026-11-15 from Sit's picture (F, 1, 2) and clip
+2026-11-14_14-50-29 frame 10 (F1's "1" over the white sword, "4"); on that clip's 1207 frames: Wind Strike ready on 456,
+"F2" on all, Sit "F12" on all, no key read while cooling or pressed (the press flash misreads "?2"); Wind Strike pasted
+into the F4 slot (the slot's label kept) was lost one image, then read "F4" at the new slot. Bench: `observex_bench
+--stats --keys [--layout DIR] read BRAIN | read IMAGE X Y SIDE | teach BRAIN SKILL TEXT | teach IMAGE X Y SIDE TEXT`
+(teach writes keys.txt); `--stats --list` prints each skill's `key`.
+**Training screenshots and Drops** (the user asked, 2026-11-15: "a new way of teaching ... handmade", packages "by
+date + hour", "15/11/2026 - 15:00", a shortcut Lineage 2 won't steal, "show up in Log", and a Drops category to draw
+boxes on adena/loot around corpses, no kinds). **Shift+Win** (Win released with Shift down since Win went down and no
+other key between, so Win+Shift+S and the like take nothing; `core/ShotKey`, unit tested) through a low-level keyboard
+hook (`app/ShotHook`, only while observing, every key passed on; the Start menu does not open on Shift+Win) takes one
+full-resolution PNG of the observed screen (the pipeline's `shots` channel, `Pipeline::takeShot`, a Recorder on its own
+thread with `ImageFormat::Png`, 2560 x 1440 ~4.6 MB) into the hour's package: folder `handmade_2026-11-15_15-00` in the
+recordings folder with a `recording.observex` of `kind=handmade` (`core/Recordings`: `handmadeFolderName`,
+`handmadeStarted`, `handmadeTitle`; numbers after the highest there, `nextImageNumber`, so none is replaced). The Log
+says "Training screenshot 3 saved in handmade 15/11/2026 - 15:00" (or why none was). Snapshot mode: `--shot` takes one
+once observing runs. Review's chooser has a **Handmade** tile ("N packages · your Shift+Win screenshots, to draw boxes
+on"), its list titled "Review your screenshots", each package by its title; then "What are we looking for?":
+**Characters** or **Drops** (`kCategories`' `drop`: "Drop" / "Not a drop", no kinds; answers `drop-answers.txt`,
+`reviewed-drop` in the package's file; with a drop model in `models/drop/` the review guesses drops too, the Finder
+cutting each image into squares, below). No kind update for a category without kinds.
+Checked in hidden snapshots: two PNGs saved with their Log lines, the tile, list and title, Drops chosen, a drawn box
+tagged "Drop" saved to `drop-answers.txt`.
+**As administrator** (found 2026-11-15: Shift+Win was not heard in the game): Lineage 2 runs as administrator (the
+Reborn launcher is elevated and starts it; no compatibility flag or shortcut setting does it), and Windows keeps keys
+typed into an administrator's window from a keyboard hook of a program that is not (UIPI), so Shift+Win (and the
+Escape pause shortcut of the time) was deaf while the game was in front; run as administrator they work (the user checked). So observex,
+started live and not as administrator, starts itself again as one (`app/ShotHook`'s `restartAsAdministrator`:
+ShellExecuteEx "runas", the same arguments plus `--as-administrator` so it never loops, the same folder) and ends:
+Windows asks the user each time. Not in snapshot mode (it stays as it was started, so the hidden snapshots still run
+from a normal shell) nor under a debugger. **But the root `observex.exe` itself carries Windows' Run-as-administrator
+compatibility flag** (HKCU `...\AppCompatFlags\Layers`, RUNASADMIN; found 2026-11-15 when a test of mine popped a
+UAC prompt on the user's screen): starting it always asks, even with `--snapshot`. Never start the root exe for
+tests: run hidden snapshots from `build/vs2022/bin/RelWithDebInfo/observex.exe`. If the user says No it goes on, and when it starts observing the log says
+"Not running as administrator: Shift+Win is not heard while Lineage 2 is in front ..." (the Brain's Win+Esc, a registered hot key since 2026-11-15, is heard either way).
+**Dead mark** (the user asked, 2026-11-15: "bias the guesser that something is dead once the target's red hp bar
+reaches 0 without switching targets", find the target's box by "2 blue dots on the left and right of its name", "the
+box nearest to it", "shift the weights of the box towards dead", "see the effect on my screen"). `core/TargetWatch`
+(unit tested), fed each new live reading by `App::watchTarget` (from `keepStats`), with every box drawn (snapper's or
+recogniser's; the own one too): while there is a target and its box is not known it asks the stats reader for the
+plate over each box in turn (one a reading); a plate with coloured orbs read over any box (Select Target's look counts
+too) makes the target the box nearest under it (findPlate's rule: middle within the box's sides +-40 px, row above a
+third down it, no higher than plateArea, score |dx| + 0.5 |row - (top - 30)|); known, that box's plate is checked on
+every reading (5 answers without it selected, or the box gone: looked for again). Its death: the Target HP bar, once
+read above 0.5%, read at most 0.5% on 2 readings in a row (unknown readings skip), the target (GameStats::target, the
+name) unchanged; once per target; the same name above 5% again after it died is another target. Then its box (or the
+one found within 30 readings after, or a box the tracker lost and found again as a new id) goes to
+`Recognizer::markDead(id)`: from its next look on, after the heuristics and before publishing, that id shows as the
+"dead" kind at least 90% sure with its kind before as the second (so in the overlay, the snapper's boxes, the clip
+buffer's Recorded things, the Nearby counts, and Select Target, which then never picks a corpse); the last 8 ids kept.
+Looks: Select Target's first (`App::lookAt` keeps it as `brainLook_`), else the watch's (`App::sendLook`). Log lines:
+"Target Imp Elder is box 12", "Target died: Imp Elder; box 12: marked dead", "Target died: Imp Elder (its box not known
+yet: looking for its plate)", "Dead target Imp Elder is box 14: marked dead", "Dead target Imp Elder: its box not
+found". Not checked live yet (the game was not on screen): the user is to watch a kill.
+**Drops** (the user asked, 2026-11-15: "teach the model how to recognize drops", first "only around the target that
+we recognized as dead", then the same evening "at all times": the camera turns away from a kill, the character runs off
+and comes back, and drops seen while seeking monsters are worth stopping for). The drop model (`models/drop`,
+`train.py --category drop`, tools/train/loot.py; one category, RF-DETR Medium at 576) never sees the whole screen at
+once: a drop is 20 x 9 px of 2560 x 1440 with the camera far off, 8 x 6 once squeezed to 1024. It sees one
+full-resolution **square** per look, scaled to 576; the Detector cuts it on the GPU (`Detector::detect`'s `DetectArea`:
+the squeeze reads only the square; boxes come back in screen pixels). Round a corpse (`core/LootWatch`'s `lootSquare`,
+unit tested; loot.py has the same rule): side 4 x the corpse box's longer side (L2J scatters a kill's drops up to 70
+game units each way; the character is 47 tall), at least 192 px, at most the screen's height; its middle the box's
+middle across and half the box's shorter side above its bottom; moved, not shrunk, inside the screen. Round drops found
+with no corpse (`lootSquareRound`): the largest drop a tenth of the side (`kDropsSpot`), their spread within its middle
+80%. **Training**: squares cut round the drops of the user's Drops answers (the corpses were mostly gone by the
+screenshot): 8 per image of many sizes (a drop 5-25% of the side) with the drops anywhere in the middle 80%, 4 with none
+in them, and 5 round each **look-alike** (2 on held-out images): a "no" answer, or a guess in `drop-guesses.txt` at
+least 30% sure touching no drop of a reviewed image (every drop on it is marked, so it is not one), kept in the package's `drop-look-alikes.txt` so a later model that learned them no longer has to guess them; the last fifth of
+the images held out whole. **Live** (`engine/DropFinder`: its own thread and GPU device, below normal priority, 20
+images a second through the pipeline's `drops` channel whenever the screen is observed and no review or clip is open,
+the Show flag on or off): with nothing to look at closely it **sweeps** the screen one square per image (`lootTiles`,
+below: 31 squares, the whole screen every 1.6 s); with a spot from `core/LootWatch` (stepped every UI frame by
+`App::watchLoot`) it looks at the spot and the sweep's next square in turn. Finds under 50% (`DropFinder::kMinSure`) are
+dropped, and so are finds on the game's interface (the UI finder's pieces: the cast bar and the minimap's arrow looked
+like drops). Spots: a box the dead mark (above) marks starts a **kill's** spot round it, following the corpse's box while
+the tracker has it and then the middle of the drops last found (the same size); it ends kLostMs (1.5 s) after neither
+the corpse nor a drop was seen (picked up), or kMaxMs (60 s) after the death; the same name marked dead again within
+10 s is the same kill (a new box id), another death starts anew. With no spot, drops a sweep look found start a **found**
+spot round them, following them while the close looks find them, ending kLostMs after they were last seen; a kill takes
+over. Log lines: "Looking for drops round Imp (box 12)", "Drops round Imp: 2" (each time the most seen at once rises),
+"Drops round Imp: none left", "No drops round Imp", "Stopped looking for drops round Imp after 60 s"; a found spot says
+"Drops seen: 2" only once a close look found drops there too (one sweep look alone may be wrong), and "Drops gone".
+**Show > Drops** (`show-drops`, on by default; drawn after the characters, `Overlay::drawLoot`): each drop of the
+spot's newest close look marked by four gold corners 2 px outside it (`theme::kDrop`, a dark halo under them; a box's
+lines hid a drop of a few pixels) and tagged "Drop 87%"; the close-look square itself is not drawn (the user asked,
+2026-11-15: its corners, 192 px and more, looked like a drop's outline; F3 still gives its side); under the
+flag, only while it cannot draw: no drop model yet, preparing it for the GPU (once, saved as model.engine), or why it
+failed. F3: "Drops N/s, ms each, slowest, close square N px". **On a clip** (the user asked, 2026-11-15 night: the
+Drops flag was missing from the clip screen's Guesses popup): the same Drops flag there draws the guesser's drops.
+Recorded: what Show > Drops drew live, kept in clip.txt as `drops` lines (`App::noteDropsInClip` after each
+`watchLoot`, written whatever the flag says, as the drop finder looks either way: a line each time the close look, the
+spot or its kind changes, or nothing is drawn any more; `core/ClipGuesses` `recordedDrops`); clips saved before say "Not
+recorded in this clip." under the flag. Today: what today's drop model finds on the frame shown, the whole frame in
+squares like the review's finder (`engine/ClipDrops`: its own thread and GPU device, started the first time the flag
+wants Today's; the frame shown handed to it at most 10 a second, a paused one always; about a tenth of a second a frame;
+each frame's drops kept, so going back shows them at once; until a frame's own come, those of a frame up to 250 ms
+before it), drops on the interface the clip's UI finder found left out as live. So Today shows every drop the model
+sees, not only round a spot: a retrained drop model can be judged on old clips. Checked 2026-11-15 in hidden snapshots
+on clip 2026-11-15_19-58-40 (frame 1100, after the Imp's death: "Drop 84%" on the yellow ring under the dead target,
+the look-alike still to teach) and on a new clip saved from a hidden snapshot (its `drops` line written and read back);
+a clip with drops recorded live is still to be looked at. **Review**: a model whose model.json has `"loot_side"`
+(core/ModelInfo `parseModelLooksAround`) makes the Finder look at each image in squares (`lootTiles`: 512-px tiles
+7 x 4 and 1440-px 3 x 1 on 2560 x 1440, each overlapping the next by a quarter at least), the same drop found in two kept
+once, the surest (`keepApart`: IoU 0.5 or 60% inside the smaller). `observex_bench --model models/drop --images FOLDER
+--out FILE` does the same, to compare with Python and to find look-alikes. Measured 2026-11-15 (the live model: 64 Shift+Win screenshots, 91 drops, the last 13 held out; trained with the look-alikes the first model found): held-out squares 54/54 drops, 2 false alarms at 50%; held-out whole screens in squares (C++) 13/13 drops, 1 false alarm at 50% (the first model 7), 0 at 70%; on the user's clips 2026-11-15_19-58-40 and 19-59-03 (adena from Imp kills) the adena next to the corpse is found at 76-87% (a far pile of 12 x 7 px too), and rings and runes went down by 22% and 70%. Left to teach: the blue click-to-move marker and the yellow ring under a dead target (both 80-90% when found). Cost (hidden snapshot, game running): 19 looks/s at about 6 ms each; the character recogniser 4.82 ms a look with it, 4.72 without.
+**Name plate** (the user asked, 2026-11-15, with screenshots of no hover / hover / selected, for Select Target's
+done; stats ABI 6: `PlateLook`, `StatsReading::setLook`): the game draws a character's name between two round orbs
+over it while the mouse is on it (grey inside) and while it is the target (blue inside, or red on a monster fighting
+the character). The app says which box to look at (`PlateLook`: an id and the box on the screen image;
+`UiFinder::setLook`, given to the reader before each `areas()`); the reader adds one colour part over it
+(`plateArea`: 320 px either side of the box's middle, from max(180, 0.6 x its height) above its top to a third into
+it) and `heuristics/NamePlate`'s `findPlate` finds the orbs there: a bronze ring (red >= 90, red - blue 25..120, red
+>= green, green >= 0.6 red, green + 8 >= blue) on 13 of 16 angles at radius 7.5 or 8.5, its inside (9 x 9) coloured
+(blue - red >= 40, or red 60 over green and 40 over blue) or grey (channels within 30, not mostly ring-coloured), orbs
+inside UI pieces skipped (the bottom right UI has a plate-like pair); two orbs of one kind on a row (2 px), 24 to 520
+apart, with white text (all channels >= 200, 12 px at least) between them 12..19 px from the left orb and 10..17 from
+the right; of several, the one nearest the box's middle above its top (within its sides +-40, above a third down it).
+`GameStats::plate` (`NamePlate`: look id, seen, selected, orb to orb, the name read by Windows OCR while selected,
+orbs round it for the why); a why line when none: "Plate: none over x,y-x,y (N orbs round it)". Checked with
+`observex_bench --stats IMAGE --plate X0 Y0 X1 Y1` (a `plate` line per image) on the user's three screenshots (none /
+hovered / selected, "Imp Elder") and on 41 frames of clips 2026-11-13_00-50-14 and 2026-11-12_23-25-45 (a box under
+each plate the Python prototype found, else one over nothing): the same answer on all 41, 23 selected (read "Goblin" /
+"Gremlin" on each) and 18 none.
 The screen picker (Observing ...) has **None** while a screen is observed (the user asked, 2026-11-12): it stops
-everything (capture, recognition, recording, the clip buffer) and shows the choose-a-screen page.
+everything (capture, recognition, recording, the clip buffer) and shows the choose-a-screen page. Since 2026-11-15 (the
+user: a line under the screens with a note beside it was hard to see and clutter) it is a tile left of the miniatures,
+as tall as they are, set a little apart: a dark empty screen with a struck-through circle and a "None" name chip like
+the screens', violet outline and sign under the mouse; no explanation text (`ScreenPicker::drawNone`; `draw` returns a
+`Choice`: a screen or None).
 **Ground** (the user asked, 2026-11-12: step 2 towards depth, "a green plane with opacity that rotates with the camera
 and reacts to zooms"; `show-ground`, off by default; also in a clip's Guesses popup) draws the ground as the camera sees
 it: filled see-through lime (`theme::kGround`) cells 1.5 own heights wide on the ground's own map, fainter farther out,
@@ -409,6 +594,122 @@ fewer (held, more matches miss where the motion disagrees). F3's Ground adds "de
 Not done yet: looking level the horizon is in the band and the maps say nothing (the motion carries the pitch then),
 and the table's steep part (seen 24 and up) is measured against the motion only.
 
+The pitch by the camera's turns (2026-11-15, the user: "the most PRECISE way to figure out the pitch given just the
+screen"; `heuristics/TurnPitch`, unit tested, ABI 8; 9 for its tilt in the note). Lineage 2's camera never rolls and turns round the world's up,
+which the camera sees leaning by its pitch: looking level a turn slides the picture sideways, looking down it also
+spins it round its middle, and how much of each says the pitch, whatever the ground's shape (no plane, no depth). Each
+follow `TurnPitch` learns up to 32 x 18 points (the strongest Shi-Tomasi corner a cell of the quarter size, which the
+ground finder reads whole anyway; the interface and the characters left out), follows them onto the next follow's
+image (pyramidal Lucas-Kanade on the quarter size and 3 halvings, 9 x 9 windows, started where the follower's camera
+motion takes them: on the flat ground round the feet below the horizon, as if infinitely far above; kept only if
+followed back to within 0.3 pixels), and fits the two cameras to them: the first's pitch, the turn, the tilt and
+which way the camera went (a free direction, so it works while walking too), by each point's Sampson distance off its
+epipolar line, Cauchy-robust Levenberg-Marquardt from 9 starts (the pitch given and 11 degrees either way; going
+sideways, up or ahead), and how sure the pitch is (its spread, from the fit's covariance). A still camera says
+nothing of the pitch (spread huge) and a tilt only how far it tilted. `TurnHold` (a one-number Kalman filter) takes a
+pair that turned at least 0.6 degrees and is sure to 0.5 as a measurement, every tilt (the pair's, or the follower's
+when the points were lost) as the process; while it is sure to 1 degree it holds the pitch: the follower tilts the
+camera, the patches and the images kept to it (`tiltAll`), the fit's pitch is held (`pitchHeld`), the depth maps do
+not pull it (their note still says how far off they are), the camera says `GroundCamera::pitchByTurns` (geoCamera
+then adds no slope correction: the turns' pitch has no slope in it), and a follow whose points fitted is not lost
+(the patches matched nothing for 0.6 s of a fast turn on 2026-11-15_14-24-16 at 5.1-5.7 s while the points did).
+Gates: holding, a pair more than 5 spreads off is not taken, two in a row that agree with each other are (the hold
+was lost in a blur); not holding, one more than 20 degrees off the follower's is a wrong fit (the fit finds wrong
+cameras near +-85 degrees in fast tilts with little turn: 85.7 for 17 on 18-58-01's first follow). A follow whose points
+were lost or blurred (fewer than 100 agreeing, `kLeastAgreeing`) adds 1.15 degrees of doubt and a third of the tilt
+the follower made meanwhile (`kLostSpread`), so one such follow ends the hold and the depth maps pull again (the user,
+2026-11-15 evening, clip 2026-11-15_21-19-16: "the ground flag looks very solid but only when im rotating the camera
+on pitch very gently. the moment i do hard fast turn it completely breaks": the camera tilted 40 degrees in 70 ms
+with the points lost, and the hold, then adding only 0.46 degrees a lost follow, kept 45.8 while the camera looked at
+about 4; now it lets go and ends at 7.4, held 41% of follows; the user tilts inside fast blurred turns too: 2 degrees
+unseen on 20-16-13 at 3.6 s). The screen alone cannot follow such flicks (the next step: the mouse, below). Measured (2026-11-15, against the Python prototype's half-size 4-frame pairs at 120 fps,
+session 3307e15c's scratchpad pitch/: tracks.py, fit.py, cmpbench.py): 2026-11-12_18-58-01 held 99% of follows, off
+the prototype 0.12 degrees on average (sd 0.19, median 0.003, between follows included), where the live grid as
+recorded was 1.14 off (sd 1.26, most 4.7); 2026-11-15_14-24-16 held 80%, 0.33 off (median 0.02; only before its first
+turn more); 2026-11-12_20-16-13 held 74%, median 0.02, but there the user tilts 3 degrees within 100 ms of a fast turn
+and the frames between follows (head() turns only) lag up to 2.3 degrees; its first 0.3 s tilt 40 degrees with no
+turn (the follower's pitch then, as before). 4.3 ms a follow on the ground finder's thread (15 a second). On rendered
+ground (the tests) a 3-degree turn says the pitch to 0.06 degrees at 17 looking down, 0.13 at 46 (the spin a turn
+adds shrinks as its cosine), 1.5 degrees on a screen half as wide only to 0.2. F3's Ground adds "turns held the pitch
+N% (said it N%, N ms)"; the bench's `--ground` prints "turns: fitted on N frames, said the pitch on N, held it on N"
+and with `--frames` per follow `turns POINTS AGREEING f/t/H turned DEG says DEG +- SPREAD miss PX MS`. The lens is
+still kGroundFocal 1700 (the 264-degree turn of 14-24-16 closed against the minimap's cone says 1688 +- 9; a 1% lens
+error is 0.1 degrees of pitch at 10, 0.25 at 30) and the screen's middle the principal point (10 pixels off is 0.34
+degrees). Not done: the camera turns in steps of about 0.2 degrees (the same for yaw and pitch, user.ini's speeds both
+3600), so tilts could be snapped to whole steps between turns; the lens could be fitted from a full turn.
+
+The mouse (the user, 2026-11-15 evening: "this pitch task is failed until it is very precise and stable in very fast
+camera rotations ... maybe the key is to listen for global mouse movement when RMB is being held? camera rotates when i
+hold RMB ... figure out the proper math as to how much the camera is moving ingame based on my mouse stride delta * the
+mouse sensitivity"). `engine/MouseWatch` reads every report of the mouse wherever it is used (Raw Input,
+RIDEV_INPUTSINK, on a message-only window and thread of its own; QPC-stamped on arrival; never moves it), and while a
+screen is observed (`App::mouseWatch_`, made with the clip buffer) hands each to the clip buffer
+(`ClipRecorder::moused`), so a clip's clip.txt has `mouse TIME DX DY HELD BUTTONS WHEEL CURSORX CURSORY` lines (raw
+counts, before Windows' pointer speed and acceleration; HELD 1 left, 2 right, 4 middle; from as long before the first
+frame as the looks; `core/ClipLines` appendMouse/readMouse, `ClipText::mice`) and its head Windows' pointer settings
+(`MouseWatch::pointerSettings`; this machine: speed 10 of 20, enhance pointer precision off; the game's Option.ini has
+AutoTrackingPawn=False, so only the mouse turns the camera; its User.ini and L2.ini are encrypted, Lineage2Ver413).
+`observex_bench --mouse [SECONDS]` watches it from the console and prints a line a second (reports, counts, counts with
+the right button held, the cursor). The bench's `--ground --frames` follow lines end in `tilted DEG`: the tilt the
+points saw between two follows (`GroundNote::turnTilt`, ABI 9), with their time to 0.1 ms. The research (2026-11-15,
+UT2004's UnrealScript as the nearest source; nothing public on Lineage 2's camera): UE2 turns the view by 32 x DeltaTime
+x counts x MouseSensitivity x FOV/90, the rotator in whole units of 65536 a turn. Measured on the user's 7 clips of that
+night (2026-11-15_21-42-40 to 21-46-09: a 360, tilts to the limits, 180s at the top, flicks, the camera into the ground;
+session 3307e15c's scratchpad pitch/): **a count turns or tilts the camera 36 units (0.19775 degrees), both ways, at any
+speed** (the 360 of 21-42-40 lined up with its first image after 361.69 degrees of counts, by the images alone; the cone
+said 35.98 units a count between rests; the points step in whole counts). The 37-unit idea was the lens: **1741 pixels,
+not 1700** (the points of 1291 turning frames 1739.8, of 949 tilting ones 1743.9; `kGroundFocal` is 1741 since).
+**Counts turn the camera only in the game's camera mode**: the right button held and the cursor put in the window's
+middle by the game, seen on the first report after (7 ms to 0.45 s after the press; 5 presses of 16 it never did, and
+their counts turned nothing). That report may already move it on: on clip 2026-11-15_23-34-30 the first was at (1279,
+723) and the cursor never sat on the middle again, so the exact-middle gate lost a whole 9 s press (the cone turned 197
+-> 21 -> 288 degrees, the card stayed at 222, cone off up to 159); since that night near the middle counts too after a
+jump there (within `kWarpSlack` 2 plus `kWarpPixelsPerCount` 4 a count, the jump farther than that: a cursor dragged
+across the middle does not jump). Over the 34 presses of that night's clips it took 5 more, all after the 7 measuring
+clips (whose gating is the same), and on those 4 clips the cone stayed within 1 degree of the counts. So gated, the cone
+stayed within 0.8 degrees (its own error) of the counts over up to 3060 degrees turned. **The pitch stops at 82.0
+degrees down** (TurnPitch while yawing there, clip 21-44-29: 82.015, 0.2 either way over 120 frames); no lower limit
+down to the lowest the clips went, 28.5 up. A frame shows the reports up to about 13 ms before its capture, each spread
+over the 12 ms before it (82% of frames within a count of the points). The cone lags about 25 ms and redraws at ~30 Hz.
+
+**`core/MouseCamera`** (built that night): the camera by the counts: the camera-mode gate, whole units (no float sums:
+100000 random reports and back come to 0 exactly), the pitch clamped at the limit as the game does, `at(ms)` for a frame
+(the lag and spread). Anchors (`anchorMouse`, from the follower's note on each follow): the cone's heading while the
+camera rested 120 ms (the yaw is the middle of the last 9 rests' cones; a rest 2 degrees off forgets the ones before:
+turned by something else); the turns' pitch where it turned at least 0.6 degrees with 100 points agreeing within 0.5
+(the middle of the first 3, then of 5; past a limit by half a degree it is wrong, the first pair of 21-46-09 said 88);
+the follower's own measured pitch only as a guess before them. Pushed past the top limit by more than the pitch may be
+off (30 counts after a guess, 5 after the turns), the pitch is pinned there: exact from then on, the turns only checking
+it (re-anchored if 9 say 2 degrees off; TurnPitch is up to a degree off the counts between the limits, high below 0 and
+low at 30-70). `SharedMouseCamera`: the same under a mutex. Live: `App::mouseCamera_` (made with the observing, the
+screen's middle as the game window's) gets every report from the mouse thread; the ground finder gives the follower the
+counts' camera on each image (`GroundHints`' mouse fields, ABI 10: `GroundFollower` takes their turn as the search's,
+holds the fit's tilt and pitch to them, and turns and tilts the camera so on follows and between them; no cone,
+turn-hold or depth pulls while they are known) and anchors it from the note; the preview's grid takes the counts' yaw
+and pitch on the very frame shown; Stats has a card Camera first (Yaw: minimap / turned only, Pitch: top limit / turns /
+guess, Off by: the cone and the turns lately). Its anchors all come through the ground finder, so it follows while the
+Stats tab shows (not only with Ground or Geodata on; the grid is drawn only with Ground): with both flags off the first
+live try (2026-11-15 night, clip 23-08-49) said Pitch "Not read yet" and Yaw "turned only" throughout, the counts alone
+knowing only how far it turned. A follow costs about 16 ms on its thread, 15 a second, the cone 1.6 ms between; the
+depth finder still runs only with its flags (no depth map: the follower's guess, then the turns, as the bench found on
+that clip: 20.1 degrees guessed, 21.4 from the turns once the camera turned). On a clip the re-follow
+(`engine/ClipGround`, Today) does the same from its mouse lines (`bench --ground --no-mouse` leaves them out).
+**The camera in clips** (the user asked, 2026-11-15 night: "last 10s is not saving camera"): clip.txt has a `camera`
+line (`core/ClipLines` appendCamera/readCamera, `CameraShown`: the card in degrees, `core/MouseCamera`'s `cameraOf`)
+whenever the card would show something else, whatever the tab shows, so every frame it turns (`App::noteCameraInClip`
+beside the brain's, timed by the image the window showed). On a clip the Stats tile's Camera card shows Recorded's
+(`ClipText::cameras`, `recordedCamera`: the last line at or before the frame) or Today's (`ClipGround::follow`'s
+`mouseCameras`: the card on each frame after its own follow anchored the clip's mouse camera, as live; the first ask
+starts the ground's re-follow, shared with the Ground flag), or a card saying why not (saved before camera lines; before
+mouse lines; still working; not known by the frame). `bench --ground` prints Today's card against Recorded's every half
+second.
+`observex_bench --turns CLIP [--focal PX] [--lag MS] [--spread MS] [--top UNITS] [--bottom UNITS] [--anchor]`: each
+frame pair's points against the counts. Checked on the 7 clips, each frame's camera turn and tilt against the points':
+yaw 0.73 -> 0.09 degrees mean off (95% 3.69 -> 0.42), pitch 0.42 -> 0.07 (1.90 -> 0.31); in fast frames 3.25 -> 0.33 and
+1.31 -> 0.18. The absolute pitch against the turns': within 0.12 median in 5 clips, 1.0 and 1.4 in the two that never or
+late reached the top (the turns' own bias there). Open: the lower limit (a clip pushing the camera all the way up into
+the ground), the per-frame spread (18% of frames a count off).
+
 **Depth** (the user asked, 2026-11-12: step 2 of the depth plan, "move it to C++, into observex, add flag in the live
 view as well as in guesses", the last 10 s recording exactly the depth seen, hot reload, the interface left out, colours
 vivid enough that a distant monster shows against a darker background; `show-depth`, off by default) draws, instead of
@@ -462,6 +763,59 @@ window), Today's shading runs on the UI thread when the drawn map changes (about
 playing), and the model is not tuned to Lineage 2 (far trees and the sky are good, flat UI-like things such as name
 plates come out near).
 
+**Geodata** (the user asked, 2026-11-15: "add Geodata flag in the live view", "if the system is not sure where i am
+it writes in the middle of the screen type /loc and it keeps watching the chat window ingame to read it and sync",
+"the flag draws the whole geodata as grid that matches the world"; `show-geodata`, off by default). A Show flag after
+Ground: the server's geodata (L2J `.l2j` region files in `models/geodata/`, named `RX_RY.l2j`, rx = floor(x/32768)+20,
+ry = floor(y/32768)+18; the whole u3j-lineage-geodata set from GitHub (ChaosPaladin, 2015), 203 regions, rx 11-26,
+ry 10-26, 1 GB, every main town's region there, downloaded 2026-11-15 with the user's OK, each checked to walk its
+blocks to its exact end; it matches the C1 server: 47 units = one own height; only the 9 regions nearest the one read
+last stay loaded, `Geodata::kKept`) drawn as a grid on the terrain round the character,
+fixed to the world (it never slides as they walk): fine lines every 32 units out to 1216, coarse every 96 out to
+4032 (fading), coloured by height against the feet (level lime, lower cyan, higher orange at 120 units), the fine
+cells a character cannot walk into shaded red (tree trunks, rocks), a ring round the feet; the game's interface is
+left clear (lines cut where they go under a found window, Liang-Barsky; cells touching one left out). Pieces:
+- **Where the character is** (`core/WorldPosition`, unit tested): the last /loc answer plus how far the minimap's
+  map slid since (north-up, so world = -scale x slide), the scale (game units a pixel) learned from two /loc answers
+  with a walk of at least 150 units and a slide of at least 40 px in about the same direction, kept in observex.cfg
+  as `minimap-scale` once learned. Its height is set each image from the geodata's floor nearest the one it had (a
+  bridge, a cave). `Doubt` says why it is not sure: NoLocation, Moved (walked before a scale is known), MinimapLost,
+  MinimapHidden.
+- **The minimap's slide** (`heuristics/MinimapScroll`, in the stats DLL, ABI 7, run by `StatsReader` at 10 a second on
+  the Minimap window the UI finder finds): edge key points on the half-size grey of the map round the own arrow (the
+  arrow, cone and ring left out), matched by correlation (each gradient capped at twice the key's, so the map's
+  see-through buttons and bright overlays don't spoil it) within 3 half pixels of the foretold slide (14 after a
+  miss), a new key after 20 half pixels; 6 misses in a row or the window moving more than 16 px start a new run (the
+  position is then doubted). No new key on a weaker match (that drifted 6 px).
+- **The /loc answer** (`heuristics/LocationReader`, same DLL): the Messages window's lowest lines; a line is new when
+  its letter pixels share less than 70% with every line of the image before (the chat is see-through, so hashes
+  changed every frame; this check costs 1.5 ms where reading every line cost 18), and a new line among the newest 3
+  is read (the stats' digit OCR at 3x) for "Current location : X, Y, Z (...)". An answer whose Z is more than 100
+  units from the geodata's floor there is logged and not taken (read wrong).
+- **The grid** (`core/Geodata`, unit tested): `Geodata` reads regions on demand (flat, complex and multilayer blocks
+  of 8x8 cells of 16 units); `GeoField` builds 320 cells each way round the character on a thread of its own (10-40
+  ms, again when they come within 4200 units of its edge), taking in a multi-floor cell the floor nearest the ground
+  round it and cutting down tall narrow bumps (the geodata keeps the tops of trunks: that held the ground 2,000 units
+  up) as blocked; `geoCamera` sets the ground finder's pitch right on the geodata: the follower's pitch is off by the
+  ground's slope along the view (it fits a flat plane), so a least-squares plane is fitted to the field under the
+  rays and pitch = follower's - slope along the view - 1.95 deg (calibrated on clip 2026-11-15_14-24-16: -4..-6 deg
+  facing the hill, +3 facing the plain); not while the camera's turns hold the pitch (`GroundCamera::pitchByTurns`,
+  see Ground: that pitch has no slope in it); `geoGrid` projects it.
+- **What to do** (`app/GeodataView`): while not sure for 0.7 s, in the middle a third down, "Type /loc" (with why:
+  not known yet / once more for the minimap's scale / the minimap lost track) or "Open the minimap"; "No geodata
+  here" where the region file is missing. Drawn whenever the flag is on, also before the ground finder has a camera
+  (then the message alone). The Log tile gets each /loc taken or refused and each loss of sureness. Where it was
+  last sure, the grid is drawn fainter until it is sure again.
+- **The UI finder names the minimap window** (`core/UiLayout`): a framed window within 8 px of a placed piece takes
+  its name (the Minimap's anchor hit inside its frame, and the window, not the piece, was found otherwise).
+`observex_bench --geodata CLIP --out FOLDER` follows a clip the same way (see Build and test). Measured 2026-11-15 on
+clip 14-24-16: the /loc read right (-9543, 25573, -3616), the minimap followed on 99 of 99 images, sure on 87 (until
+the /loc); the grid on the terrain, red at the tree bases, the hill's line after the pitch fix, the UI clear; four
+other clips one run each, at most 5 single misses. Checked in a hidden snapshot: "Type /loc" in the middle with the
+flag on. Not done yet: the minimap's scale unchecked on a walk (no clip with two /locs and a walk between), zooming
+or moving the minimap ends a run (a new /loc), clips don't replay it (Guesses has no Geodata), the pitch correction
+comes from one clip, and only the village's regions have been seen against the game.
+
 **Tabs and tiles** (the user asked, 2026-11-12): under the top bar a strip of tabs **Live**, **State** and **Stats**
 (`app/Widgets` `drawTab`: medium weight, muted while off, an accent underline while on). Each tab shows or hides its
 tile, a docked pane (`show-live`, on by default, `show-state` and `show-stats` in observex.cfg); the last tile shown
@@ -480,7 +834,7 @@ window, with time of every message ... save it to file ... make sure last 10s sa
 the logs, but make it a ring buffer"; then: no checks with the image and no ms added to the frame, only differences in
 what Stats/State read or the app's own events). The last tab, **Log** (`show-log`, off by default), shows a narrower
 column at the right, the whole height, the others left of it (the user asked, 2026-11-13: with all four open, "a
-narrower column to the right of stats and state"; `core/Tiles` `placeLog`: 1/5 of the width at first, its line drags
+narrower column to the right of stats and state"; `core/Tiles` `placeColumn`: 1/5 of the width at first, its line drags
 like the others; with Live only it sits right of Live; alone it takes the view). `app/LogView` draws a line each: the
 time (HH:MM:SS, muted), then the text, wrapped under itself right of the times when too long for the column; a muted
 date row ("Friday, 13 November 2026") where the day changes; it stays with the newest line while scrolled to the bottom.
@@ -514,36 +868,212 @@ next kill's 121 XP to 26.65%, the same rate); a saved clip's clip-stats.txt read
 brought the lines back. Unit tested (`tests/LogTests.cpp`: the line format, the file read back, the ring in memory and
 in the file, the XP rules, a clip's log lines).
 
+**Crash log** (the user asked, 2026-11-15 night, after observex crashed in TensorRT's nvinfer_11.dll about a second
+after "Observing" and Windows' own report could not be read: the app runs as administrator, so its reports are
+admin-only, and there is no debugger here): `engine/CrashLog`'s `installCrashLog` (from `App::init` right after the log
+is made, and again at the end of `startObserving`, in case CUDA or TensorRT put their own handler in) appends a crash on
+any thread to observex.log in its line format, so the Log tab shows it after a restart: `CRASH: access violation reading
+0x... at nvinfer_11.dll+0x31acca8 on thread observex depth finder (1234)` (the threads are named), then the call chain,
+one line a frame (`#0 module+offset function file:line`; names and lines from the PDBs next to the modules, "near" an
+export where a module has none, such as Windows' and TensorRT's, a guess), then `dump: FILE`, a minidump in `crashes/`
+next to the log (observex-YYYY-MM-DD_HH-MM-SS.dmp, the newest 5 kept; to open in Visual Studio with the PDBs). An
+uncaught C++ exception (std::terminate, abort) is told the same way with its message. Windows then goes on with the
+crash as before. **Release keeps PDBs** since (observex.pdb and the DLLs' in the project folder; /Zi, /DEBUG /OPT:REF
+/OPT:ICF, so it optimises as before; gitignored with crashes/). `observex_bench --crash FOLDER [uncaught]` crashes on
+purpose with it installed (checked 2026-11-15: the chain named crashHere and crashDeeper with their lines, in Release;
+the uncaught one its message; 7 crashes left 5 dumps).
+
+**Debug** (the user asked, 2026-11-15: "to the right of Log tab, add Debug tab, where you sum up every ms cost of the
+observex ... i want to see the same sum that i currently have written ... it should also be written to the ring buffer
+incase i do 10s clip. its needed to know what to optimize"). The tab after Log, **Debug** (`show-debug`, off by
+default), is a column right of the Log column (`placeColumn` again, placed first; 1/3 of the width at first,
+`debugSplit_`, so its table fits; its line drags). `app/DebugView` `drawCosts`: the total ("29.2 ms", the top bar's
+number) "on each screen image, over the last second", then a table: each part (a thread) and under it, indented and
+muted, each step of its run that ran that second, with **Each** (ms on average), **Slowest** (ms), **Per s** (runs a
+second) and **Busy** (each x per s: how much of its thread's time). Names keep their whole width; a narrow tile cuts
+numbers. `core/Costs`: `CostMeter` (`begin` when a run starts after its wait, `lap(step)` after each step, `end` when
+it is done; `take(seconds)` once a second gives a `CostPart`: the run and up to 14 steps), `costTotalMs` (each part's
+run.eachMs added up, the parts that ran). Parts (`App::costs`, only those that ran): Capture (`Pipeline`: the hand-overs
+to each finder, preview, screenshot, recording), Characters (`Recognizer`: copy in, network, live log, heuristics, to
+snapper, to clip buffer, mirror test), Snapping (`BoxSnapper`: grey image, areas, read back, learning, snapping, to clip
+buffer), UI and stats (`UiFinder`: grey image + read back, finding, parts copied, miniatures, parts read back, stats
+reading, skill pictures, OCR), Ground (`GroundFinder`, every image: depth pitch, grey image + turning, grey image +
+following), Depth (`DepthFinder`: squeeze + network, hand-over, shading, packing), Drops (`DropFinder`: copy in, squeeze +
+network, hand-over), Clip buffer (`ClipRecorder`: copy in, encoding, trim, taking lines; only runs that encoded a
+frame), App frame (`App::run`'s `frameMeter_`: housekeeping, skills followed, stats kept, geodata, loot watch, brain
+tick, finders steered, preview copy, clip shown, new frame, brain acting, drawing, rendering; Present is not timed).
+Not timed: Record and screenshots (written on their own threads), the Review. The old F3 numbers (`StatWindow`s) stay
+as they were. The clip buffer gets the parts once a second and right before a save (`App::noteCostsInClip` ->
+`ClipRecorder::costed`; only while the buffer runs and no review or clip is open), written as `cost` lines (see
+`core/ClipLines`); on an open clip the tile shows the look whose second holds the frame shown ("as recorded over the
+second up to 0:04.2 of the clip", `ClipView::recordedCosts`; a clip saved before: "Not recorded in this clip").
+Checked 2026-11-15 in hidden snapshots on the user's game: the total matched the top bar; Characters' network 4-8 ms at
+120/s (its thread over half busy), UI finding 7-8 ms at 10/s, snapping's read back 1-1.5 ms. Unit tested
+(`tests/CostsTests.cpp`: the meter, the total, the cost line round trip, a clip's cost lines by frame).
+
 **State tree** (the bot's brain; the user asked, 2026-11-12: first a graph editor like an animation graph, then UE5's
 "State Trees" mirrored in full in a floating window, then "make it much simpler, delete most of the functions, i will
 keep adding them", in observex's own look, in the State tile; then, the same night, details on the right, Load/Save,
 transitions with conditions, the active states and a backend that runs them): `core/StateTree` is the tree, Root
 (always there) and states under it, each a name, its children in order and its **transitions** (a state to go to and
-**conditions**, of four kinds as UE's condition types, `Kind`: **Compare Number**, UE's Compare Float: left, `<` `<=`
+**conditions**, of five kinds as UE's condition types, `Kind`: **Compare Number**, UE's Compare Float: left, `<` `<=`
 `=` `!=` `>=` `>`, right, each side a typed number or one of the game's numbers in percent, HP, MP, XP, Target HP,
 Cast (how far the cast bar is; 0 with no cast bar) or a skill's cooldown left (0: ready); **Has Target** (yes / no: the
 target's window found; the user asked, 2026-11-12); **Target Name** `=` / `!=` text: = holds when the name has the
 text in it, ignoring case ("Ashen" is True for "Ashen Wolf", the user asked); **Skill** (a skill added in the Skills
-tab is Ready, Cooling down or Being cast: the cast bar's skill). `Variables` come from `GameStats` once a reading
-(`variablesOf`: Status HP/MP/XP, `kTargetPiece` HP, `kCastingPiece`, every `kSkillsPiece` gauge, and the target as
-the stats reading caches it, the user asked 2026-11-13 for it there at once: `GameStats::hasTarget` and
-`targetName`, the name last read while the target's window stayed up).
+tab is Ready, Cooling down or Being cast: the cast bar's skill); **Is Skill Ready** (the user asked, 2026-11-15:
+`SkillsReady`, a list of the profile's skills and **Any Skill** / **All Skills**: true while at least one / every one is
+ready; ready, `statetree::isReady`, is found on screen, cooldown 0 and not just pressed; no skills: never). `Variables`
+come from `GameStats` once a reading (`variablesOf`: Status HP/MP/XP, MP in points from the MP bar's number "90/108"
+while it is read, `kTargetPiece` HP, `kCastingPiece` (`castShown`, `casting`), every `kSkillsPiece` gauge, and the
+target as the stats reading caches it, the user asked 2026-11-13 for it there at once: `GameStats::hasTarget` and
+`targetName`, the name last read while the target's window stayed up). **Enter conditions** (UE's; the user asked,
+2026-11-15, after asking how Combat could do something else while Wind Strike cools: "branches inside a state?" no,
+children picked by priority): every state but Root has a list of conditions like a transition's (`State::enter`); it
+is entered only while they pass, and entering a state goes on down to its first child, in order, whose enter
+conditions pass (UE's Try Select Children In Order; none: the state itself), so a parent's children are its choices
+by priority and drag and drop orders them (see Runner below).
 Joined as UE's, the first IF, then AND / OR left to right; none: always; what is not read (a bar unseen, no name, a
 skill not found on screen) fails every condition that reads it (Has Target excepted); ASCII symbols, the font has no
 U+2264 and they showed as "?"): adding as
 a last child, removing with everything under it (not Root; transitions to removed states go too), the rows depth
-first, an unused name ("New state", "New state 2", ...). Each state also has **tasks** (UE's; for now only a
-name each, the user asked 2026-11-13 for Add Task; what they do comes later). **Runner** is a simple state machine
-(the user asked, 2026-11-13: "highlight the current state, initially Root, and write the simple state machine that
-already checks conditions"): one current state, Root at first; on each new reading only the current state's
-transitions are tried, in order, and the first whose conditions pass makes its target current (a transition with no
-target never goes); stopped, loaded, or its state no longer in the tree, it is at Root again. (UE's enters first
-children down to a leaf and tries every active state's transitions; see the runtime notes below, for when needed.)
+first, an unused name ("New state", "New state 2", ...). Each state also has **tasks** (UE's; the user asked 2026-11-13 for
+Add Task, 2026-11-15 for kinds that drive the Pico, then "tasks go one after another" and "each task has a definition
+of done before next task is activated"). They run **one at a time, in order** while the app acts (`App::actuateBrain`
+on every UI frame): the first when the state is entered (again too, by a transition to itself), each next once the one
+before is done, none after the last until the state is entered again (`Runner::task`, `finishTask`, `taskStarts`: a
+new count is a task starting, afresh). **Use Skill** (`core/SkillUse`'s `SkillUser`, unit tested; the user asked,
+2026-11-15: "accept an array, and it checks all the skills top to bottom which one is not on cooldown and uses that",
+and "keep spectating if skill ended casting OR mana cost of the skill was taken"): a list of skills; of them, top to
+bottom, the first ready one whose shortcut can be pressed is pressed (held 80 ms); none: it waits, said once in the log,
+choosing again on every reading. Done once the game shows it used: the cast bar showed it (or a cast not named) and
+then no cast, or MP in points fell by at least 3/4 of its **MP Cost** (Skills tab) from the most it was since the press
+(regeneration before the cost). Fallbacks (never stuck): no sign the game took it (cooldown, cast bar, MP taken) on an
+image shown 0.3 s after a press (`kRepress`), pressed again, and so on until it does (about every 0.4 s with readings
+0.1 s apart), given up on 5 s after the first press (`kGiveUpSeconds`); its cooldown began with no cast bar, done 0.4 s
+later (with a cost and MP read, once it was taken or 2 s later); a cast bar over 15 s, or 20 s since the first press:
+done; a skill with no cooldown and no MP cost (Sit) shows nothing, so it is done once pressed (pressed again, Sit stands
+up). Its **pressed look is no sign**: the game flashes the slot also when it refuses the skill. Until 2026-11-15 it was
+one, with a press again only 1 s after a press and done after 2 s of only the flash; the user saw Wind Strike Ready in
+the Stats tab and no try for 1-1.5 s, and the log showed why: Wind Strike read ready about 0.8 s after its cast ended,
+the game ignored F2 then and again 1.1 s later (flash and all) and took it on the press 3.3 s after Ready, in both
+loops of the day. Pressing a skill again while the game casts it does nothing. The task is done once its key is let go
+too. Log: "Use Skill Ice Bolt: pressed F3 (not ready: Wind Strike)", "Use Skill Wind Strike: done, its cast ended (1.42
+s after its cast bar showed)", "... done, its MP taken (102 -> 93, it costs 10)", "... pressed F2 again, no sign the
+game took it; pressing it every 0.3 s until it does" (said once), then "... done, its MP taken (171 -> 162, it costs
+10, after 6 presses over 2.00 s)", "... gave up, pressed 13 times in 5.08 s and the game never showed it taken", "Use
+Skill: Wind Strike, Ice Bolt not ready, the task waits". **Click Mouse** once clicked (pressed, held, let go);
+**Select Target** (Lock Mouse Onto until 2026-11-15, renamed; `core/TargetSelect`, unit tested) once the game shows
+the monster as the new target: it chooses the biggest monster (no distances yet; the same one while seen or lost
+under 0.3 s), moves the cursor onto its box's middle quickly and smoothly (12 x the distance a second, 500 to 7000
+px/s, its speed changing at most 40000 px/s a second and slow enough to brake at that by the middle: the unit test's
+1166 px in under 0.6 s, arriving under 1200 px/s), asks the stats reader for the **name plate** over it
+(`App::lookAt` -> `UiFinder::setLook`), and once a reading of an image shown since the cursor came into the box (35%
+of its size from the middle; the box as last seen, so a monster missing from a frame keeps the cursor on it) has the
+plate up with grey orbs (hovered) it left-clicks (pressed, held 80 ms with the cursor still, let go); done once a
+reading of an image shown after the click has the plate's orbs coloured and the target window up (when both names are
+read and disagree, `sameName`, it waits 1 s, then takes it with a note), or, the plate not seen coloured (a tree over
+it), the target window shows another target than on the reading before the click (none then, another name, or the one
+then dead, at most 0.5%, and this one alive, at least 5%: the same name). Coloured orbs before any click: it was the
+target already, done at once; coloured orbs without the target window: never clicked (a click on the target attacks),
+done after 1 s with a note. **Never a dead target** (the target window's HP at most 0.5%; 2026-11-15, the log showed
+it twice: chosen as it died, "Imp was the target already", and the brain stood in Seek Monster 7 and 15 s, as Seek
+Monster -> Combat wants Target HP > 0, until the user stopped it): already the target, it is given up on at once and
+another chosen ("... gave up on monster 525, it is the target already, but dead"); just clicked, the window may still
+show the dead one before, so 1 s, then given up on ("... the target window shows it dead"); seen only by the target
+window (its plate hidden), a dead one is no new target. **Fallbacks, so it never stays stuck** (the user asked, 2026-11-15: the cursor sat on a
+monster whose plate a tree hid until the brain was stopped, twice; "getting stuck is death"): never shown hovered on
+the images shown 1 s after the cursor came onto it and 1 s after it last showed hovered (`kHoverWait`: the plate
+hidden, or the cursor not on it as the game sees it), given up on; no sign 1 s after a click, clicked again once
+hovered, at most 3 clicks, then given up on; anything else, not the target 5 s after it was chosen
+(`kMonsterSeconds`), given up on. Given up on, another is chosen; that one (also a new tracker id whose middle is in
+its last box while its own id is gone: found again) only 2 s later (`kRetryAfter`), when it may have come out from
+behind the tree; meanwhile with no other the log says so once. Not a fallback yet: no monster on screen at all, the
+task waits (a transition on Nearby Monsters is the tree's way out). The log says each step: "Select Target: going for
+monster 12 (96 x 130 px, the biggest of 3)", "... clicked monster 12 again (click 2), no sign it was selected", "...
+done, Goblin targeted in 0.62 s (1 click)", "... done, Goblin targeted in 0.70 s (1 click; seen by the target window,
+its name plate not seen)", "... gave up on monster 12, the cursor was on it 1.0 s but the game never showed it hovered
+(no name plate over it, 0 orbs round it)", "... gave up on monster 12, the game stopped showing it hovered (...)", "...
+gave up on monster 12, not the target 5 s after choosing it (2 clicks, shown hovered)", "... no monster to select on
+screen but 1 given up on a moment ago, tried again within 2 s", "... lost sight of monster 12, choosing another", "...
+gave up on monster 12, 3 clicks and never shown as the target", "Click Mouse: Left button clicked". The tree shows each state's tasks inside its box and
+**highlights the task that runs** there (see the tree below). **The Brain** (the user asked, 2026-11-15, round 2):
+started and stopped by the State tile's **Brain** button right of the profile's name (`BarButton`, caption "Brain",
+**Active** green with a stop icon / **Inactive** with a play icon; it was the top bar's "State tree Working/Paused" and
+a "Paused" dot in the tile; the profile's name field narrows to make room, and in a tile too narrow even then it goes
+under them; no tooltip, the user asked, 2026-11-15: why it could not start is a Log line, "Brain not started: observe
+a game screen first", "... controller: WHY", "... the controller did not answer; is the firmware running?") or
+**Win+Esc** anywhere (`app/HotKey`: Windows' RegisterHotKey on a thread of its own, while a screen is
+observed; the plain-Escape low-level keyboard hook it replaced never saw a key while the game was in front, as the game
+runs as administrator and observex does not, and Windows keeps such hooks from an elevated window's keys; a registered
+hot key is not kept). Starting it starts the whole tree afresh from **Root** (`StateTreeView::restart`); while it is
+inactive the runner does not step and **nothing is green** in the tree (no current state, no running task, no condition
+dots: `StateTreeView::isCurrent` is false then). The window's **border**: green while the brain is active, red while a
+screen is observed and it is not, none while no screen is. The **Controller** light (dot, "Controller", Connected / Not
+Connected) is right of the tabs, after Log. **Runner** (the user asked, 2026-11-13: "highlight the current state,
+initially Root, and write the simple state machine that already checks conditions"; 2026-11-15 UE's child picking by
+enter conditions): one current state, Root at first. On each new reading the transitions are tried from the current
+state up through its parents (UE's leaf to root), each state's in order, Root's only while Root is current (Root stays
+the hub: its transitions are not every state's); the first whose conditions pass and whose target can be entered
+(`Runner::canEnter`: its enter conditions pass) goes, and lands where entering leads (`Runner::landing`: down to the
+first child, in order, whose enter conditions pass; Root never goes down, its children are reached by its
+transitions); a transition with no target never goes. Once the current state's tasks are done and no transition went,
+it picks again as entering does, from its parent (from itself if it has children: it was landed on as none of them
+could be entered), and moves only if that lands on another state (a child of Root has no parent to pick from and stays):
+so Combat with children Strike (enter: Wind Strike ready, task Use Skill Wind Strike) and Hit goes on to Hit once Wind
+Strike was used and cools, and back to Strike once it is ready and Hit's tasks are done. Stopped, loaded, or its state
+no longer in the tree, it is at Root again. `Runner::active`: the current state and its parents.
+**In clips** (the user asked, 2026-11-15: "when recording last 10s, and then reviewing, i dont see active task/state
+highlights"; opening a clip stops the brain, so nothing was green): the clip buffer keeps what the tile showed green
+as clip.txt `brain IMAGE TIME ACTING TASK [STATE]` lines (`App::noteBrainInClip` after each UI frame's tasks ran: a line
+when the brain starts or stops acting or its current state or running task changes, and one when the buffer starts;
+timed by the image the window showed then, as the ground lines; `core/ClipLines` appendBrain/readBrain, `ClipText::brains`,
+`recordedBrain`). STATE is the current state by its names below Root, " > " between (`statetree::statePath`, e.g.
+"Combat > Attack Spell"; empty: Root), as a profile read again gets other ids. With a clip open the State tile shows the
+brain as recorded at the frame shown (`StateTreeView::Replay`, `stateAtPath` in the profile shown): the state green,
+its parents' borders, the task that ran green and those before it fainter, whatever the guesser; the condition dots
+and the pickers' values on the reading the Stats tile shows (Recorded's clip-stats.txt or Today's). A muted line under
+the bar when it cannot: "Brain not recorded in this clip" (saved before 2026-11-15), or "The clip's brain was in X, not
+a state of this profile" (renamed since, or another profile). The Brain button stays the live one (Inactive in a
+clip). Checked 2026-11-15 in hidden snapshots: a copy of clip 2026-11-15_20-53-34 given brain lines (Combat > Attack
+Spell at frame 1 with Use Skill green; Seek Monster at frame 680 with Select Target green, "Has a target" dot green and
+"Target HP > 0" grey as the Goblin had died), and a clip saved in snapshot mode carrying its `brain` line.
+**Parallel tasks** (the user asked, 2026-11-15, step 1 towards a camera-turning task that runs during casts: "a
+parallel task", picked on the task, "visible visually that it runs all the time"; UE's tasks of an active state):
+`Task::parallel`, a **Parallel** checkbox before the task's X in the details, only on kinds that share nothing with
+the tasks one after another (`statetree::canRunParallel`: Debug Print for now; Use Skill, Select Target and Click
+Mouse press the keyboard and mouse those use, so they get it with a mouse-sharing rule). A Parallel task is not one of
+the tasks one after another (`Runner::task` skips it; a state with only Parallel tasks is done at once, for Tasks done
+and picking again): it runs the whole time its state is active (current, or above the current one: Combat's while its
+child Attack Spell runs; Root's only while Root is current, as Root's transitions), from when its state becomes active
+until it is left, never done (`Runner::parallelTasks`, from the top state down; `App::runParallelTasks` each UI frame
+while acting, `parallelRuns_` emptied when the brain starts or stops). In the tree its marker is two upright bars (no
+skill miniature), green the whole time its state is active, also in a clip's replay. File: `task ID parallel KIND ...`
+(read as not Parallel on a kind that cannot be). **Debug Print** (TaskKind::DebugPrint, nothing to choose): writes
+where the brain is into the Log (`statetree::whereText`): "Debug Print: Combat > Attack Spell, running Use Skill" (",
+its tasks done" once a state's tasks one after another ran; Root's name for Root); one after another it writes once
+and is done; Parallel every 0.3 s (`kDebugPrintSeconds`). Checked 2026-11-15 in unit tests (runner, file) and hidden
+snapshots (the bars, the checkbox, and a clip copy given a brain line in Combat > Attack Spell: Combat's Debug Print
+green next to Attack Spell's Use Skill); the Log lines need the brain running on the controller (the user's check).
+**When** (the user asked, 2026-11-15: UE's "transition at any time OR after all tasks are done"; `statetree::When`):
+each transition is **Any time** (UE's On Tick: tried on every reading, also while a task runs; every transition
+before, and a file's `go` line without a word after its target) or **Tasks done** (UE's On State Completed: tried only
+once the current state's last task is done, or at once for a state with no tasks; `go FROM TO done`). A reading tries
+all Any time ones first (current state up through its parents, as above), then, only with the current state's tasks
+done, the Tasks done ones the same way, and only then picks again. So a parent's Any time transition (no target, low
+HP) always wins over a child's Tasks done one, with no priorities needed, and a state's Tasks done transition to itself
+repeats it: its tasks again from the first (Attack Spell -> Attack Spell casts Wind Strike again after each cast; an
+Any time one to itself enters again on every reading, its task starting afresh each time, and picking again never
+moves to the same state, so before When a state's tasks ran only once). UE's per-state Tasks Completion (All / Any) is
+not needed: a state's tasks run one after another here, so done is the last one done. Not yet: UE's On State Failed
+(no task fails yet), events, priorities, delays.
 `App::tickBrain` gives it a step on every new stats reading (live, from the UI finder; a clip's Today on the frame
 shown) and stops it while reviewing or when nothing is read. **Files**: `.brain` (observex's own extension), text,
-`observex-brain 1`, then `state ID PARENT NAME`, `task ID NAME`, `go FROM TO`, `if and|or LEFT CMP RIGHT` (LEFT, RIGHT: hp, mp, xp,
+`observex-brain 1`, then `skill ...` (the Skills tab), `state ID PARENT NAME`, `task ID KIND ...` (above), `enter ID`
+(its `if` lines are that state's enter conditions), `go FROM TO [done]` (done: When Tasks done), `if and|or LEFT CMP RIGHT` (LEFT, RIGHT: hp, mp, xp,
 target-hp, cast, `cooldown:SKILL` with "_" for spaces, or a number), `if and|or has-target yes|no`, `if and|or
-target-name ==|!= TEXT`, `if and|or skill ready|cooling|cast SKILL` lines (`writeTree` /
+target-name ==|!= TEXT`, `if and|or skill ready|cooling|cast SKILL`, `if and|or skills-ready any|all SKILL|SKILL...`
+lines (`writeTree` /
 `readTree`, which says the line and why it cannot read one), in Settings' **brains folder** (`brains` in observex.cfg;
 default `brains` next to observex.exe; folder picker, Open, Use default under the recordings folder). **Profiles**
 (the user asked, 2026-11-13: "we always work on a profile", named, say "Basic Combat - Mage"): each .brain file is
@@ -562,23 +1092,74 @@ only while a state is selected, its **details** on the right (45% / 55%, a 1 px 
 all, no line, no text, with none selected, and the tree takes the whole width: it had cut Root in a narrow tile).
 The tree: each state a box like
 the top bar's buttons (`kSurface`, `kBorder`, 8 rounded, the name in medium weight; lighter hovered; selected: the
-accent border; **current: green**, a faint `kYes` fill and border, Root at first), 24 px indent a depth, lines (`kBorderHover`) from
+accent border; **current: green** while the brain is active, a faint `kYes` fill and border, Root at first, and its
+parents a green border (the active states); its enter conditions muted after its name, "if Wind Strike ready",
+"if HP < 50 and a target", "if Wind Strike, Ice Bolt or Heal ready" (`statetree::describe`); its
+**tasks inside it under its name** (the user asked, 2026-11-15: "tasks should show up in the left column under states,
+but state should be visually different than a task"): a 24 px line each in the regular font at 86%, a small diamond (Use
+Skill: its first skill's miniature), the kind, and muted what it works on ("Select Target  Nearest Monster", "Use Skill
+Wind Strike, Ice Bolt"); the one that runs
+a green line (faint `kYes` fill and border) inside the green box, those done before it fainter; the box as tall as its
+name's row and its tasks), 24 px indent a depth, lines (`kBorderHover`) from
 under each parent down and across to its children, and after each box its transitions, UE-like: a small arrow (a 1 px
 line on pixel centres and a filled head, `kTextMuted` at 75%; the user found the open chevron "weird and ugly",
 2026-11-13) and the target's name, muted; a straight arrow, or a returning one (along the bottom, round, back along
-the top to a head pointing left) when the target is the state itself or one above it. A click selects (on empty space: nothing); a double
+the top to a head pointing left) only when the target is the state itself (until 2026-11-15 also for one above it,
+as UE's; the user: Rest -> Root looked like Rest going back to itself); a Tasks done transition has a small tick before
+its arrow (`drawDoneMark`, the arrow's colour, 1.5 px). A click selects (on empty space: nothing); a double
 click or F2 renames in place (trimmed; an empty name is refused; Escape keeps the old one); Delete removes the selected
 with all under it (not Root); a right click offers Add State, Delete (on empty space: Add State, under Root).
+**Drag and drop** (the user asked, 2026-11-15: change the states' order, with "visual feedback when dragging onto
+something so that i know if it will land above or below"): a state held and moved past ImGui's drag threshold (6 px;
+not Root) is dragged with all under it (`StateTreeView::drawDrag`, `Tree::move`, unit tested). Over a box's upper half
+it lands just before that state, over its lower half just after it and all under it, each time as its sibling (so it
+can change parent too); over Root, as Root's first child; a gap counts to the nearer box. An accent line with a small
+ring at its left end shows where, in the gap it lands in, starting at the depth it lands at (after a state with
+children: under the last of them, at that state's depth). The dragged state and all under it are dimmed in place, its
+name in a small accent box right of the mouse (held under the mouse it hid the names of the states it was dropped
+by); over itself, a state under it, or off the tree there is no line, the cursor says not allowed, and letting go
+moves nothing; Escape cancels. Near the tree's top or bottom edge it scrolls. Let go, the move is one change: saved,
+and Ctrl+Z undoes it. Checked in hidden snapshots 2026-11-15 (`--hold`): above Rest, after Fight and its children,
+after Kill under Fight, a state over its own child (no line), drops saved in the file's new order, Ctrl+Z and Ctrl+Y.
+**Transitions drag too** (the user asked, 2026-11-15: "drag Transitions similar to how i drag states"): each
+transition after a box (its tick, arrow and target's name) can be grabbed: a faint pill behind it under the mouse; a
+click on it (let go on it, not dragged) selects its state, not on the press, as the details opening would move the tree
+under a drag. Held and moved past the drag threshold (`StateTreeView::drawTransitionDrag`, `Tree::moveTransition`, unit
+tested), it lands in the row under the mouse (the gaps count to the nearer box, as for states): before the first
+transition there whose middle is right of the mouse, else after the last (over a box or left of it: first). In its own
+state's row that is a new order (transitions are tried in order: the first that passes goes); in another state's row it
+becomes that state's, its target, When and conditions kept (so Combat -> Rest dropped on Rest is Rest -> Rest, a
+repeat). An upright accent line with a small ring at its top shows where, in the gap it lands in; the dragged one is
+dimmed in place, its tick, arrow and target's name in a small accent box right of the mouse; just before or after
+itself, or off the tree, there is no line, the cursor says not allowed, and letting go moves nothing; Escape cancels;
+near the tree's top or bottom edge it scrolls. Let go, the move is one change (saved, Ctrl+Z undoes it) and the state it
+went to is selected, so its details show it. Checked in hidden snapshots 2026-11-15 (`--hold`, `--drag`): hover pill,
+a reorder to first, a move to another state's row, over itself (no line), drops saved in the file's new order with the
+conditions kept, Ctrl+Z back to the file before.
+Tasks cannot be dragged yet: they stay in the order they were added.
 The details: at the top the name in a field (no heading, no label; 240 px, not the details' width: the user asked,
-2026-11-13), then **Transitions**, each a card: "Go to" a state (a
-list of all, indented by depth) and an X, its conditions (IF / an AND-OR toggle, then by kind: left, compare, right;
+2026-11-13), then **Enter Conditions** (not on Root: only "+ Condition" while it has none, else a card of condition
+rows as a transition's, `StateTreeView::drawEnter` / `drawConditions`), then **Transitions**, each a card: "Go to" a state (a
+list of all, indented by depth) and an X, under it "When" Any time / Tasks done (the two fields lined up), its
+conditions (IF / an AND-OR toggle, then by kind: left, compare, right;
 "Has a target" / "Has no target"; Target Name, = or !=, a text field; a skill list (the profile's skills, with how the
-last reading saw them) and Ready / Cooling down / Being cast; then X; on narrow
+last reading saw them) and Ready / Cooling down / Being cast; Is Skill Ready: Any Skill / All Skills, then X, and
+under them its skills as a **skill array** (below; on a narrow card from under IF); then X; on narrow
 details the second half on a line of its own; while the state is active a dot by each, green while it holds), "+
-Condition" (picks the kind: Compare Number, Has Target, Target Name, Skill); then "+ Transition". A number side is a
+Condition" (picks the kind: Compare Number, Has Target, Target Name, Skill, Is Skill Ready); then "+ Transition". A number side is a
 field and an arrow to pick one of the game's numbers (each listed with its last value, the skills' cooldowns after
-them); a game's number side picks "Number" to go back (starting from its value). Then **Tasks**: each its kind (Use Skill) with a
-skill picker and an X, and **+ Task** (picks the kind). Unit tested (the tree, every
+them); a game's number side picks "Number" to go back (starting from its value). Then **Tasks**: each its kind with a
+target or button picker and an X (the one running is shown green in the tree, not here); Use Skill's skills are a
+**skill array** with the task's X at its top right; and **+ Task** (picks the kind). **Skill arrays** (the user asked,
+2026-11-15: "look how unreal does it", a vertical array of rows, a new element only by clicking "+", no checkmarks and
+no "Wind Strike, Sit" preview; `StateTreeView::drawSkillArray`): a rounded well (darker than a card it is on, a card's
+colour on the panel), at its top a muted "Skills" and how many, and a + at the right that opens the list of the
+profile's skills under the well (each its miniature, name and, right, how the last reading saw it; the ones already in
+the array dimmed, "added", not pickable: a skill is in it once); then a row per skill: its place (0 first, as Unreal's
+Index; under the mouse six grip dots, and dragged by them the skill moves up or down, the others closing up, one change
+once let go: Use Skill's order is the order it tries them), its miniature, its name (ending "..." when too narrow) and a
+chevron (a click opens the same list under the row to pick another), and an X; the row lighter under the mouse.
+The Skill condition's list has the same miniature rows. Unit tested (the tree, every
 condition kind, reading the gauges, the runner, the file round trip and its errors, the history's undo, redo and
 limit). Checked in hidden snapshots 2026-11-13 (a new folder: "Brain" made and saved; Add State, naming, Ctrl+Z twice
 and Ctrl+Y, each step in the file; renaming to "Basic Combat - Mage", and into a taken name: "Basic Combat - Mage 0";
@@ -681,7 +1262,7 @@ Review (step 2 of the training loop, `app/Review`): **Review** lists the recordi
 subfolders with a `recording.observex`, newest first: a picture of the first image (the user asked, 2026-11-02;
 `app/Thumbnails`: read 320 pixels wide, one per frame and only for rows in view, about 6 ms each for a 2560 x 1440
 JPEG, kept until observex closes; WIC's JPEG shrinking saves little, 9.6 -> 5.8 ms); when, e.g. "Today, 12:56";
-length; images; how many are reviewed per category; read once per opening), then "What are we looking for?" (categories in `kCategories`; only Characters for now), then shows the recording's
+length; images; how many are reviewed per category; read once per opening), then "What are we looking for?" (categories in `kCategories`: Characters, and Drops since 2026-11-15), then shows the recording's
 first image not reviewed yet, filling the view. The finder's guesses are drawn as marks with a tag ("Character? 81%";
 from a model with kinds "Monster? 50%", or both kinds when it is unsure which: "Monster 55% or Player 40%?");
 the selected mark gets a button per kind under it, then No (keys 1 Monster, 2 Player, 3 NPC, 4 You, 5 Can't tell, 6
@@ -1254,14 +1835,16 @@ snapper's boxes on each image, the same fields; after each, since the evening of
 ...`: which look's things it had taken in, and each search it made on that image (see Today below); since
 2026-11-12 `ground IMAGE TIME FOLLOWED KNOWN MEASURED PITCH DISTANCE FOCAL MIDDLEX MIDDLEY YAW FEETX FEETY`: the grid
 the Ground flag drew (see Ground); since 2026-11-12 `depth IMAGE TIME MAP`: the depth map the Depth flag drew, kept in
-`depth.bin` beside it (see Depth); `note TIME TEXT`; since 2026-11-13 `log TIME WHEN  TEXT`: a line of observex's
-log, see Log), `picture.jpg` (the
+`depth.bin` beside it (see Depth); since the night of 2026-11-15 `drops IMAGE DONE KILL X Y SIDE [SURE X Y W H]...`:
+what Show > Drops draws (see Drops); `note TIME TEXT`; since 2026-11-13 `log TIME WHEN  TEXT`: a line of observex's
+log, see Log; since 2026-11-15 `cost TIME PART EACH SLOWEST PERSECOND [STEP EACH SLOWEST PERSECOND]...`: the Debug
+tab's numbers once a second, see Debug), `picture.jpg` (the
 screen at the save, the list's miniature) and `clip.observex` (`ClipInfo`: saved, seconds, frames, looks, screen,
 size, model). `observex_bench --track <clip>/clip.txt` replays its looks through the tracker as for a live log.
 In the app: **Save last 10 s** (top bar, left of Record; Ctrl+Alt+C did it too until 2026-11-12; its tooltip is one
 sentence) saves what the buffer holds, then says "Saved 10.3 s" for a moment; it is greyed out (with why, on
 hover) until the buffer holds frames or while a save is written. **Review** first asks "What do we review?":
-recordings (as before) or clips; the clips list ("Play a clip") shows each clip's `picture.jpg` with when, seconds,
+recordings (as before), Handmade (the Shift+Win screenshots, below) or clips; the clips list ("Play a clip") shows each clip's `picture.jpg` with when, seconds,
 frames, looks and screen, newest first. A clip opens on the clip screen (`app/ClipView`, the frame as large as fits,
 framed like the observed screen) instead of the observed screen; the top bar then has play/pause (or Space), the
 time ("0:05.9 / 0:10.1"), the frame number (the `frame` lines' numbers) and Close clip. It plays the frames at their
@@ -1311,7 +1894,7 @@ at or before the frame's time. On the clip screen the **Guesses** button (top ba
 Recorded, Today or Hidden) opens a popup with the live view's flags: Characters (key 3 turns it off and on; the user
 asked, 2026-11-12: before, a third guesser "Nothing" did that and there was no Characters flag) and under it the two
 guessers, one sentence each (keys 1 Recorded, 2 Today, which also turn Characters on; since 2026-11-12, the user asked: before,
-longer text and their numbers), and the Kinds and UI checkboxes (the live view's flags, all three saved with it; UI draws what the clip's own
+longer text and their numbers), and the Kinds, UI, Ground, Depth and Drops checkboxes (the live view's flags, saved with it; Drops since 2026-11-15, see Drops; UI draws what the clip's own
 UI finder found on the frame shown, or one at most 0.1 s before it while playing); boxes and tags are drawn by `app/Overlay`
 exactly as while observing. Below the frame a timeline (click or drag to any frame; it pauses while dragging, ticks
 for the notes with their text on hover), and in the top bar the first frame, a frame back, play/pause, a frame on and the
@@ -1388,6 +1971,11 @@ captures only the screens on that GPU):
   kept), reads back only the full-size one and finds the game's interface on it (`core/UiLayout`). Hands `UiPieces`
   and `UiFinderStats` (images a second, ms each, finding ms, why ui.txt could not be read) to the UI; checks once a
   second whether `models/ui` changed and reads it again.
+- **Drop finder thread** (`engine/DropFinder`, below-normal priority, made in `observe` when `models/drop` has a
+  model): its own GPU device and `Detector`; on the newest image of the drops channel (20 a second while the screen
+  is observed) runs the drop model on one square: the sweep's next (`lootTiles`), or, every other image while
+  `core/LootWatch` has a spot, that spot's. Hands `FoundDrops` (the newest close and sweep looks, screen pixels) and
+  `DropFinderStats` to the UI.
 - **Finder thread** (`engine/Finder`, below-normal priority, only while a review needs guesses): its own GPU device
   and `Detector`; reads the recording's JPEGs and writes `<category>-guesses.txt`.
 - **Refresher thread** (`engine/Refresher`, while a review is open and its finder is done): lists the other reviewed
@@ -1420,6 +2008,9 @@ captures only the screens on that GPU):
   every 0.5 s; every 0.1 s makes two 10 s Lineage 2 clips about 25% and 60% bigger, 93 -> 115 MB and 50 -> 80 MB, from
   their frames' sizes: a key frame is about 400 KB, the others 40-85 KB). (Before the gap rule it copied every image, 240 a second,
   and encoded 150-160 frames a second, over the level: 0.8 ms more a look.)
+- **Mouse watch thread** (`engine/MouseWatch`, with the clip buffer; since the evening of 2026-11-15): Raw Input's
+  every mouse report, handed to the clip buffer under its lock and to the camera by the counts (`App::mouseCamera_`,
+  `core/MouseCamera`'s `SharedMouseCamera`, under its own; see Ground: the mouse).
 - **UI thread** (`app/App`, the main thread): `MainWindow` (Win32 window, swap chain), ImGui, `Theme`
   (fonts, colours, logo, the boxes and tags drawn over screen images, shared by the review and the live view), `Widgets` (`BarButton`, the top-bar button look; since 2026-11-12 an open one, its popup up or recording, lights up
   under the mouse too, so a click reads as closing it), `ScreenPicker` (the miniatures),
@@ -1476,6 +2067,8 @@ Configuring, building and running the tests and the bench here is fine. Do not l
   and NVENC's header (`nvEncodeAPI.h`, FFmpeg's nv-codec-headers n13.0.19.1, `cmake/Nvenc.cmake`).
 - Build: `cmake --build --preset debug` (or `release`)
 - Test: `ctest --preset debug`
+- Release builds keep their PDBs (observex.pdb and the DLLs' next to them in the project folder) for the crash log
+  (`engine/CrashLog`); `observex_bench --crash FOLDER [uncaught]` checks it.
 - Bench: `build/vs2022/bin/Release/observex_bench.exe [--screen N] [--seconds S] [--no-pulse] [--no-preview]
   [--record FOLDER [--every S] [--unsure]] [--model FOLDER] [--clip FOLDER]`. Lists the screens and measures one (the
   primary by default). `--clip` runs the clip buffer as the app does, prints its numbers (encoded/s, encode ms, seconds
@@ -1553,11 +2146,16 @@ does (`engine/ClipSnapper`), against Recorded and how precise; with `--today-out
   (frame lines 111-124 grey against 194-253), so their framed windows are not found: use clip frames. Frames decoded
   by OpenCV differ slightly from the GPU's (one more false small window on the hotbar). `--find-ui` in the live run adds the UI finder as the app runs it (ui/s, ms, finding ms,
   pieces); with `--model` it shows its cost to the recogniser.
+  `observex_bench --geodata CLIP --out FOLDER` (2026-11-15) follows a clip as the Geodata flag does live (ground
+  follower, UI finder, minimap slide, /loc reader, `WorldPosition`, the grid on `geoCamera`'s pitch with the UI left
+  clear; `models/geodata`) and writes a JPEG every 100 ms with the grid drawn, then how many images had the minimap
+  followed and the position sure, and the ms a minimap and a messages read take.
 - The app: `observex.exe` in the project folder. The Release build writes it there (gitignored). The Debug build
   stays in `build/vs2022/bin/Debug/`.
-- UI snapshot: `observex.exe --snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --right-drag X1 Y1 X2 Y2 |
-  --scroll X Y TURNS | --key [Ctrl+|Shift+]NAME | --type TEXT]... [--mouse X Y] [--recordings FOLDER] [--wait SECONDS]`
-  (`--type` types text into the field with the keyboard, e.g. a frame number after `--key Ctrl+G`). Draws the UI in a
+- UI snapshot: `observex.exe --snapshot <file.png> [--click X Y | --drag X1 Y1 X2 Y2 | --hold X1 Y1 X2 Y2 |
+  --right-drag X1 Y1 X2 Y2 | --scroll X Y TURNS | --key [Ctrl+|Shift+]NAME | --type TEXT]... [--mouse X Y]
+  [--recordings FOLDER] [--wait SECONDS]` (`--type` types text into the field with the keyboard, e.g. a frame number
+  after `--key Ctrl+G`; `--hold` is a drag never let go of, to see the middle of one: give `--mouse X2 Y2` with it). Draws the UI in a
   hidden window (it never appears or takes focus), plays each input step in order about 0.6 s apart (clicks, drags,
   wheel turns at a point, positive away from the user; key presses named as ImGui names them: `Y`,
   `RightArrow`, `Delete`, ...; `Ctrl+Z` holds Ctrl with it), rests the mouse at `--mouse` for hover effects, waits
@@ -1574,13 +2172,14 @@ does (`engine/ClipSnapper`), against Recorded and how precise; with `--today-out
 
 ## Layout
 
-- `src/core/`: platform-free building blocks (`TripleBuffer`, `StatWindow`, `Marks`: boxes, answers, the marks file
+- `src/core/`: platform-free building blocks (`TripleBuffer`, `StatWindow`, `Costs`: the Debug tab's meters and total, `Marks`: boxes, answers, the marks file
   format, carrying answers forward, which guesses start as yes, matching guesses to answers for the kind update;
   `ReviewHistory`: the review's Ctrl+Z; `ImageView`: the review's zoom; `BoxLearner`: nudging the review's guesses' boxes the way the user boxes them;
   `KindLearner`: re-fitting the kind classifier to the review's answers and for
   the kind update, and picking kinds with it; `Features`: the `<category>-features.bin` format and when it is fresh;
-  `ModelInfo`: model.json's kinds and kind classifier, and `kinds-update.json`; `LiveLines`: the live log's `look`
-  and `kinds` lines, and `ExactNumber`; `ClipLines`: a clip's `frame`, `shown`, `snapped`, `finds`, `ground`, `depth` and `note` lines; `ClipGuesses`: a
+  `ModelInfo`: model.json's kinds and kind classifier, and `kinds-update.json`; `MouseCamera`: the camera's yaw and
+  pitch by the mouse's counts and their anchors; `LiveLines`: the live log's `look`
+  and `kinds` lines, and `ExactNumber`; `ClipLines`: a clip's `frame`, `shown`, `snapped`, `finds`, `ground`, `depth`, `cost` and `note` lines; `ClipGuesses`: a
   whole `clip.txt` read back, the clip screen's guessers (Recorded, Today) and comparing them; `Heuristics`: the
   heuristics' fixed side (the model's things in, the things shown out); `ReviewLines`: the review log's words;
   `Recordings`: the `recording.observex` file, listing recordings and their images, and `clip.observex` and listing
@@ -1588,15 +2187,16 @@ does (`engine/ClipSnapper`), against Recorded and how precise; with `--today-out
   image, framed windows and ui.txt's pieces, and PGM files; `Ground`: the game's camera, the ground's projection and
   `GroundFit`, the camera fitted to the ground's motion; `Depth`: shading the depth network's map, `Depthing`;
   `StateTree`: the bot's brain, a tree of named states; `Tiles`: where the tiles under the tabs go; `Log`: observex's
-  log, its file and ring buffer; `XpWatch`: XP got, from the stats readings; `GameStats`: the
+  log, its file and ring buffer; `XpWatch`: XP got, from the stats readings; `TargetWatch`: which box the target is and its death
+  (the dead mark); `LootWatch`: which spot to look at closely for drops (a kill's, or drops the sweep found) and when to stop, the square rules, the sweep's and review's tiles; `ShotKey`: Shift+Win; `GameStats`: the
   numbers
   read from the game's interface, `StatsReading`, and a clip's `clip-stats.txt` lines).
   No Windows or GPU headers. Unit tested.
 - `src/heuristics/`: the heuristics, reloaded while the app runs (`Rules`, `Tracker`: following found things from
   look to look; `SnapRules`: the boxes snapped onto every new image, by `Snapper`: finding a thing's look on a
   newer image, and `GreyImage`: grey levels on the CPU, for the tests and the bench; `GroundMotion`: how the ground
-  moved between two images, `GroundFollower`, the camera followed over images, and `MinimapCone`: where the camera
-  looks, from the minimap; `DepthRules`: the depth shaded; `Abi` and `Plugin`: the DLL's plain C entry, and
+  moved between two images, `GroundFollower`, the camera followed over images, `TurnPitch` and `TurnHold`: its pitch
+  by its turns, and `MinimapCone`: where the camera looks, from the minimap; `DepthRules`: the depth shaded; `Abi` and `Plugin`: the DLL's plain C entry, and
   `DepthAbi` and `DepthPlugin` its depth entry; `StatsReader`: the game's bars and numbers read, `StatsAbi` and
   `StatsPlugin`: observex_stats.dll's entry). Built as `observex_rules` (the tests, the bench, the app's fallback),
   `observex_heuristics.dll` and `observex_stats.dll`.
@@ -1604,17 +2204,19 @@ does (`engine/ClipSnapper`), against Recorded and how precise; with `--today-out
   depth's shading).
 - `src/engine/`: the real-time pipeline, the recorder, the recogniser and the clip buffer (`Gpu`, `ScreenCapture`,
   `ImageChannel`, `Pipeline`, `Recorder`, `ImageFile`, `Detector`, `Recognizer`, `Finder`, `Refresher`, `KindUpdater`,
-  `ClipRecorder`, `ClipPlayer`, `HeuristicsLibrary`: loading observex_heuristics.dll and loading it again,
+  `ClipRecorder`, `MouseWatch`: the mouse's raw counts, `ClipPlayer`, `HeuristicsLibrary`: loading
+  observex_heuristics.dll and loading it again,
   `StatsLibrary`: the same for observex_stats.dll,
   `BoxSnapper`: the snapper thread, `GreyMaker`: grey levels on the GPU, parts read back, `ClipSnapper`: a clip's
-  Today snapped onto its video, `UiFinder`: the UI finder thread, `GroundFinder`: the ground finder thread,
-  `ClipGround`: a clip's ground followed on its video, `TensorRt`: loading a TensorRT engine and CUDA graphs,
+  Today snapped onto its video, `UiFinder`: the UI finder thread, `DropFinder`: the drop finder thread, `GroundFinder`: the ground finder thread,
+  `ClipGround`: a clip's ground followed on its video, `ClipDrops`: today's drop model on a clip's frames shown,
+  `TensorRt`: loading a TensorRT engine and CUDA graphs, `CrashLog`: a crash's call chain into observex.log,
   `DepthNet`: the depth network, `DepthFinder`: the depth finder thread, `DepthStore`: depth maps packed and
   `depth.bin`). Windows, Direct3D 11,
   CUDA, TensorRT, NVENC and Media Foundation, no ImGui.
 - `src/app/`: the window and UI (`App`, `MainWindow`, `Theme`, `Widgets`, `ScreenPicker`, `ScreenImage`, `Thumbnails`,
   `Settings`, `Review`, `ReviewLog`, `ClipView`, `Overlay`: boxes and tags over the screen or a clip, `StateTreeView`:
-  the State tile, `StatsPanel`: the Stats tile, `LogView`: the Log tile, `Snapshot`, `main`), plus
+  the State tile, `StatsPanel`: the Stats tile, `LogView`: the Log tile, `DebugView`: the Debug tile, `Snapshot`, `main`), plus
   `observex.rc.in` and `Resources.h` (icon, fonts and version info built into the exe).
 - `bench/`: `observex_bench`, the headless pipeline benchmark (`DepthBench`: its `--depth`; `StatsBench`: its
   `--stats PATH... [--layout FOLDER] [--list]`, the UI finder's pieces and the stats reader on recorded JPEGs or PNGs
@@ -1624,11 +2226,12 @@ does (`engine/ClipSnapper`), against Recorded and how precise; with `--today-out
   at) from `models/ui/stats.txt`'s `from` lines (run with `tools/train/.venv/Scripts/python.exe -I`).
 - `tools/ui/make_anchors.py`: cuts ui.txt's anchors from clips (run with `tools/train/.venv/Scripts/python.exe`): for
   each `anchor` line, the mean of its frames at each place named and the mask of the pixels that never changed, as
-  PGMs in `models/ui`.
+  PGMs in `models/ui`; `away X0 Y0 X1 Y1` leaves a rectangle out of the mask, `keep LOW HIGH` keeps only pixels at
+  most LOW or at least HIGH (letters over a bar); `--only NAME...` cuts just those.
 - `assets/`: the logo (`logo.svg`, `logo.png`) and the app icon (`observex.ico`), all made by `tools/make_logo.py`.
   Change the logo there and rerun it.
 - `tools/train/`: the training tool (Python: `marks.py` reads and writes the marks format of `core/Marks.h`,
-  `train.py`, `guess.py`, `export.py`). The trained models go to `models/` (gitignored): `model.pth` (Python),
+  `train.py`, `guess.py`, `export.py`, `loot.py`: the drops' squares). The trained models go to `models/` (gitignored): `model.pth` (Python),
   `model.onnx` (live recognition; also each candidate's features), `model.json` (its kinds, score and kind
   classifier), `model.engine` (made by observex for this GPU) and `kinds-update.json` (made by observex, the kind
   update).

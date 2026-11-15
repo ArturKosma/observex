@@ -2,6 +2,7 @@
 
 #include "core/LiveLines.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <sstream>
 
@@ -196,6 +197,179 @@ bool readDepth(std::string_view line, unsigned long long& image, double& timeMs,
     }
     std::istringstream words{std::string(rest)};
     return static_cast<bool>(words >> image >> timeMs >> map);
+}
+
+void appendDrops(std::string& out, unsigned long long image, double doneMs, bool kill, const LootSquare& square,
+                 std::span<const Detection> drops) {
+    appendf(out, "drops %llu %s %d %d %d %d", image, ExactNumber(doneMs).text, kill ? 1 : 0, square.x, square.y,
+            square.side);
+    for (const Detection& drop : drops) {
+        appendf(out, " %s %s %s %s %s", ExactNumber(drop.sure).text, ExactNumber(drop.x).text,
+                ExactNumber(drop.y).text, ExactNumber(drop.width).text, ExactNumber(drop.height).text);
+    }
+    out += '\n';
+}
+
+bool readDrops(std::string_view line, unsigned long long& image, double& doneMs, bool& kill, LootSquare& square,
+               std::vector<Detection>& drops) {
+    std::string_view rest;
+    if (!after(line, "drops", rest)) {
+        return false;
+    }
+    std::istringstream words{std::string(rest)};
+    int killed = 0;
+    LootSquare read;
+    if (!(words >> image >> doneMs >> killed >> read.x >> read.y >> read.side)) {
+        return false;
+    }
+    kill = killed != 0;
+    square = read;
+    drops.clear();
+    Detection drop;
+    while (words >> drop.sure >> drop.x >> drop.y >> drop.width >> drop.height) {
+        drops.push_back(drop);
+    }
+    return true;
+}
+
+void appendMouse(std::string& out, const ClipMouse& mouse) {
+    appendf(out, "mouse %s %d %d %u %u %d %d %d\n", ExactNumber(mouse.timeMs).text, mouse.dx, mouse.dy, mouse.held,
+            mouse.buttons, mouse.wheel, mouse.cursorX, mouse.cursorY);
+}
+
+bool readMouse(std::string_view line, ClipMouse& mouse) {
+    std::string_view rest;
+    if (!after(line, "mouse", rest)) {
+        return false;
+    }
+    std::istringstream words{std::string(rest)};
+    ClipMouse read;
+    if (!(words >> read.timeMs >> read.dx >> read.dy >> read.held >> read.buttons >> read.wheel >> read.cursorX >>
+          read.cursorY)) {
+        return false;
+    }
+    mouse = read;
+    return true;
+}
+
+void appendCamera(std::string& out, unsigned long long image, double timeMs, const CameraShown& camera) {
+    appendf(out, "camera %llu %s %d %d %s %d %s %d %s %s\n", image, ExactNumber(timeMs).text, camera.known ? 1 : 0,
+            camera.yawKnown ? 1 : 0, ExactNumber(camera.yaw).text, camera.pitchKnown ? 1 : 0,
+            ExactNumber(camera.pitch).text, camera.pitchBy, ExactNumber(camera.coneOff).text,
+            ExactNumber(camera.turnsOff).text);
+}
+
+bool readCamera(std::string_view line, unsigned long long& image, double& timeMs, CameraShown& camera) {
+    std::string_view rest;
+    if (!after(line, "camera", rest)) {
+        return false;
+    }
+    std::istringstream words{std::string(rest)};
+    int known = 0;
+    int yawKnown = 0;
+    int pitchKnown = 0;
+    CameraShown read;
+    if (!(words >> image >> timeMs >> known >> yawKnown >> read.yaw >> pitchKnown >> read.pitch >> read.pitchBy >>
+          read.coneOff >> read.turnsOff)) {
+        return false;
+    }
+    read.known = known != 0;
+    read.yawKnown = yawKnown != 0;
+    read.pitchKnown = pitchKnown != 0;
+    camera = read;
+    return true;
+}
+
+void appendBrain(std::string& out, unsigned long long image, double timeMs, const statetree::BrainShown& brain) {
+    appendf(out, "brain %llu %s %d %d", image, ExactNumber(timeMs).text, brain.acting ? 1 : 0, brain.task);
+    if (!brain.state.empty()) {
+        out += ' ';
+        for (const char c : brain.state) {
+            out += c == '\n' || c == '\r' ? ' ' : c;
+        }
+    }
+    out += '\n';
+}
+
+bool readBrain(std::string_view line, unsigned long long& image, double& timeMs, statetree::BrainShown& brain) {
+    std::string_view rest;
+    if (!after(line, "brain", rest)) {
+        return false;
+    }
+    // Four words, then the state's names (the rest of the line, spaces and all).
+    std::size_t at = 0;
+    for (int word = 0; word < 4; ++word) {
+        at = rest.find(' ', at);
+        if (at == std::string_view::npos) {
+            if (word < 3) {
+                return false;
+            }
+            at = rest.size();
+            break;
+        }
+        ++at;
+    }
+    std::istringstream words{std::string(rest.substr(0, at))};
+    int acting = 0;
+    statetree::BrainShown read;
+    if (!(words >> image >> timeMs >> acting >> read.task)) {
+        return false;
+    }
+    read.acting = acting != 0;
+    read.state = at < rest.size() ? std::string(rest.substr(at)) : std::string();
+    brain = std::move(read);
+    return true;
+}
+
+// A cost's name with its spaces as _, then its numbers, each after a space.
+static void appendCostOf(std::string& out, const Cost& cost) {
+    out += ' ';
+    for (const char c : std::string_view(cost.name.data())) {
+        out += c == ' ' || c == '\n' || c == '\r' ? '_' : c;
+    }
+    appendf(out, " %.3f %.3f %.1f", static_cast<double>(cost.eachMs), static_cast<double>(cost.slowestMs),
+            static_cast<double>(cost.perSecond));
+}
+
+static bool readCostOf(std::istringstream& words, Cost& cost) {
+    std::string name;
+    Cost read;
+    if (!(words >> name >> read.eachMs >> read.slowestMs >> read.perSecond)) {
+        return false;
+    }
+    std::replace(name.begin(), name.end(), '_', ' ');
+    nameCost(read, name);
+    cost = read;
+    return true;
+}
+
+void appendCost(std::string& out, double timeMs, const CostPart& part) {
+    appendf(out, "cost %.1f", timeMs);
+    appendCostOf(out, part.run);
+    for (int i = 0; i < part.stepCount; ++i) {
+        if (const Cost& step = part.steps[static_cast<std::size_t>(i)]; step.perSecond > 0.0f) {
+            appendCostOf(out, step);
+        }
+    }
+    out += '\n';
+}
+
+bool readCost(std::string_view line, double& timeMs, CostPart& part) {
+    std::string_view rest;
+    if (!after(line, "cost", rest)) {
+        return false;
+    }
+    std::istringstream words{std::string(rest)};
+    CostPart read;
+    if (!(words >> timeMs) || !readCostOf(words, read.run)) {
+        return false;
+    }
+    while (read.stepCount < CostPart::kMaxSteps &&
+           readCostOf(words, read.steps[static_cast<std::size_t>(read.stepCount)])) {
+        ++read.stepCount;
+    }
+    part = read;
+    return true;
 }
 
 void appendNote(std::string& out, double timeMs, std::string_view text) {

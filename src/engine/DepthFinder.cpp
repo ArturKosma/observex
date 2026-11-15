@@ -97,6 +97,9 @@ void DepthFinder::run(std::stop_token stop) {
     StatWindow networking;
     StatWindow shading;
     StatWindow packing;
+    // The Debug tab's steps, in the order they run on each image.
+    enum Step { kNetwork, kHandOver, kShade, kPack };
+    CostMeter meter({"Squeeze and network", "Hand-over", "Shading", "Packing"});
     double packedKb = 0.0;
     double changed = 0.0;
     int compared = 0;
@@ -118,6 +121,7 @@ void DepthFinder::run(std::stop_token stop) {
             stats.packAvgMs = pack.average;
             stats.packedKb = pack.count > 0 ? static_cast<float>(packedKb / pack.count) : 0.0f;
             stats.changed = compared > 0 ? static_cast<float>(changed / compared) : 0.0f;
+            stats.costs = meter.take(static_cast<double>(elapsed) * perTick / 1000.0);
             stats_.publish();
             packedKb = 0.0;
             changed = 0.0;
@@ -129,6 +133,7 @@ void DepthFinder::run(std::stop_token stop) {
             continue;
         }
         const std::int64_t start = qpcNow();
+        meter.begin();
         ID3D11Texture2D* image = reader_->useNewImage(&stamp);
         if (image == nullptr) {
             continue;
@@ -153,6 +158,7 @@ void DepthFinder::run(std::stop_token stop) {
         std::memcpy(made->map.data(), out, pixels * sizeof(std::uint16_t));
         const std::int64_t ran = qpcNow();
         networking.add(static_cast<float>(static_cast<double>(ran - start) * perTick));
+        meter.lap(kNetwork);
 
         // Handed over at once with the interface the UI finder found (left out of the ground's depth and the shading).
         hints_.fetch();
@@ -171,10 +177,13 @@ void DepthFinder::run(std::stop_token stop) {
         made->ignore = ignore;
         const DepthInput input = made->input();
         made_.store(made, std::memory_order_release);
+        meter.lap(kHandOver);
 
         // Shaded only while the flag draws it; else the clip buffer keeps the map with no levels shown.
         if (shown_.load(std::memory_order_relaxed)) {
             if (!depthing->shade(input, levels.data(), palette.data())) {
+                meter.lap(kShade);
+                meter.end();
                 continue; // Nothing to show of this one.
             }
             DepthSeen& seen = seen_.writeSlot();
@@ -196,6 +205,7 @@ void DepthFinder::run(std::stop_token stop) {
                 ++compared;
             }
             before = levels;
+            meter.lap(kShade);
         } else {
             std::fill(levels.begin(), levels.end(), std::uint8_t{0});
             palette.fill(0);
@@ -219,7 +229,9 @@ void DepthFinder::run(std::stop_token stop) {
                 record_(std::move(record));
             }
             packing.add(static_cast<float>(static_cast<double>(qpcNow() - shaded) * perTick));
+            meter.lap(kPack);
         }
+        meter.end();
     }
 }
 

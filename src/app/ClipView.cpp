@@ -38,9 +38,9 @@ void formatTime(char* out, std::size_t size, double seconds) {
 ClipView::ClipView(IDXGIAdapter1* gpu, ID3D11Device* device, std::filesystem::path folder, ClipInfo info,
                    Heuristics& today, std::unique_ptr<Snapping> snapping, std::unique_ptr<Grounding> ground,
                    std::unique_ptr<Depthing> depth, std::filesystem::path uiFolder,
-                   std::shared_ptr<const StatsSource> stats)
+                   std::shared_ptr<const StatsSource> stats, std::filesystem::path dropFolder)
     : folder_(std::move(folder)), info_(std::move(info)), uiFolder_(uiFolder), gpu_(gpu),
-      grounding_(std::move(ground)), depthing_(std::move(depth)) {
+      grounding_(std::move(ground)), depthing_(std::move(depth)), dropFolder_(std::move(dropFolder)) {
     device->GetImmediateContext(&context_);
     try {
         player_ = std::make_unique<ClipPlayer>(gpu, folder_ / kClipVideo);
@@ -115,6 +115,59 @@ const GameStats* ClipView::recordedStats() const {
     return line != nullptr ? &line->stats : nullptr;
 }
 
+const statetree::BrainShown* ClipView::recordedBrain() const {
+    return frame_ >= 1 ? observex::recordedBrain(text_->brains, frameMs(frame_)) : nullptr;
+}
+
+const CameraShown* ClipView::recordedCamera(std::string& problem) const {
+    if (!textError_.empty()) {
+        problem = "This clip has no clip.txt";
+        return nullptr;
+    }
+    // Short: the card says it on one line. Saved before clips kept the camera (the night of 2026-11-15); Today works
+    // it out from the mouse lines if the clip has them.
+    if (text_->cameras.empty()) {
+        problem = text_->mice.empty() ? "Not recorded in this clip" : "Not recorded in this clip; Today works it out";
+        return nullptr;
+    }
+    const CameraShown* camera = frame_ >= 1 ? observex::recordedCamera(text_->cameras, frameMs(frame_)) : nullptr;
+    if (camera == nullptr || !camera->known) {
+        problem = "Not known by this frame"; // The game's camera mode not seen yet.
+        return nullptr;
+    }
+    return camera;
+}
+
+const CameraShown* ClipView::todayCamera(std::string& problem) {
+    if (!textError_.empty()) {
+        problem = "This clip has no clip.txt";
+        return nullptr;
+    }
+    if (text_->mice.empty()) {
+        problem = "The mouse was not recorded in this clip"; // Saved before the evening of 2026-11-15.
+        return nullptr;
+    }
+    followGround(); // The anchors (the minimap's cone, the turns' pitch) come through it, as live.
+    if (ground_) {
+        problem = "Working it out from the clip's mouse\xE2\x80\xA6";
+        return nullptr;
+    }
+    if (!groundError_.empty()) {
+        problem = "Could not follow the ground over the clip"; // groundError_ says why (the Ground flag shows it).
+        return nullptr;
+    }
+    const CameraShown* camera = frame_ >= 1 ? observex::recordedCamera(todayCameras_, frameMs(frame_)) : nullptr;
+    if (camera == nullptr || !camera->known) {
+        problem = "Not known by this frame";
+        return nullptr;
+    }
+    return camera;
+}
+
+std::span<const ClipCostLine> ClipView::recordedCosts() const {
+    return observex::recordedCosts(text_->costs, frameMs(frame_ >= 1 ? frame_ : 1));
+}
+
 const GameStats* ClipView::todayStats() {
     if (!uiFinder_ || uiFinder_->state() != UiFinder::State::Running) {
         return nullptr;
@@ -187,6 +240,7 @@ void ClipView::update() {
     if (ground_ && ground_->state() != ClipGround::State::Working) {
         if (ground_->state() == ClipGround::State::Done) {
             groundCameras_ = ground_->cameras();
+            todayCameras_ = ground_->mouseCameras();
         } else {
             groundError_ = "Could not follow the ground over the video: " + ground_->error();
         }
@@ -210,6 +264,118 @@ void ClipView::update() {
             nextUi_ = now + std::chrono::milliseconds(1000 / UiFinder::kImagesPerSecond);
         }
     }
+    // Today's drops: each frame's once found, and the frame shown to the drop finder while the flag wants them, if it
+    // has none yet, likewise at most kDropImagesPerSecond a second (it takes the newest when it is done with one).
+    if (dropFinder_ && dropFinder_->state() == ClipDrops::State::Running) {
+        const ClipFrameDrops& found = dropFinder_->found();
+        if (found.frame >= 1 && found.frame <= todayDrops_.size() && !dropsLooked_[found.frame - 1]) {
+            todayDrops_[found.frame - 1].assign(found.drops.begin(), found.drops.begin() + found.count);
+            dropsLooked_[found.frame - 1] = 1;
+        }
+        if (dropsWanted_ && frame_ >= 1 && frame_ <= todayDrops_.size() && !dropsLooked_[frame_ - 1] &&
+            frame_ != dropsSent_) {
+            if (const auto now = std::chrono::steady_clock::now(); now >= nextDrops_) {
+                dropImages_->write(context_.Get(), image_->texture(), ImageStamp{frame_, 0});
+                dropsSent_ = frame_;
+                nextDrops_ = now + std::chrono::milliseconds(1000 / kDropImagesPerSecond);
+            }
+        }
+    }
+}
+
+void ClipView::lookForDrops() {
+    // Once, the first time the flag Drops wants Today's.
+    if (dropsAsked_ || !player_) {
+        return;
+    }
+    dropsAsked_ = true;
+    std::error_code missing;
+    if (!std::filesystem::exists(dropFolder_ / L"model.onnx", missing)) {
+        dropsError_ = "No drop model yet (models/drop).";
+        return;
+    }
+    try {
+        ComPtr<ID3D11Device> device;
+        context_->GetDevice(&device);
+        dropImages_ = std::make_unique<ImageChannel>(device.Get(), player_->width(), player_->height(),
+                                                     ScreenCapture::kImageFormat);
+        dropFinder_ = std::make_unique<ClipDrops>(gpu_.Get(), *dropImages_, dropFolder_);
+        todayDrops_.assign(frames(), {});
+        dropsLooked_.assign(frames(), 0);
+    } catch (const std::exception& e) {
+        dropFinder_.reset(); // Before its channel.
+        dropImages_.reset();
+        dropsError_ = std::string("Drops are not looked for: ") + e.what();
+    }
+}
+
+std::string ClipView::dropsProblem() const {
+    if (!player_) {
+        return {}; // draw() says why.
+    }
+    if (guesser_ == Guesser::Recorded) {
+        if (!textError_.empty() || text_->drops.empty()) {
+            return "Not recorded in this clip.";
+        }
+        return {};
+    }
+    if (!dropsError_.empty()) {
+        return dropsError_;
+    }
+    if (dropFinder_ && dropFinder_->state() == ClipDrops::State::Starting && dropFinder_->progress() > 0.0f) {
+        char preparing[64];
+        std::snprintf(preparing, sizeof(preparing), "Preparing the drop model for this GPU: %.0f%%",
+                      static_cast<double>(dropFinder_->progress() * 100.0f));
+        return preparing;
+    }
+    if (dropFinder_ && dropFinder_->state() == ClipDrops::State::Failed) {
+        return dropFinder_->error();
+    }
+    return {};
+}
+
+void ClipView::drawDrops(ImDrawList* drawList, ImFont* font, ImVec2 min, ImVec2 max, float dpiScale) {
+    const auto imageWidth = static_cast<float>(image_->width());
+    if (guesser_ == Guesser::Recorded) {
+        // As Show > Drops drew it live then: the drops the newest close look found.
+        if (textError_.empty()) {
+            if (const ClipDropsLine* line = recordedDrops(text_->drops, frameMs(frame_)); line != nullptr) {
+                drawLoot(drawList, font, min, max, imageWidth, line->drops, dpiScale);
+            }
+        }
+        return;
+    }
+    if (!dropFinder_ || dropFinder_->state() != ClipDrops::State::Running || frame_ < 1 ||
+        frame_ > todayDrops_.size()) {
+        return;
+    }
+    // The frame's own, else (until they come) the last frame looked at before it, if at most kDropsHeldMs before.
+    constexpr double kDropsHeldMs = 250.0;
+    std::uint64_t at = frame_;
+    while (at >= 1 && !dropsLooked_[at - 1] && frameMs(frame_) - frameMs(at) <= kDropsHeldMs) {
+        --at;
+    }
+    if (at < 1 || !dropsLooked_[at - 1]) {
+        return;
+    }
+    // Leaving out the ones on the interface, as live (the cast bar and the minimap's arrow look like drops).
+    std::vector<Detection> shown;
+    std::span<const UiPiece> ui;
+    if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+        const UiPieces& pieces = uiFinder_->found();
+        ui = {pieces.pieces.data(), static_cast<std::size_t>(pieces.count)};
+    }
+    for (const Detection& drop : todayDrops_[at - 1]) {
+        const float x = drop.x + drop.width * 0.5f;
+        const float y = drop.y + drop.height * 0.5f;
+        if (std::none_of(ui.begin(), ui.end(), [x, y](const UiPiece& piece) {
+                return x >= static_cast<float>(piece.x0) && x < static_cast<float>(piece.x1) &&
+                       y >= static_cast<float>(piece.y0) && y < static_cast<float>(piece.y1);
+            })) {
+            shown.push_back(drop);
+        }
+    }
+    drawLoot(drawList, font, min, max, imageWidth, shown, dpiScale);
 }
 
 void ClipView::followGround() {
@@ -492,9 +658,13 @@ const std::string& ClipView::error() const {
 }
 
 void ClipView::draw(const theme::Fonts& fonts, bool showCharacters, bool showKinds, bool showUi, bool showGround,
-                    bool showDepth, float dpiScale) {
+                    bool showDepth, bool showDrops, float dpiScale) {
     if (showGround && guesser_ == Guesser::Today) {
         followGround();
+    }
+    dropsWanted_ = showDrops && guesser_ == Guesser::Today;
+    if (dropsWanted_) {
+        lookForDrops();
     }
     if (canPlay() && !ImGui::GetIO().WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
@@ -568,6 +738,10 @@ void ClipView::draw(const theme::Fonts& fonts, bool showCharacters, bool showKin
     if (const Guesses* shown = guesses(guesser_); showCharacters && shown != nullptr && frame_ > 0) {
         drawThings(drawList, fonts.medium, min, max, static_cast<float>(image_->width()), shown->at(frameMs(frame_)),
                    text_->kinds, showKinds, dpiScale);
+    }
+    // The guesser's drops, after the characters as the live view draws them.
+    if (showDrops && frame_ > 0) {
+        drawDrops(drawList, fonts.medium, min, max, dpiScale);
     }
 
     // New heuristics were loaded: said over the video's top left for a few seconds.

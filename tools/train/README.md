@@ -81,6 +81,18 @@ and in `guess.py`: each thing once, named by the kind it is surest of and the ne
 is how sure it is of one of the two (`1 - (1 - first) (1 - second)`; RF-DETR's own `predict` lists a thing once per
 kind, and its surest kind alone loses things it cannot tell apart).
 
+`train.py --category drop` (since 2026-11-15) learns drops (adena, loot) from the Drops answers on the user's
+Shift+Win screenshots (`drop-answers.txt`). Drops are a few pixels on the whole squeezed screen, so observex looks for
+them only round a target it saw die, on a full-resolution square cut round the corpse (side 4 x the corpse box's longer
+side, at least 192 px, at most the screen's height) and scaled to 576 (`LOOT_RESOLUTION`, the default `--resolution`
+for drops); `loot.py` cuts the training squares the same way, round the drops (the corpses were mostly gone by the
+screenshot), of many sizes, with empty squares as "nothing here", and holds out the last fifth of the images whole.
+Look-alikes (the yellow ring under the target, a skill's blue rune) get squares of their own: every "no" answer, and
+every guess in `drop-guesses.txt` (the review writes it with the live model) at least 30% sure that touches no drop of
+a reviewed image, where every drop is marked. Its rule and `src/core/LootWatch.h`'s `lootSquare` must stay alike.
+model.json gets `"loot_side"`, which tells observex to cut squares (live: sweeping the screen and round corpses and
+drops found; in the review, tiles over the whole image).
+
 Why these defaults (tested 2026-11-01 on 5 recordings, each place scored by a model that never saw it): Medium beat
 Small and Large; colour changes beat mirror only; 1024 beat 1280 and tied 768; the best pass always came before 35, so 80 passes gained nothing. Details in
 [the training loop](../../docs/training-loop.md), step 4.
@@ -94,6 +106,7 @@ Windows the NVIDIA driver then moves GPU memory into normal RAM instead of faili
 | --- | --- |
 | `marks.py` | Reads and writes observex's marks files (`src/core/Marks.h` is the same format in C++). |
 | `train.py` | Builds the dataset from the answers, trains RF-DETR, saves the model and its score. |
+| `loot.py` | The drops' dataset: squares cut round the drops on the screenshots, and empty ones. |
 | `guess.py` | Writes the model's guesses for a recording (the Python reference; observex's review does this itself). |
 | `export.py` | Writes `model.onnx` for observex's live detection and review, and the kind classifier into `model.json` (`train.py` runs it too). |
 | `requirements.txt` | The pinned Python packages (the last four are for `export.py`). |

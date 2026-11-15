@@ -1,6 +1,7 @@
 #include "heuristics/StatsReader.h"
 
 #include "heuristics/Miniatures.h"
+#include "heuristics/NamePlate.h"
 
 #include <algorithm>
 #include <bit>
@@ -125,28 +126,7 @@ constexpr int kNumberPlay = 16;
 // A name picture this many pixels wider or narrower than the name read is another name (a name a letter longer is ~7).
 constexpr int kNameWidthSlack = 4;
 
-// Whether two names read are one name, one of them read a little wrong: at most a third of the shorter's letters
-// (two of "Gremlin"'s seven) to change, add or take away, ignoring case.
-bool sameName(std::string_view a, std::string_view b) {
-    if (a.empty() || b.empty()) {
-        return false;
-    }
-    const auto lower = [](char c) { return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c); };
-    std::vector<int> row(b.size() + 1);
-    for (std::size_t j = 0; j <= b.size(); ++j) {
-        row[j] = static_cast<int>(j);
-    }
-    for (std::size_t i = 1; i <= a.size(); ++i) {
-        int diagonal = row[0];
-        row[0] = static_cast<int>(i);
-        for (std::size_t j = 1; j <= b.size(); ++j) {
-            const int above = row[j];
-            row[j] = std::min({row[j] + 1, row[j - 1] + 1, diagonal + (lower(a[i - 1]) == lower(b[j - 1]) ? 0 : 1)});
-            diagonal = above;
-        }
-    }
-    return row[b.size()] * 3 <= static_cast<int>(std::min(a.size(), b.size()));
-}
+// (Whether two names read are one name: core/GameStats' sameName.)
 // Words are the same as on the image before when at most this share of their white pixels differ, moved up to
 // kWordsShift columns either way (a run's ends shift a pixel with the sky behind).
 constexpr float kWordsSame = 0.2f;
@@ -206,7 +186,7 @@ bool StatsReader::load(const std::filesystem::path& folder, std::string* error) 
     }
     std::stringstream text;
     text << in.rdbuf();
-    return parse(text.str(), folder, error);
+    return parse(text.str(), folder, error) && keys_.load(folder / kKeysFile, error);
 }
 
 bool StatsReader::parse(std::string_view text, const std::filesystem::path& folder, std::string* error) {
@@ -591,6 +571,26 @@ int StatsReader::areas(std::span<const UiPiece> pieces, int width, int height, S
             add(piece, 0, piece.y1 - piece.y0);
         }
     }
+    // Over the character asked about: its name plate.
+    lookArea_ = {};
+    if (look_.id != 0 && count < max) {
+        lookArea_ = plateArea(look_.over, width, height);
+        if (lookArea_.x1 > lookArea_.x0) {
+            out[count++] = lookArea_;
+        }
+    }
+    // Where the character is: the minimap's window whole (about 1 MB), the Messages window's newest lines.
+    minimapArea_ = {};
+    messagesArea_ = {};
+    for (const UiPiece& piece : pieces) {
+        if (minimapArea_.x1 == 0 && std::strcmp(piece.name.data(), kMinimapPiece) == 0 && count < max) {
+            minimapArea_ = MinimapScroll::area(piece, width, height);
+            out[count++] = minimapArea_;
+        } else if (messagesArea_.x1 == 0 && std::strcmp(piece.name.data(), kMessagesPiece) == 0 && count < max) {
+            messagesArea_ = LocationReader::area(piece, width, height);
+            out[count++] = messagesArea_;
+        }
+    }
     return count;
 }
 
@@ -775,8 +775,11 @@ void StatsReader::read(std::span<const UiPiece> pieces, std::span<const ColourPa
                 gauge->seen = true;
                 gauge->full = lefts_[s];
                 gauge->pressed = found->pressed;
+                gauge->at = found->box;
                 if (lefts_[s] > 0.0f) {
                     readSeconds(found->box, *found->part, gauge->text);
+                } else if (!found->pressed) {
+                    readKey(skills_[s], found->box, *found->part, gauge->key); // Ready: its slot's letters clear.
                 }
             }
         }
@@ -875,7 +878,76 @@ void StatsReader::read(std::span<const UiPiece> pieces, std::span<const ColourPa
         targetHeld_ = 1;
     }
     out.target = target_;
+    readPlate(pieces, parts, out.plate);
+    // Where the character is: the minimap's map followed, and a new /loc answer with where the map was then.
+    const auto partAt = [&](const StatsArea& area) -> const ColourPart* {
+        if (area.x1 <= area.x0) {
+            return nullptr;
+        }
+        const auto part = std::find_if(parts.begin(), parts.end(), [&](const ColourPart& p) { return p.area == area; });
+        return part == parts.end() ? nullptr : &*part;
+    };
+    const UiPiece* minimap = nullptr;
+    const UiPiece* messages = nullptr;
+    for (const UiPiece& piece : pieces) {
+        if (minimap == nullptr && std::strcmp(piece.name.data(), kMinimapPiece) == 0) {
+            minimap = &piece;
+        } else if (messages == nullptr && std::strcmp(piece.name.data(), kMessagesPiece) == 0) {
+            messages = &piece;
+        }
+    }
+    const ColourPart* minimapPart = minimap != nullptr ? partAt(minimapArea_) : nullptr;
+    out.minimap = minimap_.follow(minimap, minimapPart);
+    if (minimapPart != nullptr && !out.minimap.seen) {
+        char note[96];
+        std::snprintf(note, sizeof(note), "Minimap: not followed (alike %.2f, %d key points)",
+                      static_cast<double>(minimap_.lastMatch()), minimap_.points());
+        because(note);
+    }
+    location_.read(messages, messages != nullptr ? partAt(messagesArea_) : nullptr, out.minimap, ocr_, located_,
+                   why_);
+    out.location = located_;
     copyName(out.why, why_);
+}
+
+void StatsReader::setLook(const PlateLook& look) { look_ = look; }
+
+void StatsReader::readPlate(std::span<const UiPiece> pieces, std::span<const ColourPart> parts, NamePlate& plate) {
+    plate = {};
+    plate.look = look_.id;
+    if (look_.id == 0) {
+        plateWords_ = {};
+        return;
+    }
+    const StatsArea& area = lookArea_;
+    const auto part = std::find_if(parts.begin(), parts.end(), [&](const ColourPart& p) { return p.area == area; });
+    if (area.x1 <= area.x0 || part == parts.end()) {
+        because("Plate: not looked at (no part)");
+        return;
+    }
+    const PlateFound found = findPlate(*part, look_.over, pieces, plateWork_);
+    plate.seen = found.seen;
+    plate.selected = found.selected;
+    plate.at = found.at;
+    plate.orbs = found.orbs;
+    if (!found.seen) {
+        char line[160];
+        std::snprintf(line, sizeof(line), "Plate: none over %d,%d-%d,%d (%d orbs round it)", look_.over.x0, look_.over.y0,
+                      look_.over.x1, look_.over.y1, found.orbs);
+        because(line);
+        return;
+    }
+    if (!found.selected) {
+        return; // Hovered: its name is not needed.
+    }
+    // The target's name on it, to tell it is the one in the target window: the same white letters as before, the name
+    // read then (OCR only on a new picture of them).
+    const UiPiece piece{{}, found.text.x0 - 3, found.text.y0, found.text.x1 + 3, found.text.y1};
+    Words words;
+    copyName(words.name, "Plate");
+    words.bottom = piece.y1 - piece.y0;
+    words.right = piece.x1 - piece.x0;
+    readWords(words, piece, *part, plate.name, &plateWords_);
 }
 
 void StatsReader::readBar(const Bar& bar, const UiPiece& pieceIn, const ColourPart& partIn, GameGauge& gauge) {
@@ -1538,6 +1610,20 @@ float StatsReader::distance(const Skill& skill, StatsArea box, const ColourPart&
     return nearest;
 }
 
+void StatsReader::readKey(const Skill& skill, StatsArea box, const ColourPart& part, std::array<char, 16>& key) {
+    const KeyPicture picture{part.bgra + static_cast<std::size_t>(box.y0 - part.area.y0) * part.pitch +
+                                 static_cast<std::size_t>(box.x0 - part.area.x0) * 4,
+                             part.pitch, 4, box.x1 - box.x0};
+    const std::string read = keys_.read(picture);
+    copyName(key, read.empty() ? std::string_view("-") : std::string_view(read));
+    if (read.find('?') != std::string::npos) {
+        char line[160];
+        std::snprintf(line, sizeof(line), "%s: shortcut %s at %d,%d (letters not known yet: type it in the Skills tab)",
+                      skill.name.c_str(), read.c_str(), box.x0, box.y0);
+        because(line);
+    }
+}
+
 float StatsReader::cooldownLeft(const Skill& skill, StatsArea box, const ColourPart& part) {
     sectorBright_.assign(kSectors, 0.0f);
     sectorAll_.assign(kSectors, 0.0f);
@@ -1723,7 +1809,7 @@ float StatsReader::readCast(const UiPiece& piece, const ColourPart& part) const 
 }
 
 void StatsReader::readWords(const Words& words, const UiPiece& piece, const ColourPart& part,
-                            std::array<char, 32>& text) {
+                            std::array<char, 32>& text, LastWords* kept) {
     text[0] = '\0';
     const int x0 = std::max(piece.x0 + words.left, part.area.x0);
     const int x1 = std::min(words.right < 1 ? piece.x1 + words.right : piece.x0 + words.right, part.area.x1);
@@ -1777,7 +1863,7 @@ void StatsReader::readWords(const Words& words, const UiPiece& piece, const Colo
             whites += white ? 1 : 0;
         }
     }
-    LastWords& before = lastWords_[static_cast<std::size_t>(&words - words_.data())];
+    LastWords& before = kept != nullptr ? *kept : lastWords_[static_cast<std::size_t>(&words - words_.data())];
     if (before.height == mh && std::abs(before.width - mw) <= kWordsShift && !before.said.empty()) {
         int fewest = whites + 1;
         for (int dx = -kWordsShift; dx <= kWordsShift; ++dx) {

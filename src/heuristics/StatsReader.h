@@ -1,6 +1,9 @@
 #pragma once
 
 #include "core/GameStats.h"
+#include "heuristics/KeyLabels.h"
+#include "heuristics/LocationReader.h"
+#include "heuristics/MinimapScroll.h"
 #include "heuristics/TextOcr.h"
 
 #include <array>
@@ -28,14 +31,20 @@ namespace observex {
 //   it is not there; the hotbar is looked over when one is missing, three times a second. Where it was, a picture
 //   alike in its shapes but neither ready nor darkened (correlation) is the flash after its key was pressed (clip
 //   2026-11-14_14-50-29: dark, framed light blue, ~0.6 s). What is cast is the skill whose cooldown began, or that was
-//   pressed, last.
+//   pressed, last. While one is ready, the key written on its slot is read too (heuristics/KeyLabels, by the glyphs in
+//   models/ui/keys.txt): its shortcut, which follows it to the slot it is moved to (it is found by its picture without
+//   the key's corner).
 // - Words, e.g. the target's name: by Windows' OCR (heuristics/TextOcr), once for each new picture of them.
+// - The name plate over a character the app asks about (setLook; heuristics/NamePlate): hovered or the target, and
+//   while the target its name, read like the words.
+// - Where the character is (the Geodata flag): how far the minimap's map slid (heuristics/MinimapScroll) and the
+//   game's answer to /loc among the Messages window's newest lines (heuristics/LocationReader).
 // Only small parts of the image are read: areas() says which. In observex_stats.dll (heuristics/StatsAbi) and built
 // into the app as its fallback. Use one from one thread (read() keeps its working memory and what it saw before).
 class StatsReader final : public StatsReading {
 public:
-    // Reads `folder`/stats.txt and the glyphs' pictures there. False with *error (if given) if any is missing or
-    // wrong; the reader then reads nothing.
+    // Reads `folder`/stats.txt and the glyphs' pictures there, and the hotbar keys' glyphs (keys.txt, if there). False
+    // with *error (if given) if any is missing or wrong; the reader then reads nothing (a wrong keys.txt: no keys).
     bool load(const std::filesystem::path& folder, std::string* error);
     // The same from stats.txt's text; the glyphs' pictures are read from `folder`.
     bool parse(std::string_view text, const std::filesystem::path& folder, std::string* error);
@@ -45,6 +54,7 @@ public:
     int areas(std::span<const UiPiece> pieces, int width, int height, StatsArea* out, int max) const override;
     void read(std::span<const UiPiece> pieces, std::span<const ColourPart> parts, GameStats& out) override;
     void setSkills(std::span<const SkillPicture> skills) override;
+    void setLook(const PlateLook& look) override;
 
     // A number on a bar as a share of its whole: "238/256" -> 0.93, "26.64%" -> 0.2664. False if `text` is neither.
     static bool fraction(std::string_view text, float* share);
@@ -180,8 +190,15 @@ private:
     float cooldownLeft(const Skill& skill, StatsArea box, const ColourPart& part);
     // The seconds written on the miniature at `box` with the yellow font (skillsFont_); "" if none was read.
     void readSeconds(StatsArea box, const ColourPart& part, std::array<char, 32>& text);
-    // The words of `words` in `piece` from `part`'s pixels into `text` ("" if none).
-    void readWords(const Words& words, const UiPiece& piece, const ColourPart& part, std::array<char, 32>& text);
+    // The key written on `skill`'s slot, its miniature at `box` (keys_; "-" if none is written), into `key`.
+    void readKey(const Skill& skill, StatsArea box, const ColourPart& part, std::array<char, 16>& key);
+    struct LastWords;
+    // The words of `words` in `piece` from `part`'s pixels into `text` ("" if none). What they looked like and said
+    // is kept in `kept` (null: words_' own, by its index).
+    void readWords(const Words& words, const UiPiece& piece, const ColourPart& part, std::array<char, 32>& text,
+                   LastWords* kept = nullptr);
+    // The name plate over the character asked about (look_), from its part (lookArea_), into `plate`.
+    void readPlate(std::span<const UiPiece> pieces, std::span<const ColourPart> parts, NamePlate& plate);
 
     std::vector<Font> fonts_;
     std::vector<Bar> bars_;
@@ -192,6 +209,7 @@ private:
     std::array<char, 16> skillsPiece_{}; // Where the added skills are looked for; empty: no "skills" line.
     int skillsFont_ = -1;                // The yellow font their seconds are written in, or -1.
     std::vector<Skill> skills_;
+    KeyFont keys_; // The hotbar keys' glyphs (keys.txt).
 
     // What is kept from image to image, for the cast's name: whether each skill was cooling on the image before, and
     // the read it began on (0: not seen begin).
@@ -219,6 +237,12 @@ private:
     };
     std::vector<LastWords> lastWords_;
     std::vector<std::uint8_t> wordsMask_; // Working memory: this image's white pixels.
+    // The character asked about (setLook), the part areas() asked for over it, the name on its plate as last read,
+    // and working memory for finding the plate.
+    PlateLook look_{};
+    mutable StatsArea lookArea_{};
+    LastWords plateWords_;
+    std::vector<std::uint8_t> plateWork_;
     std::array<char, 32> targetName_{}; // The target's name: the one read most while its window showed.
     std::vector<std::pair<std::array<char, 32>, int>> nameVotes_; // Its names read, and on how many readings.
     // How wide the words picture the target's name was read from is, and this read's (0: no words; wordsWidth_ is the last
@@ -238,6 +262,13 @@ private:
     int targetHeld_ = 0;
     TextOcr ocr_;
     std::string ocrError_;
+    // Where the character is: the minimap's window and the Messages window's lowest rows as areas() asked for them
+    // (x1 0: none), the map followed, the /loc answers read and the newest one.
+    mutable StatsArea minimapArea_{};
+    mutable StatsArea messagesArea_{};
+    MinimapScroll minimap_;
+    LocationReader location_;
+    LocationRead located_{};
 
     // Working memory, kept from read to read.
     std::vector<float> grey_;

@@ -51,7 +51,7 @@ TEST_CASE("without Live: Stats above State across the whole width") {
 
 TEST_CASE("all four: Live, then Stats above State, then Log, a narrower column at the right") {
     TileRect rest;
-    const TileRect log = placeLog(kArea, true, 0.8f, 6.0f, rest);
+    const TileRect log = placeColumn(kArea, true, 0.8f, 6.0f, rest);
     CHECK(same(log, {806.0f, 100.0f, 1000.0f, 900.0f}));
     CHECK(same(rest, {0.0f, 100.0f, 800.0f, 900.0f}));
     const Tiles tiles = placeTiles(true, true, true, rest, 0.6f, 0.5f, 6.0f);
@@ -63,7 +63,7 @@ TEST_CASE("all four: Live, then Stats above State, then Log, a narrower column a
 
 TEST_CASE("Log alone takes the whole view") {
     TileRect rest = kArea;
-    CHECK(same(placeLog(kArea, false, 0.8f, 6.0f, rest), kArea));
+    CHECK(same(placeColumn(kArea, false, 0.8f, 6.0f, rest), kArea));
     CHECK_FALSE(rest.shown());
 }
 

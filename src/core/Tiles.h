@@ -25,9 +25,10 @@ struct Tiles {
 
 Tiles placeTiles(bool live, bool stats, bool state, TileRect area, float split, float stack, float gap);
 
-// The Log tile (the tabs' last, the user asked, 2026-11-13: with all four shown, "a narrower column to the right of
-// stats and state"): a column at the right of `area`, the whole height; the other tiles go into `rest` (placeTiles), the
-// `left` share of the width (4/5 at first), then `gap`. With no others shown it takes all of `area` (`rest` not shown).
-TileRect placeLog(TileRect area, bool others, float left, float gap, TileRect& rest);
+// The Log tile (the user asked, 2026-11-13: with all four shown, "a narrower column to the right of stats and state")
+// and the Debug tile right of it (the user asked, 2026-11-15): a column at the right of `area`, the whole height; the
+// other tiles go into `rest` (placeTiles, or the next column), the `left` share of the width (4/5 at first), then `gap`.
+// With no others shown it takes all of `area` (`rest` not shown).
+TileRect placeColumn(TileRect area, bool others, float left, float gap, TileRect& rest);
 
 } // namespace observex

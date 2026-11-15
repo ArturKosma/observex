@@ -55,6 +55,7 @@ public:
     void setSkills(std::span<const SkillPicture> skills) override {
         api_.setSkills(reader_, skills.data(), static_cast<int>(skills.size()));
     }
+    void setLook(const PlateLook& look) override { api_.setLook(reader_, &look); }
 
 private:
     std::shared_ptr<const StatsLibrary> library_; // Keeps the DLL loaded while it lives.
@@ -107,7 +108,7 @@ std::shared_ptr<StatsLibrary> StatsLibrary::load(const fs::path& file) {
     }
     if (api->abi != kObservexStatsAbi || api->pieceSize != sizeof(UiPiece) || api->areaSize != sizeof(StatsArea) ||
         api->partSize != sizeof(ColourPart) || api->statsSize != sizeof(GameStats) ||
-        api->skillSize != sizeof(SkillPicture)) {
+        api->skillSize != sizeof(SkillPicture) || api->lookSize != sizeof(PlateLook)) {
         throw std::runtime_error(utf8(file.filename()) +
                                  " was built for another observex: rebuild the app too (observex)");
     }

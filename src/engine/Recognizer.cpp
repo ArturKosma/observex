@@ -8,6 +8,7 @@
 #include "engine/ImageChannel.h"
 #include "engine/LiveLog.h"
 
+#include <algorithm>
 #include <exception>
 #include <utility>
 
@@ -54,6 +55,37 @@ const RecognizerStats& Recognizer::stats() {
     return stats_.readSlot();
 }
 
+void Recognizer::markDead(std::uint32_t id) {
+    if (id == 0) {
+        return;
+    }
+    for (const std::atomic<std::uint32_t>& dead : dead_) {
+        if (dead.load(std::memory_order_relaxed) == id) {
+            return; // Marked already.
+        }
+    }
+    dead_[deadNext_.fetch_add(1, std::memory_order_relaxed) % kDeadKept].store(id, std::memory_order_relaxed);
+}
+
+void Recognizer::markDeadThings(std::span<Tracked> things, int deadKind) const {
+    for (Tracked& thing : things) {
+        bool dead = false;
+        for (const std::atomic<std::uint32_t>& id : dead_) {
+            dead = dead || id.load(std::memory_order_relaxed) == thing.id;
+        }
+        if (!dead || (static_cast<int>(thing.kind) == deadKind && kindSureOf(thing) >= kDeadSure)) {
+            continue;
+        }
+        // Its kind before goes second, so a reader still sees what the model made of it.
+        if (static_cast<int>(thing.kind) != deadKind) {
+            thing.secondKind = thing.kind;
+            thing.second = kindSureOf(thing);
+        }
+        thing.kind = static_cast<std::uint8_t>(deadKind);
+        thing.kindSure = std::max(kindSureOf(thing), kDeadSure);
+    }
+}
+
 void Recognizer::run(std::stop_token stop) {
     // Above normal: it mostly waits for the GPU, and what it finds is what observex reacts to.
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
@@ -71,12 +103,20 @@ void Recognizer::run(std::stop_token stop) {
     }
     kinds_ = detector->kinds(); // Before Running, which makes it readable.
     kindAnswers_.store(detector->kindUpdate().answers, std::memory_order_relaxed);
+    // The "dead" kind's place, for markDead (none: no dead marks).
+    int deadKind = -1;
+    for (std::size_t k = 0; k < kinds_.size(); ++k) {
+        deadKind = kinds_[k] == "dead" ? static_cast<int>(k) : deadKind;
+    }
     state_.store(State::Running, std::memory_order_release);
 
     LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency);
     const double msPerTick = 1000.0 / static_cast<double>(frequency.QuadPart);
     StatWindow work;
+    // The Debug tab's steps, in the order they run on each image.
+    enum Step { kCopy, kNetwork, kLog, kHeuristics, kSnapper, kClip, kMirror };
+    CostMeter meter({"Copy in", "Network", "Live log", "Heuristics", "To snapper", "To clip buffer", "Mirror test"});
     std::uint64_t images = 0;
     std::int64_t windowStart = qpcNow();
     std::uint64_t heuristicsVersion = heuristics_->version();
@@ -98,7 +138,12 @@ void Recognizer::run(std::stop_token stop) {
             const bool used = detector->setKindUpdate(loadKindUpdate(modelFolder_));
             kindAnswers_.store(used ? detector->kindUpdate().answers : 0, std::memory_order_relaxed);
         }
-        if (reader_->waitForImage(kWaitMs) && reader_->copyNewImage(gpu_.context.Get(), detector->input(), &stamp)) {
+        const bool waited = reader_->waitForImage(kWaitMs);
+        if (waited) {
+            meter.begin();
+        }
+        if (waited && reader_->copyNewImage(gpu_.context.Get(), detector->input(), &stamp)) {
+            meter.lap(kCopy);
             const std::int64_t start = qpcNow();
             const std::shared_ptr<LiveLog> log = log_.load(std::memory_order_acquire);
             const std::shared_ptr<ClipRecorder> clip = clip_.load(std::memory_order_acquire);
@@ -112,8 +157,10 @@ void Recognizer::run(std::stop_token stop) {
                 fail("The GPU stopped running the model (it may have been reset)");
                 return;
             }
+            meter.lap(kNetwork);
             if (log) {
                 log->looked(stamp, detections.data(), count);
+                meter.lap(kLog);
             }
             // Followed by when the screen showed the image, so the speeds are true on-screen speeds.
             const std::int64_t shownQpc = stamp.shownQpc != 0 ? stamp.shownQpc : start;
@@ -130,17 +177,23 @@ void Recognizer::run(std::stop_token stop) {
             }
             found.count = heuristics->update(timeMs, {detections.data(), static_cast<std::size_t>(count)},
                                              found.things.data(), static_cast<int>(Found::kMax));
+            if (deadKind >= 0) {
+                markDeadThings({found.things.data(), static_cast<std::size_t>(found.count)}, deadKind);
+            }
             found.image = ++images;
             found_.publish();
+            meter.lap(kHeuristics);
             // The published slot is not written again until it comes back as a write slot, so it can be read here.
             if (const std::shared_ptr<BoxSnapper> snapper = snapper_.load(std::memory_order_acquire)) {
                 snapper->looked(stamp, {found.things.data(), static_cast<std::size_t>(found.count)});
+                meter.lap(kSnapper);
             }
             const std::int64_t done = qpcNow();
             work.add(static_cast<float>(static_cast<double>(done - start) * msPerTick));
             if (clip) {
                 clip->looked(stamp, done, {detections.data(), static_cast<std::size_t>(count)},
                              {found.things.data(), static_cast<std::size_t>(found.count)});
+                meter.lap(kClip);
             }
 
             // The mirror test, after the UI has what is on the image, so it never holds that up.
@@ -160,7 +213,9 @@ void Recognizer::run(std::stop_token stop) {
                 if (log) {
                     log->mirrored(stamp, disagreement, closest);
                 }
+                meter.lap(kMirror);
             }
+            meter.end();
         }
 
         // Once a second, summarise and hand the numbers to the UI (lock-free).
@@ -173,6 +228,7 @@ void Recognizer::run(std::stop_token stop) {
                 static_cast<float>(summary.count / (static_cast<double>(elapsed) * msPerTick / 1000.0));
             stats.workAvgMs = summary.average;
             stats.workMaxMs = summary.max;
+            stats.costs = meter.take(static_cast<double>(elapsed) * msPerTick / 1000.0);
             stats_.publish();
             windowStart = now;
         }

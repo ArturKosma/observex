@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Costs.h"
 #include "core/Depth.h"
 #include "core/TripleBuffer.h"
 #include "core/UiLayout.h"
@@ -29,6 +30,7 @@ struct DepthFinderStats {
     float packAvgMs = 0.0f;     // and packing it for the clip buffer.
     float packedKb = 0.0f;      // A map packed, on average: the network's map and the levels shown.
     float changed = 0.0f;       // Of the pixels, the share whose level moved more than 8 from the map before (flicker).
+    CostPart costs;             // Its work on each image, step by step (the Debug tab).
 };
 
 // The newest map shaded, for the UI to show.

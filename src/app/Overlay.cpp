@@ -74,6 +74,37 @@ void drawUiPieces(ImDrawList* drawList, ImFont* font, ImVec2 min, ImVec2 max, fl
     drawList->PopClipRect();
 }
 
+void drawLoot(ImDrawList* drawList, ImFont* font, ImVec2 min, ImVec2 max, float imageWidth,
+              std::span<const Detection> drops, float dpiScale) {
+    const float scale = (max.x - min.x) / imageWidth;
+    const float thickness = 1.5f * dpiScale;
+    const float gap = std::round(2.0f * dpiScale); // Between the drop and its corners.
+    const float shortest = std::round(4.0f * dpiScale); // A corner's arm at least.
+    drawList->PushClipRect(min, max, true);
+    for (const Detection& drop : drops) {
+        // Its four corners just outside it: a drop is a few pixels, and a box's lines over its edges hid it.
+        const ImVec2 a(std::round(min.x + drop.x * scale) - gap, std::round(min.y + drop.y * scale) - gap);
+        const ImVec2 b(std::round(min.x + (drop.x + drop.width) * scale) + gap,
+                       std::round(min.y + (drop.y + drop.height) * scale) + gap);
+        const float arm = std::max(shortest, std::round(0.3f * std::min(b.x - a.x, b.y - a.y)));
+        const float armX = std::min(arm, (b.x - a.x) * 0.5f); // Never past the side's middle.
+        const float armY = std::min(arm, (b.y - a.y) * 0.5f);
+        for (const ImU32 color : {theme::kHalo, theme::kDrop}) { // A dark halo under the gold, as boxes have.
+            const float width = color == theme::kDrop ? thickness : thickness + 2.0f * dpiScale;
+            for (const ImVec2& at : {a, ImVec2(b.x, a.y), b, ImVec2(a.x, b.y)}) {
+                const float x = at.x == a.x ? armX : -armX;
+                const float y = at.y == a.y ? armY : -armY;
+                const ImVec2 points[3] = {ImVec2(at.x + x, at.y), at, ImVec2(at.x, at.y + y)};
+                drawList->AddPolyline(points, 3, color, ImDrawFlags_None, width);
+            }
+        }
+        char tag[32];
+        std::snprintf(tag, sizeof(tag), "Drop %.0f%%", static_cast<double>(drop.sure * 100.0f));
+        theme::drawTag(drawList, font, a, b, thickness, min, max, tag, theme::kDrop, theme::kBackground);
+    }
+    drawList->PopClipRect();
+}
+
 void drawGround(ImDrawList* drawList, ImVec2 min, ImVec2 max, float imageWidth, const GroundCamera& camera,
                 float dpiScale) {
     if (!camera.known) {

@@ -4,6 +4,7 @@
 #include <shobjidl.h>
 #include <wrl/client.h>
 
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <string_view>
@@ -65,10 +66,21 @@ Settings Settings::load(const std::filesystem::path& file) {
             settings.showSkills = value != "0";
         } else if (key == "show-log") {
             settings.showLog = value != "0";
+        } else if (key == "show-debug") {
+            settings.showDebug = value != "0";
         } else if (key == "show-ground") {
             settings.showGround = value != "0";
         } else if (key == "show-depth") {
             settings.showDepth = value != "0";
+        } else if (key == "show-geodata") {
+            settings.showGeodata = value != "0";
+        } else if (key == "show-drops") {
+            settings.showDrops = value != "0";
+        } else if (key == "minimap-scale") {
+            settings.minimapScale = std::strtof(std::string(value).c_str(), nullptr);
+            if (!(settings.minimapScale > 0.0f && settings.minimapScale < 1000.0f)) {
+                settings.minimapScale = 0.0f;
+            }
         } else if (key == "live-log") {
             settings.liveLog = value != "0";
         }
@@ -87,8 +99,12 @@ bool Settings::save(const std::filesystem::path& file) const {
     out << "show-state=" << (showState ? 1 : 0) << "\r\n";
     out << "show-skills=" << (showSkills ? 1 : 0) << "\r\n";
     out << "show-log=" << (showLog ? 1 : 0) << "\r\n";
+    out << "show-debug=" << (showDebug ? 1 : 0) << "\r\n";
     out << "show-ground=" << (showGround ? 1 : 0) << "\r\n";
     out << "show-depth=" << (showDepth ? 1 : 0) << "\r\n";
+    out << "show-geodata=" << (showGeodata ? 1 : 0) << "\r\n";
+    out << "show-drops=" << (showDrops ? 1 : 0) << "\r\n";
+    out << "minimap-scale=" << minimapScale << "\r\n";
     out << "live-log=" << (liveLog ? 1 : 0) << "\r\n";
     return static_cast<bool>(out);
 }

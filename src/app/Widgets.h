@@ -29,6 +29,7 @@ enum class Icon : std::uint8_t {
     Guesses,     // A box's four corners: what is drawn over a clip.
     Plus,        // Add something.
     Folder,      // A folder's outline with its tab: open a saved file (the State tile's Load).
+    Refresh,     // A ring with an arrow head going round clockwise: read again (the Skills tab's Refresh).
 };
 
 // A top-bar button that plainly looks clickable: a rounded border, an icon, then an optional muted caption,
@@ -57,5 +58,14 @@ struct BarButton {
 // `text` in medium weight, muted while off, underlined in the accent colour while on. Drawn at the cursor, `height`
 // high. Returns true when clicked.
 bool drawTab(const char* id, const char* text, bool on, float height, const theme::Fonts& fonts);
+
+// How far below where a line of text is drawn the middle of its capital letters is, in `font` at `size`: to centre
+// words of different sizes on one row by what the eye sees (a line's box also has room above the capitals and for
+// descenders below, so centring boxes sets smaller text higher).
+float capsMiddle(ImFont* font, float size);
+
+// The row the middle of the tab names' capital letters is on, for tabs drawn at `top`, `height` high: to line other
+// things on the tab strip up with them.
+float tabTextMiddle(float top, float height, const theme::Fonts& fonts);
 
 } // namespace observex
