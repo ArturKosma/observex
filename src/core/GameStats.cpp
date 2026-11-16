@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -231,11 +232,80 @@ void addNearby(GameStats& stats, bool seen, std::span<const Tracked> things, std
     add(kMonstersGauge, monsters, seen && monster >= 0);
 }
 
+namespace {
+
+// A count and a distance as two Nearby gauges (`first`, `second`), unless `stats` has `first` or no room for both.
+void addCountAndDistance(GameStats& stats, const char* first, const char* second, bool seen, int count,
+                         float nearestUnits) {
+    if (stats.find(kNearbyPiece, first) != nullptr || stats.count + 2 > GameStats::kMax) {
+        return;
+    }
+    const auto add = [&](const char* name, int value, bool known) {
+        GameGauge& gauge = stats.gauges[static_cast<std::size_t>(stats.count++)];
+        gauge = {};
+        copyName(gauge.piece, kNearbyPiece);
+        copyName(gauge.name, name);
+        gauge.seen = known;
+        if (known) {
+            std::snprintf(gauge.text.data(), gauge.text.size(), "%d", value);
+        }
+    };
+    add(first, count, seen);
+    add(second, static_cast<int>(std::lround(nearestUnits)), seen && nearestUnits >= 0.0f);
+}
+
+} // namespace
+
+void addRemembered(GameStats& stats, bool seen, int count, float nearestUnits) {
+    addCountAndDistance(stats, kMonstersAroundGauge, kMonsterDistanceGauge, seen, count, nearestUnits);
+}
+
+void addDrops(GameStats& stats, bool seen, int count, float nearestUnits) {
+    addCountAndDistance(stats, kDropsGauge, kDropDistanceGauge, seen, count, nearestUnits);
+}
+
+void addSinceKill(GameStats& stats, double seconds) {
+    if (stats.find(kNearbyPiece, kSinceKillGauge) != nullptr || stats.count + 1 > GameStats::kMax) {
+        return;
+    }
+    GameGauge& gauge = stats.gauges[static_cast<std::size_t>(stats.count++)];
+    gauge = {};
+    copyName(gauge.piece, kNearbyPiece);
+    copyName(gauge.name, kSinceKillGauge);
+    gauge.seen = true;
+    if (seconds >= 0.0) {
+        std::snprintf(gauge.text.data(), gauge.text.size(), "%.2f", seconds);
+    } else {
+        copyName(gauge.text, "inf"); // No kill yet: as long ago as can be (variablesOf reads it as infinity).
+    }
+}
+
+void addTargetDistance(GameStats& stats, float units) {
+    if (stats.find(kNearbyPiece, kTargetDistanceGauge) != nullptr || stats.count + 1 > GameStats::kMax) {
+        return;
+    }
+    GameGauge& gauge = stats.gauges[static_cast<std::size_t>(stats.count++)];
+    gauge = {};
+    copyName(gauge.piece, kNearbyPiece);
+    copyName(gauge.name, kTargetDistanceGauge);
+    gauge.seen = units >= 0.0f;
+    if (gauge.seen) {
+        std::snprintf(gauge.text.data(), gauge.text.size(), "%d", static_cast<int>(std::lround(units)));
+    }
+}
+
 const ClipStats* statsAt(const std::vector<ClipStats>& lines, std::uint64_t image) {
     const auto after = std::upper_bound(lines.begin(), lines.end(), image, [](std::uint64_t at, const ClipStats& line) {
         return at < line.stats.image;
     });
     return after == lines.begin() ? nullptr : &*(after - 1);
+}
+
+std::string pickupText(const Pickup& pickup) {
+    if (pickup.amount == 1) {
+        return pickup.item.data();
+    }
+    return std::to_string(pickup.amount) + " " + pickup.item.data();
 }
 
 } // namespace observex

@@ -1,5 +1,7 @@
 #include "core/TargetSelect.h"
 
+#include "core/MouseCamera.h"
+
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -17,6 +19,14 @@ constexpr double kDt = 1.0 / 144.0; // A UI frame.
 // A monster with its middle at x, y (the screen image and the desktop alike here).
 SelectableMonster monster(std::uint32_t id, int x, int y, int w = 100, int h = 120) {
     return {id, {x - w / 2, y - h / 2, x + w / 2, y + h / 2}, x, y, w, h};
+}
+
+// One `distance` away (own heights), the monster memory's `key`.
+SelectableMonster measured(std::uint32_t id, int x, int y, float distance, std::uint32_t key = 0) {
+    SelectableMonster m = monster(id, x, y);
+    m.distance = distance;
+    m.key = key;
+    return m;
 }
 
 // The plate over the monster asked about, as a reading of an image shown at `shown` says it.
@@ -38,10 +48,24 @@ SelectSeen reading(std::uint64_t image, double shown, std::uint32_t look, bool p
 struct Run {
     TargetSelector selector;
     std::vector<SelectableMonster> monsters;
+    std::vector<RememberedMonster> offScreen; // The memory's, off the screen (one forgotten is taken out).
+    std::vector<StatsArea> ui;                // The game's interface.
+    StatsArea screen{};
+    bool canTurn = false;
+    bool mouseFree = true;
     double now = 10.0;
     int x = 0;
     int y = 0;
     int clicks = 0;
+    // The game's camera: turned by the counts while the right button is held, once it put the cursor in its middle
+    // (a moment after the press); the cursor stays meanwhile.
+    bool right = false;
+    double pressedAt = 0.0;
+    bool cameraMode = false;
+    int turned = 0;
+    int presses = 0;
+    std::vector<std::uint32_t> gaveUpKeys;
+    std::vector<std::uint32_t> forgotKeys;
     std::string log;
 
     TargetSelector::Output step(const SelectSeen& seen = {}) {
@@ -52,9 +76,37 @@ struct Run {
         in.cursorY = y;
         in.monsters = monsters;
         in.seen = seen;
+        in.offScreen = offScreen;
+        in.canTurn = canTurn;
+        in.cursorAtMiddle = cameraMode;
+        in.mouseFree = mouseFree;
+        in.ui = ui;
+        in.screen = screen;
         const TargetSelector::Output out = selector.step(in);
-        x += out.dx;
-        y += out.dy;
+        if (out.right && !right) {
+            right = true;
+            pressedAt = now;
+            ++presses;
+        } else if (!out.right && right) {
+            right = false;
+            cameraMode = false;
+        }
+        if (right) {
+            turned += cameraMode ? out.dx : 0;
+        } else {
+            x += out.dx;
+            y += out.dy;
+        }
+        if (right && now - pressedAt >= 0.03) {
+            cameraMode = true;
+        }
+        if (out.gaveUpKey != 0) {
+            gaveUpKeys.push_back(out.gaveUpKey);
+        }
+        if (out.forgetKey != 0) {
+            forgotKeys.push_back(out.forgetKey);
+            std::erase_if(offScreen, [&](const RememberedMonster& r) { return r.key == out.forgetKey; });
+        }
         clicks += out.click ? 1 : 0;
         if (!out.log.empty()) {
             log += out.log + "\n";
@@ -295,15 +347,21 @@ TEST_CASE("Select Target gives up on a monster the game never shows hovered, and
     run.arrive();
     REQUIRE(run.selector.chosen() == 4);
     const double onIt = run.now;
-    // No plate on the images shown since the cursor came onto it, under kHoverWait: still on it.
+    // No plate on the images shown since the cursor came onto it, under kHoverWait: still on it, not clicked.
     run.steps(TargetSelector::kHoverWait * 0.8, reading(1, onIt + 0.01, 4, false, false));
     CHECK(run.selector.chosen() == 4);
-    // None on an image shown kHoverWait after: given up on, the other chosen; never clicked.
-    run.steps(0.05, reading(2, onIt + TargetSelector::kHoverWait + 0.01, 4, false, false));
-    CHECK(run.selector.chosen() == 6);
     CHECK(run.clicks == 0);
-    CHECK(run.log.find("gave up on monster 4, the cursor was on it") != std::string::npos);
-    CHECK(run.log.find("never showed it hovered (no name plate over it, 0 orbs round it)") != std::string::npos);
+    // None on an image shown kHoverWait after: clicked once all the same (its plate may be hidden), the target window
+    // to tell; no new target in it within kClickWait: given up on, the other chosen.
+    run.steps(TargetSelector::kClickWait * 0.8, reading(2, onIt + TargetSelector::kHoverWait + 0.01, 4, false, false));
+    CHECK(run.selector.chosen() == 4);
+    CHECK(run.clicks == 1);
+    CHECK(run.log.find("clicked monster 4 without seeing its name plate") != std::string::npos);
+    run.steps(TargetSelector::kClickWait * 0.3, reading(3, onIt + TargetSelector::kHoverWait + 0.5, 4, false, false));
+    CHECK(run.selector.chosen() == 6);
+    CHECK(run.clicks == 1);
+    CHECK(run.log.find("gave up on monster 4, the game never showed it hovered (no name plate over it, 0 orbs round "
+                       "it), and the click made all the same brought no new target") != std::string::npos);
     CHECK(run.log.find("going for monster 6") != std::string::npos);
 
     // The other gone, and the tracker finding the first again as a new id where it was: not chosen a moment after
@@ -315,6 +373,132 @@ TEST_CASE("Select Target gives up on a monster the game never shows hovered, and
     // but kRetryAfter later (it may have come out from behind the tree).
     run.steps(TargetSelector::kRetryAfter);
     CHECK(run.selector.chosen() == 14);
+}
+
+TEST_CASE("Select Target clicks once with its plate hidden, and is done when the target window shows the new target") {
+    // The user's clips 2026-11-16_14-22-00 (tree leaves drawn over an Imp's plate) and 14-25-14 (a Goblin's plate under
+    // the Status window): the game hovered them, the plate reader saw none, and they were never clicked.
+    Run run;
+    run.monsters = {monster(4, 500, 500)};
+    run.arrive();
+    const double onIt = run.now;
+    run.steps(0.05, reading(1, onIt + TargetSelector::kHoverWait + 0.01, 4, false, false));
+    REQUIRE(run.clicks == 1);
+    CHECK(run.step(reading(2, run.now, 4, false, false, "", true, "Imp")).done);
+    CHECK(run.clicks == 1);
+    CHECK(run.log.find("done, Imp targeted") != std::string::npos);
+    CHECK(run.log.find("seen by the target window, its name plate not seen") != std::string::npos);
+}
+
+TEST_CASE("Select Target never clicks a monster with its plate hidden while a living target is in the window") {
+    // That target might be this one: a click on it attacks.
+    Run run;
+    run.monsters = {monster(4, 500, 500), monster(6, 1200, 300, 60, 60)};
+    run.arrive();
+    const double onIt = run.now;
+    SelectSeen alive = reading(1, onIt + TargetSelector::kHoverWait + 0.01, 4, false, false, "", true, "Goblin");
+    alive.targetHp = 0.7f;
+    run.steps(0.05, alive);
+    CHECK(run.clicks == 0);
+    CHECK(run.selector.chosen() == 6);
+    CHECK(run.log.find("not clicked all the same, a living target in the target window") != std::string::npos);
+    // A dead one in the window: clicked.
+    Run dead;
+    dead.monsters = {monster(4, 500, 500)};
+    dead.arrive();
+    SelectSeen corpse = reading(1, dead.now + TargetSelector::kHoverWait + 0.01, 4, false, false, "", true, "Goblin");
+    corpse.targetHp = 0.0f;
+    dead.steps(0.05, corpse);
+    CHECK(dead.clicks == 1);
+}
+
+TEST_CASE("Select Target moves the click point off the game's interface, and leaves out monsters wholly under it") {
+    const std::vector<StatsArea> ui = {{2053, 4, 2555, 507}, {0, 0, 481, 105}}; // Minimap, Status (clip 14-25-14).
+    // Wholly under the minimap (the clip's imp, 2278,405 55 x 68): left out.
+    SelectableMonster imp = monster(1, 2305, 439, 55, 68);
+    CHECK_FALSE(clearOfInterface(imp, ui));
+    // Clear of it: its middle, unchanged.
+    SelectableMonster goblin = monster(2, 94, 150, 30, 34);
+    CHECK(clearOfInterface(goblin, ui));
+    CHECK(goblin.x == 94);
+    CHECK(goblin.y == 150);
+    // Its middle under the minimap's bottom edge, its lower part clear: the click point moves down, within kInside.
+    SelectableMonster half = monster(3, 2200, 500, 60, 100);
+    REQUIRE(clearOfInterface(half, ui));
+    CHECK(half.x == 2200);
+    CHECK(half.y >= 507 + kUiMargin);
+    CHECK(half.y - 500 <= TargetSelector::kInside * 100);
+    CHECK_FALSE(onInterface(half.x, half.y, ui));
+    // Select Target goes there, and is on it.
+    Run run;
+    run.monsters = {half};
+    run.arrive();
+    CHECK(std::abs(run.x - half.x) <= 1);
+    CHECK(std::abs(run.y - half.y) <= 1);
+    run.step(reading(1, run.now, 3, true, false));
+    CHECK(run.clicks == 1);
+}
+
+TEST_CASE("Select Target says when the only monsters are under the game's interface") {
+    TargetSelector selector;
+    TargetSelector::Input in;
+    in.now = 10.0;
+    in.dt = kDt;
+    in.underInterface = 1;
+    const TargetSelector::Output first = selector.step(in);
+    CHECK(first.log.find("no monster to select on screen (1 under the game's interface: no click reaches it)") !=
+          std::string::npos);
+    CHECK(selector.step(in).log.empty()); // Said once.
+}
+
+TEST_CASE("Select Target moves the cursor off the interface before pressing the right button to turn") {
+    // The user's clip 2026-11-16_14-25-14: the cursor left on the minimap, the game never took the press three times.
+    Run run;
+    run.canTurn = true;
+    run.screen = {0, 0, 2560, 1440};
+    run.ui = {{2053, 4, 2555, 507}};
+    run.x = 2307;
+    run.y = 437;
+    run.offScreen = {{22, 7, 4.0f, 2.0f}};
+    run.step();
+    CHECK_FALSE(run.right); // Not pressed on the minimap,
+    CHECK(run.log.find("the cursor first off the game's interface") != std::string::npos);
+    for (int i = 0; i < 1000 && !run.right; ++i) {
+        run.step();
+    }
+    REQUIRE(run.right); // but once off it: at the point over the screen's middle.
+    CHECK(std::abs(run.x - 1280) <= 2);
+    CHECK(std::abs(run.y - (720 - static_cast<int>(TargetSelector::kClearAbove * 1440))) <= 2);
+    CHECK_FALSE(onInterface(run.x, run.y, run.ui));
+    CHECK(run.presses == 1);
+    run.steps(1.2);
+    CHECK(run.turned != 0); // The game took it and the camera turned.
+
+    // Clear already: pressed at once where it is.
+    Run clear;
+    clear.canTurn = true;
+    clear.screen = {0, 0, 2560, 1440};
+    clear.ui = {{2053, 4, 2555, 507}};
+    clear.x = 1500;
+    clear.y = 900;
+    clear.offScreen = {{22, 7, 4.0f, 2.0f}};
+    clear.step();
+    CHECK(clear.right);
+    CHECK(clear.x == 1500);
+
+    // The point over the middle under a window: the clear point nearest it.
+    Run covered;
+    covered.canTurn = true;
+    covered.screen = {0, 0, 2560, 1440};
+    covered.ui = {{2053, 4, 2555, 507}, {900, 300, 1700, 600}};
+    covered.x = 2307;
+    covered.y = 437;
+    covered.offScreen = {{22, 7, 4.0f, 2.0f}};
+    for (int i = 0; i < 1000 && !covered.right; ++i) {
+        covered.step();
+    }
+    REQUIRE(covered.right);
+    CHECK_FALSE(onInterface(covered.x, covered.y, covered.ui));
 }
 
 TEST_CASE("Select Target gives up when the game stops showing it hovered after a click") {
@@ -402,4 +586,196 @@ TEST_CASE("Select Target clicks a monster the tracker misses on some frames") {
         run.step(reading(1, run.now - 0.02, 9, true, false));
     }
     CHECK(run.clicks == 1);
+}
+
+TEST_CASE("Select Target goes for the nearest monster by its distance, not the biggest") {
+    Run run;
+    SelectableMonster big = measured(1, 300, 300, 10.0f);
+    big.w = 300;
+    big.h = 360;
+    SelectableMonster unknown = monster(3, 1500, 400, 400, 480); // No distance: after all that have one.
+    run.monsters = {big, measured(2, 1000, 600, 4.0f), unknown};
+    run.step();
+    CHECK(run.selector.chosen() == 2);
+    CHECK(run.log.find("going for monster 2 (190 away, the nearest of 3)") != std::string::npos);
+    CHECK_FALSE(run.right);
+}
+
+TEST_CASE("Select Target tells the memory the key of one it gave up on") {
+    Run run;
+    run.monsters = {measured(4, 800, 500, 6.0f, 44)};
+    run.steps(TargetSelector::kMonsterSeconds + 0.1);
+    REQUIRE_FALSE(run.gaveUpKeys.empty());
+    CHECK(run.gaveUpKeys.front() == 44);
+}
+
+TEST_CASE("Select Target is done without a target once there is nothing to select a moment") {
+    {
+        Run run; // None on the screen, none remembered: done kNoneWait later, not before.
+        CHECK_FALSE(run.steps(TargetSelector::kNoneWait * 0.8));
+        CHECK(run.steps(TargetSelector::kNoneWait * 0.4));
+        CHECK(run.selector.chosen() == 0);
+        CHECK(run.clicks == 0);
+        CHECK(run.log.find("Select Target: done without a target, nothing to select for 0.5 s") != std::string::npos);
+    }
+    {
+        Run run; // One showing up within kNoneWait: gone for, not done.
+        CHECK_FALSE(run.steps(TargetSelector::kNoneWait * 0.8));
+        run.monsters = {monster(1, 900, 500)};
+        CHECK_FALSE(run.steps(TargetSelector::kNoneWait));
+        CHECK(run.selector.chosen() == 1);
+    }
+    {
+        Run run; // Remembered off the screen, but the turn not known: nothing to select either.
+        run.offScreen = {{22, 7, 4.0f, 2.0f}};
+        CHECK(run.steps(TargetSelector::kNoneWait + 0.1));
+        CHECK_FALSE(run.right);
+    }
+    {
+        Run run; // The only one on the screen given up on a moment ago: waits for it, tried again kRetryAfter later.
+        run.monsters = {measured(4, 800, 500, 6.0f, 44)};
+        run.steps(TargetSelector::kMonsterSeconds + 0.1);
+        REQUIRE(run.log.find("gave up on monster 4") != std::string::npos);
+        CHECK_FALSE(run.steps(TargetSelector::kRetryAfter * 0.9));
+        CHECK(run.selector.chosen() == 0);
+        CHECK_FALSE(run.steps(TargetSelector::kRetryAfter * 0.2));
+        CHECK(run.selector.chosen() == 4);
+    }
+}
+
+TEST_CASE("Select Target turns the camera to a nearer monster the memory keeps off the screen, then goes for it") {
+    Run run;
+    run.canTurn = true;
+    run.x = 640;
+    run.y = 360;
+    run.monsters = {measured(1, 900, 500, 10.0f, 11)};
+    run.offScreen = {{22, 7, 4.0f, 2.0f}}; // 115 degrees right, 4 own heights away.
+    run.step();
+    CHECK(run.right);
+    CHECK(run.selector.chosen() == 0);
+    CHECK(run.log.find("Select Target: turning right 95 degrees to a monster remembered 190 away, 115 degrees right "
+                       "(the nearest on the screen is 470 away)") != std::string::npos);
+    run.steps(1.2); // Turned and settled; not yet found.
+    CHECK_FALSE(run.right);
+    CHECK(run.presses == 1);
+    // To 20 degrees short of it: it stands beside the own character, not behind it.
+    CHECK(run.turned == static_cast<int>(std::lround((2.0 - TargetSelector::kFaceBearing) / MouseCamera::kCountRadians)));
+    CHECK(run.x == 640); // The cursor stayed while the right button was held.
+    CHECK(run.y == 360);
+    CHECK(run.selector.chosen() == 0);
+    // There now, the memory knows it by its key: it is the one.
+    run.monsters = {measured(9, 1400, 700, 4.1f, 22)};
+    run.step();
+    CHECK(run.selector.chosen() == 9);
+    CHECK(run.log.find("going for monster 9 (190 away, turned to it, remembered off the screen)") != std::string::npos);
+    CHECK(run.forgotKeys.empty());
+}
+
+TEST_CASE("Select Target takes one nearer than the one turned to when it is on the screen after the turn") {
+    // The user's clip 2026-11-16_13-29-15: remembered 860 away, 59 degrees left, the nearest on the screen 1290 away;
+    // after the turn a goblin about 400 away was on the screen too.
+    const auto turnTo = [](Run& run) {
+        run.canTurn = true;
+        run.monsters = {measured(1, 900, 300, 27.4f, 11)};
+        run.offScreen = {{22, 7, 18.3f, -1.03f}};
+        run.step();
+        REQUIRE(run.right);
+        run.monsters.clear();
+        for (int i = 0; i < 1000 && run.right; ++i) { // Until the turn lets go of the right button,
+            run.step();
+        }
+        run.steps(0.2); // then settled (CameraTurner::kSettle), well inside kFindWait.
+        REQUIRE_FALSE(run.right);
+        REQUIRE(run.forgotKeys.empty());
+        REQUIRE(run.selector.chosen() == 0);
+    };
+    {
+        Run run; // Both on the screen: the nearer.
+        turnTo(run);
+        run.monsters = {measured(9, 700, 300, 18.3f, 22), measured(5, 330, 650, 8.5f, 23)};
+        run.step();
+        CHECK(run.selector.chosen() == 5);
+        CHECK(run.log.find("going for monster 5 (400 away, nearer than the one turned to, remembered 860 away)") !=
+              std::string::npos);
+        CHECK(run.forgotKeys.empty());
+    }
+    {
+        Run run; // The one turned to not found yet: the nearer one on the screen at once.
+        turnTo(run);
+        run.monsters = {measured(5, 330, 650, 8.5f, 23)};
+        run.step();
+        CHECK(run.selector.chosen() == 5);
+        CHECK(run.log.find("remembered 860 away and not found yet") != std::string::npos);
+    }
+    {
+        Run run; // Others on the screen farther, or with no distance: the one turned to.
+        turnTo(run);
+        run.monsters = {measured(9, 700, 300, 18.3f, 22), measured(1, 1500, 200, 27.4f, 11), monster(3, 600, 900)};
+        run.step();
+        CHECK(run.selector.chosen() == 9);
+        CHECK(run.log.find("turned to it, remembered off the screen") != std::string::npos);
+    }
+}
+
+TEST_CASE("Select Target forgets one turned to and not there, and goes for one on the screen") {
+    Run run;
+    run.canTurn = true;
+    run.monsters = {measured(1, 900, 500, 10.0f, 11)};
+    run.offScreen = {{22, 7, 4.0f, -1.5f}}; // To the left.
+    run.step();
+    CHECK(run.right);
+    run.steps(1.2 + TargetSelector::kFindWait);
+    CHECK(run.turned < 0);
+    REQUIRE(run.forgotKeys.size() == 1);
+    CHECK(run.forgotKeys.front() == 22);
+    CHECK(run.log.find("but it is not there") != std::string::npos);
+    CHECK(run.selector.chosen() == 1);
+}
+
+TEST_CASE("Select Target turns to one off the screen only when it is worth it and the turn is known") {
+    {
+        Run run; // Nearer, but not by kTurnWorth.
+        run.canTurn = true;
+        run.monsters = {measured(1, 900, 500, 10.0f)};
+        run.offScreen = {{22, 7, 9.0f, 2.0f}};
+        run.step();
+        CHECK_FALSE(run.right);
+        CHECK(run.selector.chosen() == 1);
+    }
+    {
+        Run run; // The camera's turn not known.
+        run.monsters = {measured(1, 900, 500, 10.0f)};
+        run.offScreen = {{22, 7, 2.0f, 2.0f}};
+        run.step();
+        CHECK_FALSE(run.right);
+        CHECK(run.selector.chosen() == 1);
+    }
+    {
+        Run run; // None on the screen: turned to.
+        run.canTurn = true;
+        run.offScreen = {{22, 7, 9.0f, 2.0f}};
+        run.step();
+        CHECK(run.right);
+        CHECK(run.log.find("none to select on the screen") != std::string::npos);
+    }
+}
+
+TEST_CASE("Select Target lets go of the right button when the mouse is wanted, and chooses again after") {
+    Run run;
+    run.canTurn = true;
+    run.monsters = {measured(1, 900, 500, 10.0f)};
+    run.offScreen = {{22, 7, 4.0f, 2.0f}};
+    run.step();
+    run.steps(0.3);
+    REQUIRE(run.right);
+    run.mouseFree = false;
+    run.step();
+    CHECK_FALSE(run.right);
+    CHECK(run.log.find("the mouse is wanted") != std::string::npos);
+    run.steps(0.5);
+    CHECK(run.presses == 1);
+    run.mouseFree = true;
+    run.offScreen.clear(); // Not off the screen any more, say.
+    run.steps(0.3);
+    CHECK(run.selector.chosen() == 1);
 }

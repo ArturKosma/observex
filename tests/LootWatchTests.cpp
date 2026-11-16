@@ -22,6 +22,9 @@ struct Watch {
     std::vector<DropSeen> drops;
     std::uint64_t swept = 0;
     std::vector<DropSeen> sweepDrops;
+    bool looting = false;
+    bool own = false;
+    StatsArea ownBox{};
     std::string log;
 
     LootWatch::Output step(std::uint32_t dead = 0, const char* name = "Imp Elder") {
@@ -34,6 +37,9 @@ struct Watch {
         in.things = things;
         in.close = {looked, drops};
         in.sweep = {swept, sweepDrops};
+        in.looting = looting;
+        in.own = own;
+        in.ownBox = ownBox;
         LootWatch::Output out = watch.step(in);
         log += out.log.empty() ? "" : out.log + "\n";
         return out;
@@ -260,4 +266,47 @@ TEST_CASE("a kill takes over from drops the sweep found") {
     CHECK(out.drops == 0); // The close look before the death is the other spot's.
     CHECK(out.kill);
     CHECK(w.log == "Drops seen: 1\nLooking for drops round Imp Elder (box 7)\n");
+}
+
+TEST_CASE("while looting the close look stays round the own feet, says nothing and ends once looting stops") {
+    Watch w;
+    w.looting = true;
+    w.own = true;
+    w.ownBox = {1250, 600, 1310, 730}; // 130 tall: a square of 520 round its feet (1280, 730).
+    const LootSquare feet = lootSquareAt(1280.0f, 730.0f, 130.0f, kWidth, kHeight);
+    CHECK(feet.side == 520);
+    CHECK(w.step().square == feet);
+    w.look({});
+    w.ms += LootWatch::kLostMs * 3.0; // Long past what would end a found spot.
+    CHECK(w.step().square == feet);
+    CHECK(w.log.empty());
+    // A drop found round the feet: counted, the square stays there.
+    w.look({{{1300, 760, 1320, 770}, 0.8f}});
+    w.ms += 50.0;
+    LootWatch::Output out = w.step();
+    CHECK(out.drops == 1);
+    CHECK(out.square == feet);
+    CHECK(w.log == "Drops seen: 1\n");
+    // Looting stops: it ends kLostMs after the drop was last seen.
+    w.looting = false;
+    w.look({});
+    w.ms += LootWatch::kLostMs + 1.0;
+    CHECK(w.step().square.empty());
+}
+
+TEST_CASE("while looting, drops found away from the own feet are followed there") {
+    Watch w;
+    w.looting = true;
+    w.own = true;
+    w.ownBox = {1250, 600, 1310, 730};
+    w.step();
+    // The sweep is not needed: the close look round the feet saw nothing, then a far pile (500 px off) is found.
+    w.look({{{1800, 900, 1820, 910}, 0.8f}});
+    w.ms += 50.0;
+    const LootWatch::Output out = w.step();
+    CHECK(out.drops == 1);
+    const LootSquare feet = lootSquareAt(1280.0f, 730.0f, 130.0f, kWidth, kHeight);
+    CHECK_FALSE(out.square == feet);
+    CHECK(out.square.x <= 1800);
+    CHECK(out.square.x + out.square.side >= 1820);
 }

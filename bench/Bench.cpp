@@ -3,7 +3,7 @@
 //   observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] [--record FOLDER [--every S] [--unsure]]
 //                  [--model FOLDER [--snap]] [--clip FOLDER] [--find-ui [--layout FOLDER]]
 //                  [--find-depth [--depth-model FOLDER]]
-//   observex_bench --model FOLDER --images FOLDER --out FILE
+//   observex_bench --model FOLDER --images FOLDER --out FILE [--close-up X,Y]
 //   observex_bench --model FOLDER --replay RECORDING
 //   observex_bench --model FOLDER --update-kinds RECORDINGS
 //   observex_bench --track LOG
@@ -14,6 +14,7 @@
 //                  [--out FOLDER [--every N] [--at FRAME]...]
 //   observex_bench --depth CLIP [--depth-model FOLDER] [--heuristics DLL] [--layout FOLDER] [--every N]
 //                  [--out FOLDER] [--at FRAME]... [--compare NPY]
+//   observex_bench --distances CLIP [--heuristics DLL] [--layout FOLDER] [--out FILE]
 //   observex_bench --geodata CLIP [--layout FOLDER] [--geo FOLDER] [--scale UNITS] [--first-lines] [--all]
 //                  [--out FOLDER [--every N]]
 //   observex_bench --mouse [SECONDS]
@@ -52,6 +53,8 @@
 // in the marks format (like tools/train/guess.py's <category>-guesses.txt), to compare with the Python model. A drop
 // model (one that looks round corpses, "loot_side" in its model.json) sees each image square by square as the review's
 // Finder runs it (core/LootWatch's lootTiles and keepApart).
+// With --close-up X,Y it also looks closer round X,Y, as the recogniser does while the own character is hit
+// (Recognizer::lookCloser), and joins that look in.
 //
 // UI: --find-ui also runs the UI finder as the app does while observing (engine/UiFinder: ten images a second, the
 // grey image on the GPU, its full-size level read back, then core/UiLayout with ui.txt from --layout, default
@@ -66,6 +69,15 @@
 // of pixels whose level moved more than 8 from the map before. With --clip, every map goes into the clip buffer and
 // each new one is said drawn as the app's UI draws it (at the time it is there: the bench has no preview image), so
 // the saved clip's Depth replays it.
+//
+// Drops: --find-drops also runs the drop finder as the app does while observing (engine/DropFinder: 20 images a
+// second, the sweep's squares in turn through models/drop), and adds its numbers: looks per second and milliseconds per
+// look (copy, squeeze, network).
+//
+// GPU priorities (2026-11-16): each part's work goes to the GPU with its GpuPriority (engine/Gpu: capture, the
+// recogniser and the snapper first, the drop finder last). --no-gpu-priority runs every part as before (all devices
+// normal, every network's CUDA stream top priority), to compare; runs of both, taken in turn, show what the
+// priorities do next to whatever else keeps the GPU busy.
 //
 // Replay: --replay walks a reviewed recording's images in order the way the review does, with its answers as the
 // user, and prints how many guesses each rule pre-fills right and wrong and how many it asks about: the model's own
@@ -147,6 +159,7 @@
 #include "core/BoxLearner.h"
 #include "core/ClipGuesses.h"
 #include "core/ClipLines.h"
+#include "core/CloseUp.h"
 #include "core/Features.h"
 #include "core/KindLearner.h"
 #include "core/LiveLines.h"
@@ -165,6 +178,7 @@
 #include "engine/CrashLog.h"
 #include "engine/DepthFinder.h"
 #include "engine/Detector.h"
+#include "engine/DropFinder.h"
 #include "engine/Gpu.h"
 #include "engine/GreyMaker.h"
 #include "engine/HeuristicsLibrary.h"
@@ -181,6 +195,7 @@
 #include "engine/UiFinder.h"
 
 #include "DepthBench.h"
+#include "DistanceBench.h"
 #include "GeodataBench.h"
 #include "StatsBench.h"
 #include "TurnsBench.h"
@@ -232,6 +247,7 @@ struct Options {
     const char* model = nullptr;
     const char* images = nullptr;
     const char* out = nullptr;
+    const char* closeUp = nullptr; // --close-up X,Y for --images: also a close-up round X,Y (Recognizer::lookCloser).
     const char* track = nullptr;
     const char* replay = nullptr;
     const char* updateKinds = nullptr;
@@ -254,6 +270,8 @@ struct Options {
     const char* depth = nullptr;      // --depth CLIP: the Show flag Depth over a clip (bench/DepthBench).
     const char* depthModel = nullptr; // --depth-model for --depth and --find-depth (default models/depth).
     bool findDepth = false;           // --find-depth: the live run also runs the depth finder, as the flag Depth does.
+    bool findDrops = false;           // --find-drops: the live run also runs the drop finder (models/drop), as the app.
+    bool gpuPriority = true;          // --no-gpu-priority: every part as before 2026-11-16, to compare.
     const char* compare = nullptr;    // --compare for --depth: the Python network's map of the first --at frame.
     bool everyGiven = false;          // --every was given (its default is for --clip-frames' pictures).
 };
@@ -280,6 +298,8 @@ bool parse(int argc, char** argv, Options& options) {
             options.model = argv[++i];
         } else if (std::strcmp(argv[i], "--images") == 0 && i + 1 < argc) {
             options.images = argv[++i];
+        } else if (std::strcmp(argv[i], "--close-up") == 0 && i + 1 < argc) {
+            options.closeUp = argv[++i];
         } else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
             options.out = argv[++i];
         } else if (std::strcmp(argv[i], "--track") == 0 && i + 1 < argc) {
@@ -304,6 +324,10 @@ bool parse(int argc, char** argv, Options& options) {
             options.findUi = true;
         } else if (std::strcmp(argv[i], "--find-depth") == 0) {
             options.findDepth = true;
+        } else if (std::strcmp(argv[i], "--find-drops") == 0) {
+            options.findDrops = true;
+        } else if (std::strcmp(argv[i], "--no-gpu-priority") == 0) {
+            options.gpuPriority = false;
         } else if (std::strcmp(argv[i], "--at") == 0 && i + 1 < argc) {
             options.at.push_back(std::strtoull(argv[++i], nullptr, 10));
         } else if (std::strcmp(argv[i], "--today-out") == 0 && i + 1 < argc) {
@@ -330,8 +354,10 @@ bool parse(int argc, char** argv, Options& options) {
             std::printf(
                 "usage: observex_bench [--screen N] [--seconds S] [--no-pulse] [--no-preview] "
                 "[--record FOLDER [--every S] [--unsure]] [--model FOLDER [--snap]] [--clip FOLDER]\n"
-                "                      [--find-ui [--layout FOLDER]] [--find-depth [--depth-model FOLDER]]\n"
-                "       observex_bench --model FOLDER --images FOLDER --out FILE\n"
+                "                      [--find-ui [--layout FOLDER]] [--find-depth [--depth-model FOLDER]] "
+                "[--find-drops]\n"
+                "                      [--no-gpu-priority]\n"
+                "       observex_bench --model FOLDER --images FOLDER --out FILE [--close-up X,Y]\n"
                 "       observex_bench --model FOLDER --replay RECORDING\n"
                 "       observex_bench --model FOLDER --update-kinds RECORDINGS\n"
                 "       observex_bench --track LOG\n"
@@ -482,8 +508,8 @@ int detectImages(const Options& options) {
     std::atomic<float> progress{0.0f};
     std::stop_source never;
     const auto loadStart = std::chrono::steady_clock::now();
-    Detector detector(gpu.device.Get(), adapter.Get(), options.model, first.width, first.height, never.get_token(),
-                      progress);
+    Detector detector(gpu.device.Get(), adapter.Get(), options.model, first.width, first.height, GpuPriority::Reaction,
+                      never.get_token(), progress);
     std::printf("Model ready in %.1f s (input %u x %u)\n",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - loadStart).count(),
                 detector.modelSize(), detector.modelSize());
@@ -502,6 +528,7 @@ int detectImages(const Options& options) {
     double totalMs = 0.0;
     std::vector<Detection> found(Found::kMax);
     std::vector<Detection> mirrored(Found::kMax);
+    std::vector<Detection> closeFound(Found::kMax);
     std::ofstream mirrorOut(std::string(options.out) + ".mirror.txt", std::ios::binary);
     std::vector<float> disagreements;
     long long kindsUnsure = 0; // Images where a look was unsure which kind something is.
@@ -535,6 +562,18 @@ int detectImages(const Options& options) {
             }
         } else {
             count = detector.detect(gpu.context.Get(), LiveLog::kMinSure, found.data(), Found::kMax);
+            if (options.closeUp != nullptr && count >= 0) { // As the recogniser looks while the own character is hit.
+                char* rest = nullptr;
+                const float x = std::strtof(options.closeUp, &rest);
+                const float y = *rest == ',' ? std::strtof(rest + 1, nullptr) : 0.0f;
+                const CloseUpArea part = closeUpArea(x, y, static_cast<int>(first.width),
+                                                     static_cast<int>(first.height), Recognizer::kCloseUpShare);
+                const int n = detector.detect(gpu.context.Get(), LiveLog::kMinSure, closeFound.data(), Found::kMax,
+                                              false, {part.x, part.y, part.width, part.height});
+                count = n < 0 ? -1
+                              : joinCloseUp(found.data(), count, {closeFound.data(), static_cast<std::size_t>(n)}, part,
+                                            Recognizer::kCloseUpMargin, Found::kMax);
+            }
         }
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         const int mirroredCount =
@@ -2489,9 +2528,10 @@ int groundClip(const Options& options) {
     ClipGround::Stats stats;
     const Clock::time_point start = Clock::now();
     std::vector<ClipCameraLine> mouseCameras;
+    std::vector<ClipHeights> heights;
     const std::vector<GroundCamera> cameras = ClipGround::follow(gpu.device.Get(), *ground, video, clip, shown, &layout,
                                                                  {}, nullptr, &stats, options.groundFrames,
-                                                                 &mouseCameras);
+                                                                 &mouseCameras, &heights);
     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
     std::printf("%s: followed %d frames in %.0f ms (%.2f ms each reading back and fitting); fitted %d (%.0f%%), "
                 "%.1f patches found a frame, %.1f agreeing, %.2f px off\n",
@@ -2688,43 +2728,35 @@ int groundClip(const Options& options) {
             blend(x, y + 1, alpha);
         }
     };
-    const auto drawGrid = [&](const GroundCamera& camera) {
-        constexpr float kCell = 1.5f;
-        constexpr int kCells = 20;
-        constexpr float kReach = kCell * static_cast<float>(kCells);
-        const auto onScreen = [&](float mapX, float mapY, float& x, float& y) {
-            float right = 0.0f;
-            float away = 0.0f;
-            mapToGround(camera, mapX, mapY, right, away);
-            if (aheadOfCamera(camera, right, away, 0.0f) < 0.3f) {
-                return false;
-            }
-            const GroundPoint point = groundToScreen(camera, right, away);
-            x = point.x;
-            y = point.y;
-            return point.ahead;
+    std::vector<GridPoint> grid(kGridPoints);
+    const auto drawGrid = [&](const GroundCamera& camera, const GroundHeights* shape) {
+        groundGrid(camera, shape, grid);
+        const auto at = [&](int i, int j) -> const GridPoint& {
+            return grid[static_cast<std::size_t>(j * kGridSide + i)];
         };
-        const float firstX = (std::floor(camera.feetX / kCell) - static_cast<float>(kCells)) * kCell;
-        const float firstY = (std::floor(camera.feetY / kCell) - static_cast<float>(kCells)) * kCell;
-        for (int row = 0; row <= 2 * kCells; ++row) {
-            for (int column = 0; column <= 2 * kCells; ++column) {
-                const float x0 = firstX + static_cast<float>(column) * kCell;
-                const float y0 = firstY + static_cast<float>(row) * kCell;
-                const float closeness =
-                    1.0f - std::hypot(x0 + kCell * 0.5f - camera.feetX, y0 + kCell * 0.5f - camera.feetY) / kReach;
-                if (closeness <= 0.1f) {
-                    continue;
-                }
-                float ax = 0.0f;
-                float ay = 0.0f;
-                float bx = 0.0f;
-                float by = 0.0f;
-                float cx = 0.0f;
-                float cy = 0.0f;
-                if (onScreen(x0, y0, ax, ay) && onScreen(x0 + kCell, y0, bx, by) && onScreen(x0, y0 + kCell, cx, cy)) {
-                    const float alpha = 0.75f * closeness * closeness * (camera.pitchMeasured ? 1.0f : 0.5f);
-                    line(ax, ay, bx, by, alpha);
-                    line(ax, ay, cx, cy, alpha);
+        // Each cell's two near edges, in pieces over the terrain, as app/Overlay's drawGround.
+        for (int j = 0; j + 1 < kGridSide; ++j) {
+            for (int i = 0; i + 1 < kGridSide; ++i) {
+                const GridPoint& a = at(i, j);
+                for (const GridPoint* b : {j % kGridSteps == 0 ? &at(i + 1, j) : nullptr,
+                                           i % kGridSteps == 0 ? &at(i, j + 1) : nullptr}) {
+                    if (b == nullptr || !a.ok || !b->ok || a.shown + b->shown <= 0.02f) {
+                        continue;
+                    }
+                    const float alpha = 0.75f * 0.5f * (a.shown + b->shown);
+                    if (shape == nullptr) {
+                        line(a.x, a.y, b->x, b->y, alpha);
+                        continue;
+                    }
+                    // Cut where something stands in front (core/Ground's gridSteps).
+                    GridStep steps[kGridMostSteps + 1];
+                    const int count = gridStepCount(a, *b);
+                    gridSteps(*shape, a, *b, count, steps);
+                    for (int k = 0; k < count; ++k) {
+                        if (!steps[k].hidden && !steps[k + 1].hidden) {
+                            line(steps[k].x, steps[k].y, steps[k + 1].x, steps[k + 1].y, alpha);
+                        }
+                    }
                 }
             }
         }
@@ -2755,7 +2787,7 @@ int groundClip(const Options& options) {
         const std::size_t index = static_cast<std::size_t>(frame.number) - 1;
         const double timeMs = index < clip.frameMs.size() ? clip.frameMs[index] : frame.seconds * 1000.0;
         if (const GroundCamera camera = groundAmong(cameras, timeMs); camera.known) {
-            drawGrid(camera);
+            drawGrid(camera, heightsAmong(heights, timeMs));
             std::printf("  frame %llu  %.3f ms  pitch %.6f  distance %.6f  yaw %.6f  feet %.6f %.6f\n",
                         static_cast<unsigned long long>(frame.number), timeMs, static_cast<double>(camera.pitch),
                         static_cast<double>(camera.distance), static_cast<double>(camera.yaw),
@@ -2858,16 +2890,33 @@ int main(int argc, char** argv) {
         }
         return result;
     }
+    if (argc >= 2 && std::strcmp(argv[1], "--distances") == 0) { // Distances over a clip (bench/DistanceBench).
+        const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); // Media Foundation needs it.
+        int result = 1;
+        try {
+            result = distanceBench(argc - 2, argv + 2);
+        } catch (const std::exception& e) {
+            std::printf("%s\n", e.what());
+        }
+        if (com) {
+            CoUninitialize();
+        }
+        return result;
+    }
     if (argc >= 2 && std::strcmp(argv[1], "--stats") == 0) { // The game's bars on recorded images (bench/StatsBench).
         return statsBench(argc - 2, argv + 2);
     }
     if (argc >= 2 && std::strcmp(argv[1], "--geodata") == 0) { // The Show flag Geodata over a clip (bench/GeodataBench).
         return geodataBench(argc - 2, argv + 2);
     }
+    if (argc >= 2 && std::strcmp(argv[1], "--pickups") == 0) { // Pickups off screenshots (bench/GeodataBench).
+        return pickupsBench(argc - 2, argv + 2);
+    }
     Options options;
     if (!parse(argc, argv, options)) {
         return 2;
     }
+    useGpuPriorities(options.gpuPriority); // Before any part starts.
     if (options.track != nullptr) {
         return replayTrack(options);
     }
@@ -2953,6 +3002,15 @@ int main(int argc, char** argv) {
             return 2;
         }
         const Screen& screen = screens[static_cast<std::size_t>(chosen)];
+
+        if (!options.gpuPriority) {
+            std::printf("GPU priorities: off (--no-gpu-priority)\n");
+        } else {
+            const GpuDevice probe = createGpuDevice(screen.adapter.Get());
+            const bool taken = setGpuPriority(probe.device.Get(), GpuPriority::Reaction) &&
+                               setGpuPriority(probe.device.Get(), GpuPriority::Background);
+            std::printf("GPU priorities: on (%s)\n", taken ? "Windows takes them" : "Windows refused them");
+        }
 
         Pipeline pipeline;
         pipeline.setPreviewEnabled(options.preview);
@@ -3057,6 +3115,27 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
+            // The drop finder, as the app runs it while observing: the sweep only (the bench has no kills).
+            std::unique_ptr<DropFinder> dropFinder;
+            if (options.findDrops) {
+                dropFinder = std::make_unique<DropFinder>(screen.adapter.Get(), *pipeline.drops(),
+                                                          std::filesystem::path("models/drop"));
+                std::printf("Loading the drop model");
+                while (dropFinder->state() == DropFinder::State::Starting) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    if (dropFinder->progress() > 0.0f) {
+                        std::printf(" %.0f%%", static_cast<double>(dropFinder->progress() * 100.0f));
+                    } else {
+                        std::printf(".");
+                    }
+                }
+                std::printf("\n");
+                if (dropFinder->state() == DropFinder::State::Failed) {
+                    std::printf("%s\n", dropFinder->error().c_str());
+                    return 1;
+                }
+                pipeline.setDropsEnabled(true);
+            }
             std::uint64_t depthNoted = 0; // The map last said drawn to the clip buffer.
             bool uiFailed = false;
             bool uiProblem = false;
@@ -3084,6 +3163,9 @@ int main(int argc, char** argv) {
             if (depthFinder) {
                 std::printf("  (then depth: maps/s  network avg / max ms  shade ms  pack ms  kB  changed)\n");
             }
+            if (dropFinder) {
+                std::printf("  (then drops: looks/s  look avg / max ms)\n");
+            }
 
             using Clock = std::chrono::steady_clock;
             const Clock::time_point start = Clock::now();
@@ -3106,6 +3188,8 @@ int main(int argc, char** argv) {
             double depthPackSum = 0.0;
             double depthKbSum = 0.0;
             double depthChangedSum = 0.0;
+            double dropsSum = 0.0;
+            double dropsMsSum = 0.0;
             int samples = 0;
             while (Clock::now() - start < std::chrono::seconds(options.seconds) + std::chrono::milliseconds(600)) {
                 if (consumer) {
@@ -3206,6 +3290,13 @@ int main(int argc, char** argv) {
                         depthKbSum += depth.packedKb;
                         depthChangedSum += depth.changed;
                     }
+                    if (dropFinder) {
+                        const DropFinderStats& drops = dropFinder->stats();
+                        std::printf("  %5.1f  %6.2f / %-6.2f", static_cast<double>(drops.looksPerSecond),
+                                    static_cast<double>(drops.workAvgMs), static_cast<double>(drops.workMaxMs));
+                        dropsSum += drops.looksPerSecond;
+                        dropsMsSum += drops.workAvgMs;
+                    }
                     std::printf("\n");
                     lastMerged = stats.mergedUpdates;
                     rateSum += stats.imagesPerSecond;
@@ -3240,6 +3331,9 @@ int main(int argc, char** argv) {
                                 depthSum / samples, depthNetSum / samples, depthShadeSum / samples,
                                 depthPackSum / samples, depthKbSum / samples, depthChangedSum * 100.0 / samples);
                 }
+                if (dropFinder) {
+                    std::printf("Drops: %.1f looks/s, %.2f ms a look\n", dropsSum / samples, dropsMsSum / samples);
+                }
             }
             if (clip) {
                 saveClip(*clip, options.clipFolder, screen, recognizer.get(), options.model);
@@ -3255,6 +3349,10 @@ int main(int argc, char** argv) {
             if (depthFinder) {
                 pipeline.setDepthEnabled(false);
                 depthFinder.reset();
+            }
+            if (dropFinder) {
+                pipeline.setDropsEnabled(false);
+                dropFinder.reset();
             }
             if (uiFinder) {
                 pipeline.setUiEnabled(false);

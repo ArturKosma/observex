@@ -1,5 +1,7 @@
 #include "engine/Recognizer.h"
 
+#include "core/CloseUp.h"
+#include "core/Ground.h"
 #include "core/Heuristics.h"
 #include "core/Mirror.h"
 #include "core/StatWindow.h"
@@ -34,6 +36,7 @@ Recognizer::Recognizer(const Screen& screen, ImageChannel& channel, std::filesys
     const Screen own = findOnOwnAdapter(screen); // So this device cannot hold up the pipeline's.
     adapter_ = own.adapter;
     gpu_ = createGpuDevice(own.adapter.Get());
+    setGpuPriority(gpu_.device.Get(), GpuPriority::Reaction);
     reader_ = std::make_unique<ImageReader>(gpu_.device.Get(), channel);
     thread_ = std::jthread([this](std::stop_token stop) { run(stop); });
 }
@@ -67,13 +70,28 @@ void Recognizer::markDead(std::uint32_t id) {
     dead_[deadNext_.fetch_add(1, std::memory_order_relaxed) % kDeadKept].store(id, std::memory_order_relaxed);
 }
 
-void Recognizer::markDeadThings(std::span<Tracked> things, int deadKind) const {
+void Recognizer::unmarkDead(std::uint32_t id) {
+    if (id == 0) {
+        return;
+    }
+    for (std::atomic<std::uint32_t>& dead : dead_) {
+        std::uint32_t marked = id;
+        dead.compare_exchange_strong(marked, 0u, std::memory_order_relaxed);
+    }
+}
+
+bool Recognizer::lookingCloser() const {
+    return qpcNow() < closeUntil_.load(std::memory_order_relaxed);
+}
+
+void Recognizer::markDeadThings(std::span<Tracked> things, int deadKind, int ownKind) const {
     for (Tracked& thing : things) {
         bool dead = false;
         for (const std::atomic<std::uint32_t>& id : dead_) {
             dead = dead || id.load(std::memory_order_relaxed) == thing.id;
         }
-        if (!dead || (static_cast<int>(thing.kind) == deadKind && kindSureOf(thing) >= kDeadSure)) {
+        if (!dead || static_cast<int>(thing.kind) == ownKind ||
+            (static_cast<int>(thing.kind) == deadKind && kindSureOf(thing) >= kDeadSure)) {
             continue;
         }
         // Its kind before goes second, so a reader still sees what the model made of it.
@@ -93,8 +111,8 @@ void Recognizer::run(std::stop_token stop) {
 
     std::unique_ptr<Detector> detector;
     try {
-        detector = std::make_unique<Detector>(gpu_.device.Get(), adapter_.Get(), modelFolder_, width_, height_, stop,
-                                              progress_);
+        detector = std::make_unique<Detector>(gpu_.device.Get(), adapter_.Get(), modelFolder_, width_, height_,
+                                              GpuPriority::Reaction, stop, progress_);
     } catch (const std::exception& e) {
         if (!stop.stop_requested()) {
             fail(e.what());
@@ -103,10 +121,12 @@ void Recognizer::run(std::stop_token stop) {
     }
     kinds_ = detector->kinds(); // Before Running, which makes it readable.
     kindAnswers_.store(detector->kindUpdate().answers, std::memory_order_relaxed);
-    // The "dead" kind's place, for markDead (none: no dead marks).
+    // The "dead" kind's place, for markDead (none: no dead marks), and the "own" kind's, never marked.
     int deadKind = -1;
+    int ownKind = -1;
     for (std::size_t k = 0; k < kinds_.size(); ++k) {
         deadKind = kinds_[k] == "dead" ? static_cast<int>(k) : deadKind;
+        ownKind = kinds_[k] == "own" ? static_cast<int>(k) : ownKind;
     }
     state_.store(State::Running, std::memory_order_release);
 
@@ -115,8 +135,9 @@ void Recognizer::run(std::stop_token stop) {
     const double msPerTick = 1000.0 / static_cast<double>(frequency.QuadPart);
     StatWindow work;
     // The Debug tab's steps, in the order they run on each image.
-    enum Step { kCopy, kNetwork, kLog, kHeuristics, kSnapper, kClip, kMirror };
-    CostMeter meter({"Copy in", "Network", "Live log", "Heuristics", "To snapper", "To clip buffer", "Mirror test"});
+    enum Step { kCopy, kNetwork, kCloseUp, kLog, kHeuristics, kSnapper, kClip, kMirror };
+    CostMeter meter({"Copy in", "Network", "Close-up", "Live log", "Heuristics", "To snapper", "To clip buffer",
+                     "Mirror test"});
     std::uint64_t images = 0;
     std::int64_t windowStart = qpcNow();
     std::uint64_t heuristicsVersion = heuristics_->version();
@@ -129,6 +150,11 @@ void Recognizer::run(std::stop_token stop) {
     }
     std::array<Detection, Found::kMax> detections;
     std::array<Detection, Found::kMax> mirrored;
+    std::array<Detection, Found::kMax> closeUp;
+    // The own character's box's middle on the last look it was seen on (for the close-up): the camera circles it, so
+    // the screen's middle until then.
+    float ownX = static_cast<float>(width_) * 0.5f;
+    float ownY = static_cast<float>(height_) * 0.5f;
     const std::int64_t timeOrigin = windowStart;
 
     ImageStamp stamp;
@@ -151,13 +177,29 @@ void Recognizer::run(std::stop_token stop) {
             // While logging, keeping a clip or asked, also the things it is less sure of, for the log, the clip and the
             // mirror test only.
             const float minSure = log || clip || asked ? LiveLog::kMinSure : kMinSure;
-            const int count = detector->detect(gpu_.context.Get(), minSure, detections.data(),
-                                               static_cast<int>(Found::kMax));
+            int count = detector->detect(gpu_.context.Get(), minSure, detections.data(),
+                                         static_cast<int>(Found::kMax));
             if (count < 0) {
                 fail("The GPU stopped running the model (it may have been reset)");
                 return;
             }
             meter.lap(kNetwork);
+            // The own character being hit (lookCloser): a close-up round it too, joined into this look.
+            if (start < closeUntil_.load(std::memory_order_relaxed)) {
+                const CloseUpArea part = closeUpArea(ownX, ownY, static_cast<int>(width_), static_cast<int>(height_),
+                                                     kCloseUpShare);
+                const int closeCount =
+                    detector->detect(gpu_.context.Get(), minSure, closeUp.data(), static_cast<int>(Found::kMax), false,
+                                     {part.x, part.y, part.width, part.height});
+                if (closeCount < 0) {
+                    fail("The GPU stopped running the model (it may have been reset)");
+                    return;
+                }
+                count = joinCloseUp(detections.data(), count,
+                                    {closeUp.data(), static_cast<std::size_t>(closeCount)}, part, kCloseUpMargin,
+                                    static_cast<int>(Found::kMax));
+                meter.lap(kCloseUp);
+            }
             if (log) {
                 log->looked(stamp, detections.data(), count);
                 meter.lap(kLog);
@@ -178,7 +220,14 @@ void Recognizer::run(std::stop_token stop) {
             found.count = heuristics->update(timeMs, {detections.data(), static_cast<std::size_t>(count)},
                                              found.things.data(), static_cast<int>(Found::kMax));
             if (deadKind >= 0) {
-                markDeadThings({found.things.data(), static_cast<std::size_t>(found.count)}, deadKind);
+                markDeadThings({found.things.data(), static_cast<std::size_t>(found.count)}, deadKind, ownKind);
+            }
+            if (const Tracked* own = ownKind >= 0 ? ownCharacter({found.things.data(),
+                                                                  static_cast<std::size_t>(found.count)},
+                                                                 ownKind, static_cast<float>(width_))
+                                                  : nullptr) {
+                ownX = own->x + own->width * 0.5f;
+                ownY = own->y + own->height * 0.5f;
             }
             found.image = ++images;
             found_.publish();

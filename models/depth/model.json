@@ -1,0 +1,7 @@
+{
+  "network": "depth-anything/Depth-Anything-V2-Small-hf",
+  "width": 924,
+  "height": 518,
+  "output": "relative inverse depth, larger nearer, half precision",
+  "written": "2026-11-12 19:36:54"
+}

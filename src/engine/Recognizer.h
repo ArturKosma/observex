@@ -124,16 +124,39 @@ public:
     // core/TargetWatch finds which box). From its next look on, while it is followed, it is shown as the model's "dead"
     // kind at least kDeadSure sure, its kind before as the second (so to the snapper, the clip buffer's Recorded
     // things and every reader of found()). Nothing for a model without a "dead" kind. The last kDeadKept ids are kept
-    // (ids are never given to another thing). Any thread.
+    // (an id is never reused, but the tracker can follow another thing under it once two boxes were one: see
+    // unmarkDead). One the tracker shows as the "own" kind is never shown dead (the own
+    // character marked by mistake hid it from the ground finder: 2026-11-16). Any thread.
     void markDead(std::uint32_t id);
+    // `id` is not dead after all (core/TargetWatch read the dead target's plate over another box: the tracker had
+    // handed the corpse's id to a live one, 2026-11-16): shown as the model says again from its next look. Any thread.
+    void unmarkDead(std::uint32_t id);
     static constexpr float kDeadSure = 0.9f;
     static constexpr std::size_t kDeadKept = 8;
+
+    // Close-up looks while the own character is being hit (the user's clip 2026-11-16_14-04-25: an Imp hitting the own
+    // character from right beside it was boxed together with it, as the own character, on a quarter of the looks,
+    // found on its own at 60% on only 14% and called dead on a third of those, so it was never taken for the
+    // attacker). Until `untilQpc` (QueryPerformanceCounter's), each look also looks at a part of the screen
+    // kCloseUpShare of its width and height round the own character (the "own" kind's box on the look before,
+    // core/Ground's ownCharacter), squeezed to the model's size as the whole screen is (so 2x as large, the same
+    // shape). What it finds inside that part, kCloseUpMargin of its size in from each side, replaces what the look at
+    // the whole screen found there; the rest stays the whole screen's. On 24 frames of that clip the live model found
+    // the Imp at least 60% sure on 11 (10 as a monster) this way, against 2 on the whole screen; at least 30% sure on
+    // 19 against 12. The heuristics, the live log and the clip buffer take the joined look as the look. It costs one
+    // more run of the network (about 4 ms) on every look meanwhile. The app calls it each time HP is lost. Any thread.
+    void lookCloser(std::int64_t untilQpc) { closeUntil_.store(untilQpc, std::memory_order_relaxed); }
+    bool lookingCloser() const; // Whether it still is (any thread).
+    static constexpr int kCloseUpShare = 2;          // The part is 1/2 the screen's width and height.
+    static constexpr float kCloseUpMargin = 0.125f;  // Of the part's width and height.
+    static constexpr double kCloseUpSeconds = 3.0;   // How long the app has it look closer after HP was lost.
 
 private:
     void run(std::stop_token stop);
     void fail(std::string message);
-    // markDead's things among `things` (as the heuristics show them) as the model's kind `deadKind`.
-    void markDeadThings(std::span<Tracked> things, int deadKind) const;
+    // markDead's things among `things` (as the heuristics show them) as the model's kind `deadKind`, but not those of
+    // the kind `ownKind` (-1: none).
+    void markDeadThings(std::span<Tracked> things, int deadKind, int ownKind) const;
 
     ComPtr<IDXGIAdapter1> adapter_;
     GpuDevice gpu_;
@@ -152,6 +175,7 @@ private:
     std::atomic<std::size_t> kindAnswers_{0};
     std::array<std::atomic<std::uint32_t>, kDeadKept> dead_{}; // markDead's ids (0: none), oldest overwritten.
     std::atomic<std::size_t> deadNext_{0};
+    std::atomic<std::int64_t> closeUntil_{0}; // lookCloser's.
     std::atomic<State> state_{State::Starting};
     std::atomic<float> progress_{0.0f};
     std::string error_;

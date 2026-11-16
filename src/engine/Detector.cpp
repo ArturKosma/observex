@@ -85,10 +85,11 @@ struct SqueezeConstants {
 // The constants that squeeze `area` of a `width` x `height` image (all of it if its side is 0) to `size`.
 SqueezeConstants squeezeConstants(DetectArea area, unsigned width, unsigned height, unsigned size, bool mirrored) {
     if (area.side <= 0) {
-        area = {0, 0, 0};
+        area = {0, 0, 0, 0};
     }
     const float partWidth = area.side > 0 ? static_cast<float>(area.side) : static_cast<float>(width);
-    const float partHeight = area.side > 0 ? static_cast<float>(area.side) : static_cast<float>(height);
+    const float partHeight = area.side > 0 ? static_cast<float>(area.height > 0 ? area.height : area.side)
+                                           : static_cast<float>(height);
     SqueezeConstants constants{};
     constants.scale[0] = partWidth / static_cast<float>(size);
     constants.scale[1] = partHeight / static_cast<float>(size);
@@ -187,7 +188,7 @@ bool Detector::Impl::enqueueNetwork(void* input) {
 }
 
 Detector::Detector(ID3D11Device* device, IDXGIAdapter* adapter, const fs::path& modelFolder, unsigned width,
-                   unsigned height, std::stop_token stop, std::atomic<float>& progress)
+                   unsigned height, GpuPriority priority, std::stop_token stop, std::atomic<float>& progress)
     : impl_(std::make_unique<Impl>()) {
     Impl& d = *impl_;
     d.width = width;
@@ -297,11 +298,14 @@ Detector::Detector(ID3D11Device* device, IDXGIAdapter* adapter, const fs::path& 
     check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &d.squeeze),
           "CreateComputeShader (detector)");
 
-    // CUDA: a top-priority stream, the input buffer shared from Direct3D, and room for the outputs.
+    // CUDA: a stream (top priority for the reaction path, else the lowest; with priorities off, top as before
+    // 2026-11-16), the input buffer shared from Direct3D, and room for the outputs.
     int lowest = 0;
     int highest = 0;
     cudaCheck(cudaDeviceGetStreamPriorityRange(&lowest, &highest), "cudaDeviceGetStreamPriorityRange");
-    cudaCheck(cudaStreamCreateWithPriority(&d.stream, cudaStreamNonBlocking, highest), "cudaStreamCreate");
+    const bool top = priority == GpuPriority::Reaction || !gpuPrioritiesUsed();
+    cudaCheck(cudaStreamCreateWithPriority(&d.stream, cudaStreamNonBlocking, top ? highest : lowest),
+              "cudaStreamCreate");
     cudaCheck(cudaGraphicsD3D11RegisterResource(&d.tensorResource, d.tensor.Get(), cudaGraphicsRegisterFlagsNone),
               "cudaGraphicsD3D11RegisterResource");
     const std::size_t boxesBytes = static_cast<std::size_t>(d.candidates) * 4 * sizeof(float);
@@ -388,9 +392,15 @@ int Detector::detect(ID3D11DeviceContext* context, float minSure, Detection* fou
 
     // A part of the image: moved (not shrunk) to lie inside it, as tools/train/loot.py cuts its squares.
     if (area.side > 0) {
-        area.side = std::min({area.side, static_cast<int>(d.width), static_cast<int>(d.height)});
+        if (area.height > 0) {
+            area.side = std::min(area.side, static_cast<int>(d.width));
+            area.height = std::min(area.height, static_cast<int>(d.height));
+        } else {
+            area.side = std::min({area.side, static_cast<int>(d.width), static_cast<int>(d.height)});
+            area.height = area.side;
+        }
         area.x = std::clamp(area.x, 0, static_cast<int>(d.width) - area.side);
-        area.y = std::clamp(area.y, 0, static_cast<int>(d.height) - area.side);
+        area.y = std::clamp(area.y, 0, static_cast<int>(d.height) - area.height);
     }
 
     // Squeeze the image (or the part) into the model's input on the GPU.
@@ -446,7 +456,7 @@ int Detector::detect(ID3D11DeviceContext* context, float minSure, Detection* fou
     const float minScore = std::log(minFirst / (1.0f - minFirst));
     // Boxes come as shares of what was squeezed: the image, or the part (then moved to its place in the image).
     const float width = area.side > 0 ? static_cast<float>(area.side) : static_cast<float>(d.width);
-    const float height = area.side > 0 ? static_cast<float>(area.side) : static_cast<float>(d.height);
+    const float height = area.side > 0 ? static_cast<float>(area.height) : static_cast<float>(d.height);
     const float left0 = static_cast<float>(area.x);
     const float top0 = static_cast<float>(area.y);
     std::array<Detection, kMaxCandidates> all;

@@ -70,6 +70,12 @@ constexpr float kDropsSpot = 2.5f;
 //    for kLostMs (the drops picked up, or there were none), or kMaxMs after the death.
 // 2. With no spot, drops the sweep found start a spot round them (lootSquareRound), which follows them while the close
 //    looks find them and ends kLostMs after they were last seen (picked up, or out of view). A kill takes over.
+// 3. While the brain loots (Input::looting; the user asked, 2026-11-16: "making sure theres nothing our character hides
+//    behind"), the ground round the own character's feet: with no spot, a found spot starts there (saying nothing
+//    until a close look finds drops), and the close look stays on the own feet (lootSquareAt round them, the own box's
+//    height as the corpse's size) while no drop was found yet or the drops lie round them; drops found farther are
+//    followed as above. It does not end while looting, so after each camera turn the ground there is looked at on
+//    every other image, not only once the sweep comes by.
 // Each end and each new largest number of drops found on a close look says a line for the log (a spot the sweep
 // started says nothing until a close look found drops there too: one look alone may have been wrong).
 class LootWatch {
@@ -88,6 +94,9 @@ public:
         std::span<const WatchedThing> things; // On the screen now.
         Look close;                    // On the square this asked for.
         Look sweep;                    // On the sweep's square.
+        bool looting = false;          // The brain loots (see 3. above),
+        bool own = false;              // and the own character's box is seen:
+        StatsArea ownBox{};            // this one.
     };
     struct Output {
         LootSquare square{}; // Where to look closely now; empty: nowhere, only the sweep.

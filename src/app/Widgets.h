@@ -30,6 +30,7 @@ enum class Icon : std::uint8_t {
     Plus,        // Add something.
     Folder,      // A folder's outline with its tab: open a saved file (the State tile's Load).
     Refresh,     // A ring with an arrow head going round clockwise: read again (the Skills tab's Refresh).
+    Save,        // A floppy disk: save under a name (the State tile's Save).
 };
 
 // A top-bar button that plainly looks clickable: a rounded border, an icon, then an optional muted caption,

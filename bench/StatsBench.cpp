@@ -248,7 +248,7 @@ int statsBench(int argc, char** argv) {
             for (const statetree::Skill& skill : tree->skills()) {
                 SkillPicture picture;
                 std::snprintf(picture.name.data(), picture.name.size(), "%s", skill.name.c_str());
-                picture.cooldown = skill.cooldown;
+                picture.cooldown = skill.active;
                 picture.side = skill.side;
                 std::vector<std::uint8_t> grey(skill.bgr.size() / 3);
                 for (std::size_t p = 0; p < grey.size(); ++p) {

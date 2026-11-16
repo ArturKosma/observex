@@ -113,7 +113,7 @@ TEST_CASE("the target's death marks its box dead, once") {
     CHECK(out.died);
     CHECK(out.dead == 2);
     CHECK(out.log == "Target died: Imp Elder; box 2: marked dead");
-    CHECK(out.look.id == 0); // Nothing more to look at.
+    CHECK(out.look.id == 2); // Its plate still checked (the tracker may hand its id to a live one).
     for (int i = 0; i < 5; ++i) {
         out = w.step(0.0f);
         CHECK_FALSE(out.died);
@@ -124,10 +124,103 @@ TEST_CASE("the target's death marks its box dead, once") {
     w.things[1] = thing(7, 800);
     out = w.step(0.0f);
     CHECK(out.target == 0);
-    CHECK(out.look.id == 1);
-    out = w.step(0.0f, plateOver(1, 800)); // Asked about 1, read over 7.
+    CHECK(out.look.id == 7); // The box nearest where the corpse was, first.
+    out = w.step(0.0f, plateOver(7, 800));
     CHECK(out.dead == 7);
+    CHECK(out.alive == 0); // Box 2 is gone: nothing to take back.
     CHECK(out.log == "Dead target Imp Elder is box 7: marked dead");
+}
+
+TEST_CASE("a dead mark follows the dead target's plate: the box it is over is marked, the one before let go") {
+    // The user's clip 2026-11-16_14-04-25: an Imp walked over the corpse, the two showed as one box, and when they
+    // parted the tracker kept the corpse's id on the live Imp, the corpse under a new id.
+    Watch w;
+    REQUIRE(w.step(1.0f, plateOver(2, 800)).target == 2);
+    w.step(0.0f, plateOver(2, 800));
+    TargetWatch::Output out = w.step(0.0f, plateOver(2, 800));
+    REQUIRE(out.dead == 2);
+    w.things = {thing(1, 300), thing(2, 1000), thing(7, 800), thing(3, 1300)};
+    // Asked about 2, the plate read over 7.
+    out = w.step(0.0f, plateOver(2, 800));
+    CHECK(out.dead == 7);
+    CHECK(out.alive == 2);
+    CHECK(out.target == 7);
+    CHECK(out.look.id == 7);
+    CHECK(out.log == "Dead target Imp Elder is box 7: marked dead; box 2 is not it: its dead mark taken back");
+    // Said once; the plate back over 2 (the corpse was 2 after all) moves the mark back.
+    out = w.step(0.0f, plateOver(7, 800));
+    CHECK(out.dead == 0);
+    CHECK(out.alive == 0);
+    w.things = {thing(1, 300), thing(2, 800), thing(7, 1000), thing(3, 1300)};
+    out = w.step(0.0f, plateOver(7, 800));
+    CHECK(out.dead == 2);
+    CHECK(out.alive == 7);
+
+    // No plate over the live one kMisses times: looked for again, the boxes nearest where the corpse was first.
+    Watch m;
+    REQUIRE(m.step(1.0f, plateOver(2, 800)).target == 2);
+    m.step(0.0f, plateOver(2, 800));
+    REQUIRE(m.step(0.0f, plateOver(2, 800)).dead == 2);
+    m.things = {thing(1, 300), thing(3, 1300), thing(2, 1000), thing(7, 760)};
+    for (int i = 0; i < TargetWatch::kMisses; ++i) {
+        out = m.step(0.0f, noPlate(2));
+    }
+    CHECK(out.target == 0);
+    CHECK(out.look.id == 7);
+    CHECK(out.alive == 0); // Nothing said yet: no plate seen over another.
+    out = m.step(0.0f, plateOver(7, 760));
+    CHECK(out.dead == 7);
+    CHECK(out.alive == 2);
+
+    // The corpse lost by the tracker (its id gone from the screen) and found under another: nothing to take back.
+    Watch gone;
+    REQUIRE(gone.step(1.0f, plateOver(2, 800)).target == 2);
+    gone.step(0.0f, plateOver(2, 800));
+    REQUIRE(gone.step(0.0f, plateOver(2, 800)).dead == 2);
+    gone.things = {thing(1, 300), thing(7, 800), thing(3, 1300)};
+    out = gone.step(0.0f);
+    out = gone.step(0.0f, plateOver(out.look.id, 800));
+    CHECK(out.dead == 7);
+    CHECK(out.alive == 0);
+}
+
+TEST_CASE("a dead target is never the own character, even with its plate over the own box") {
+    // 2026-11-16: the corpse lay at the own character's feet; after a turn the watch read the dead target's plate
+    // over the own box and marked it dead, which hid the own character from the ground finder.
+    Watch w;
+    w.things = {thing(1, 300), thing(2, 800), thing(5, 1280)};
+    w.things[2].own = true;
+    REQUIRE(w.step(1.0f, plateOver(2, 800)).target == 2);
+    w.step(0.0f, plateOver(2, 800));
+    REQUIRE(w.step(0.0f, plateOver(2, 800)).dead == 2);
+    // The corpse lost (the camera turned): looked for again, never at the own box.
+    w.things = {thing(1, 300), thing(5, 1280)};
+    w.things[1].own = true;
+    TargetWatch::Output out = w.step(0.0f);
+    CHECK(out.target == 0);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(out.look.id == 1);
+        out = w.step(0.0f, plateOver(out.look.id, 1300)); // Asked about 1, the plate read over the own box.
+        CHECK(out.dead == 0);
+        CHECK(out.target == 0);
+    }
+    // The corpse beside the own character, the plate over both: the corpse's.
+    w.things = {thing(5, 1280), thing(9, 1330)};
+    w.things[0].own = true;
+    out = w.step(0.0f, plateOver(9, 1290));
+    CHECK(out.dead == 9);
+    CHECK(out.log == "Dead target Imp Elder is box 9: marked dead");
+    CHECK(w.log.find("box 5") == std::string::npos);
+
+    Watch self; // The own box taken for the target while alive (a plate over it): not marked once it died.
+    self.things[1].own = true;
+    REQUIRE(self.step(1.0f, plateOver(2, 800)).target == 2);
+    self.step(0.0f, plateOver(2, 800));
+    out = self.step(0.0f, plateOver(2, 800));
+    CHECK(out.died);
+    CHECK(out.dead == 0);
+    CHECK(out.target == 0);
+    CHECK(out.look.id != 2);
 }
 
 TEST_CASE("a target never read alive is not said to die, and unknown readings do not end the empty row") {

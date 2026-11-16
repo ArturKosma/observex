@@ -1,2 +1,11 @@
 # Store text files with LF line endings; Git converts them on checkout as configured.
 * text=auto
+
+# Trained weights over GitHub's 100 MB file limit: Git LFS (git lfs install once, then clone as usual).
+models/**/*.pth filter=lfs diff=lfs merge=lfs -text
+# Binary model and map files: never converted.
+*.onnx binary
+*.l2j binary
+*.pgm binary
+*.png binary
+*.jpg binary

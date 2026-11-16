@@ -82,6 +82,8 @@ void MouseCamera::add(const ClipMouse& report) {
     state.turn = turn_;
     state.pitch = pitch_;
     state.turning = turning;
+    wheel_ += report.wheel;
+    state.wheel = wheel_;
     states_.push_back(state);
     while (states_.size() > 2 && states_[1].timeMs < report.timeMs - settings_.keepMs) {
         base_ = states_.front();
@@ -122,6 +124,12 @@ double MouseCamera::lastTurningBefore(double timeMs) const {
     return -1e300;
 }
 
+long long MouseCamera::wheelBy(double timeMs) const {
+    const auto after = std::upper_bound(states_.begin(), states_.end(), timeMs,
+                                        [](double time, const State& state) { return time < state.timeMs; });
+    return after == states_.begin() ? base_.wheel : (after - 1)->wheel;
+}
+
 MouseCamera::View MouseCamera::at(double timeMs) const {
     View view;
     if (states_.empty()) {
@@ -139,6 +147,7 @@ MouseCamera::View MouseCamera::at(double timeMs) const {
     view.pitchBy = pitchBy_;
     view.pitch = static_cast<float>(view.pitchUnits * kUnitRadians);
     view.turning = lastTurningBefore(timeMs) >= timeMs - kConeRestMs;
+    view.wheelNotches = static_cast<double>(wheelBy(timeMs - settings_.wheelLagMs)) / kWheelPerNotch;
     return view;
 }
 

@@ -190,6 +190,17 @@ void GroundFinder::run(std::stop_token stop) {
     double nextFollowMs = -1e300;
     std::uint64_t followedImage = 0;
     std::uint64_t depthGiven = 0; // The depth map last given the follower (its image).
+    // The terrain as last handed out (its version), and where the next one is copied to.
+    std::shared_ptr<const GroundHeights> heights;
+    std::uint64_t heightsVersion = 0;
+    auto spare = std::make_shared<GroundHeights>();
+    const auto takeHeights = [&] {
+        if (follower->heights(heightsVersion, *spare)) {
+            heightsVersion = spare->version;
+            heights = spare->known ? std::shared_ptr<const GroundHeights>(std::move(spare)) : nullptr;
+            spare = std::make_shared<GroundHeights>();
+        }
+    };
     ImageStamp stamp;
     while (!stop.stop_requested()) {
         // Once a second, the numbers to the UI (lock-free).
@@ -207,6 +218,7 @@ void GroundFinder::run(std::stop_token stop) {
                     heuristicsVersion = version;
                     try {
                         follower = heuristics_->makeGround();
+                        heightsVersion = ~std::uint64_t{0}; // Its own numbers: whatever it has is new.
                     } catch (const std::exception&) {
                     }
                 }
@@ -220,6 +232,7 @@ void GroundFinder::run(std::stop_token stop) {
                     depthGiven = hint.depth->image;
                     const std::int64_t depthStart = qpcNow();
                     const GroundDepthNote depth = follower->depth(hint.depth->input(), groundMs(hint.depth->imageQpc));
+                    takeHeights();
                     depthing.add(static_cast<float>(static_cast<double>(qpcNow() - depthStart) * perTick));
                     meter.lap(kDepth);
                     if (depth.measured) {
@@ -264,10 +277,12 @@ void GroundFinder::run(std::stop_token stop) {
                     meter.lap(kTurnGrey);
                     if (grey != nullptr) {
                         follower->head(*grey);
+                        takeHeights(); // Forgotten with the camera.
                         GroundSeen& seen = seen_.writeSlot();
                         seen.camera = follower->camera();
                         seen.image = stamp.number;
                         seen.followed = followedImage;
+                        seen.heights = heights;
                         seen_.publish();
                     }
                     meter.lap(kTurn);
@@ -300,11 +315,13 @@ void GroundFinder::run(std::stop_token stop) {
                 const std::int64_t read = qpcNow();
                 meter.lap(kFollowGrey);
                 const bool fit = grey != nullptr && follower->end(*grey);
+                takeHeights(); // Forgotten with the camera.
                 GroundSeen& seen = seen_.writeSlot();
                 followedImage = stamp.number;
                 seen.camera = follower->camera();
                 seen.image = stamp.number;
                 seen.followed = followedImage;
+                seen.heights = heights;
                 seen_.publish();
                 meter.lap(kFollow);
                 meter.end();

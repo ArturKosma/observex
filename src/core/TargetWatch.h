@@ -10,11 +10,12 @@
 
 namespace observex {
 
-// A character shown on the screen now (the tracker's, the own character left out): its id, which stays while it is
-// followed, and its box on the screen image.
+// A character shown on the screen now (the tracker's): its id, which stays while it is followed, its box on the screen
+// image, and whether it is the own character (core/Ground's ownCharacter).
 struct WatchedThing {
     std::uint32_t id = 0;
     StatsArea box{};
+    bool own = false;
 };
 
 // The target's death, and which box on the screen it is (the user asked, 2026-11-15: "bias the guesser that something
@@ -31,7 +32,17 @@ struct WatchedThing {
 // 3. Died: its HP bar, once read above empty, read empty (not unknown) on kEmptyReadings readings in a row, the target
 //    unchanged (GameStats::target). Once per target. From then on every box found to be the target is to be marked
 //    dead once (the game keeps a dead target selected, its plate up; a box the tracker lost comes back as another),
-//    and it is looked for at most kSearchReadings readings in a row.
+//    and it is looked for at most kSearchReadings readings in a row, the boxes nearest the corpse's last box first.
+//    Never the own character's box (2026-11-16: a corpse at its feet put the dead target's plate over it, so it was
+//    shown dead, and the ground finder, which fits the camera round it, lost it: no grid, no distances, Select
+//    Target turning to stale memories): it is not looked at then, and a plate over it and another box goes to the
+//    other.
+// 4. Dead, its box is still looked at on every reading, as while alive (the user's clip 2026-11-16_14-04-25: an Imp
+//    walked over the corpse it was killed beside, the two showed as one box a moment, and when they parted the tracker
+//    kept the corpse's id on the live Imp; marked dead for good, it was never selected while it hit the own
+//    character). Its plate read over another box (looking at it, or looked for again after kMisses), that box is the
+//    corpse: it is marked dead, and the box marked before, if still on the screen, is not the corpse: its mark is
+//    taken back (Output::alive).
 // A new target (or none), or the same name's HP bar full again after it died (another of that name), starts afresh.
 class TargetWatch {
 public:
@@ -48,6 +59,7 @@ public:
         std::uint32_t target = 0; // The target's box (WatchedThing::id), 0 while not known.
         bool died = false;        // The target died on this reading.
         std::uint32_t dead = 0;   // A box to mark dead now (once each), 0 for none.
+        std::uint32_t alive = 0;  // A box marked dead before that is not the corpse after all: its mark taken back.
         std::string log;          // A line for the log when something happened; empty if nothing did.
     };
 
@@ -63,10 +75,12 @@ public:
 
 private:
     void reset(std::string_view target);
-    // The box nearest under the plate at `plate` (orb to orb), or 0 if none is under it.
-    static std::uint32_t boxUnder(StatsArea plate, std::span<const WatchedThing> things);
-    // The next box to look at while looking for the target's: one not looked at since the search began.
-    PlateLook nextLook(std::span<const WatchedThing> things);
+    // The box nearest under the plate at `plate` (orb to orb), or 0 if none is under it; with `notOwn`, never the
+    // own character's.
+    static std::uint32_t boxUnder(StatsArea plate, std::span<const WatchedThing> things, bool notOwn);
+    // The next box to look at while looking for the target's: one not looked at since the search began (with `near`,
+    // the one whose middle is nearest its middle; else the first); with `notOwn`, never the own character's.
+    PlateLook nextLook(std::span<const WatchedThing> things, bool notOwn, const StatsArea* near = nullptr);
 
     std::uint64_t image_ = 0;
     Output last_{};                     // What the last reading gave (its look and box), for the same image again.
@@ -79,7 +93,9 @@ private:
     int empty_ = 0;                     // Readings in a row its HP bar read empty.
     bool died_ = false;
     int searching_ = 0;                 // Readings in a row it was looked for since it died.
-    std::vector<std::uint32_t> marked_; // Its boxes said to be marked dead.
+    std::vector<std::uint32_t> marked_; // Its boxes said to be marked dead (a mark taken back: no longer).
+    std::uint32_t corpse_ = 0;          // The box marked dead last, 0 for none,
+    StatsArea corpseAt_{};              // and where it was last seen.
 };
 
 } // namespace observex

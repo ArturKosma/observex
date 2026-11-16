@@ -272,6 +272,37 @@ void drawIcon(ImDrawList* drawList, Icon icon, ImVec2 centre, ImU32 color, const
                           ImVec2(right, top + tab + std::round(3.0f * dpi)), color, l.stroke);
         break;
     }
+    case Icon::Save: {
+        // A floppy disk: its outline with the top right corner cut, the shutter at its top, the label at its bottom.
+        const float half = std::round(7.0f * dpi);
+        const float left = centre.x - half;
+        const float right = centre.x + half;
+        const float top = centre.y - half;
+        const float bottom = centre.y + half;
+        const float cut = std::round(3.5f * dpi);
+        drawList->PathLineTo(ImVec2(left, top));
+        drawList->PathLineTo(ImVec2(right - cut, top));
+        drawList->PathLineTo(ImVec2(right, top + cut));
+        drawList->PathLineTo(ImVec2(right, bottom));
+        drawList->PathLineTo(ImVec2(left, bottom));
+        drawList->PathStroke(color, ImDrawFlags_Closed, l.stroke);
+        const float shutterLeft = left + std::round(3.5f * dpi);
+        const float shutterRight = right - std::round(5.0f * dpi);
+        const float shutterBottom = top + std::round(4.5f * dpi);
+        drawList->PathLineTo(ImVec2(shutterLeft, top));
+        drawList->PathLineTo(ImVec2(shutterLeft, shutterBottom));
+        drawList->PathLineTo(ImVec2(shutterRight, shutterBottom));
+        drawList->PathLineTo(ImVec2(shutterRight, top));
+        drawList->PathStroke(color, 0, l.stroke);
+        const float labelInset = std::round(3.0f * dpi);
+        const float labelTop = bottom - std::round(6.0f * dpi);
+        drawList->PathLineTo(ImVec2(left + labelInset, bottom));
+        drawList->PathLineTo(ImVec2(left + labelInset, labelTop));
+        drawList->PathLineTo(ImVec2(right - labelInset, labelTop));
+        drawList->PathLineTo(ImVec2(right - labelInset, bottom));
+        drawList->PathStroke(color, 0, l.stroke);
+        break;
+    }
     case Icon::None:
         break;
     }

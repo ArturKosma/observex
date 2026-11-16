@@ -122,6 +122,8 @@ ClipText readClipText(std::string_view text) {
             clip.grounds.push_back(ground);
         } else if (ClipDepthLine depth; readDepth(line, depth.image, depth.timeMs, depth.map)) {
             clip.depths.push_back(depth);
+        } else if (ClipHeightsLine heights; readHeights(line, heights.image, heights.timeMs, heights.terrain)) {
+            clip.heights.push_back(heights);
         } else if (ClipDropsLine drops; readDrops(line, drops.image, drops.doneMs, drops.kill, drops.square,
                                                   drops.drops)) {
             clip.drops.push_back(std::move(drops));
@@ -154,6 +156,12 @@ unsigned long long recordedDepth(std::span<const ClipDepthLine> lines, double ti
     const auto after = std::upper_bound(lines.begin(), lines.end(), timeMs,
                                         [](double ms, const ClipDepthLine& line) { return ms < line.timeMs; });
     return after == lines.begin() ? 0 : (after - 1)->map;
+}
+
+unsigned long long recordedHeights(std::span<const ClipHeightsLine> lines, double timeMs) {
+    const auto after = std::upper_bound(lines.begin(), lines.end(), timeMs,
+                                        [](double ms, const ClipHeightsLine& line) { return ms < line.timeMs; });
+    return after == lines.begin() ? 0 : (after - 1)->terrain;
 }
 
 const ClipDropsLine* recordedDrops(std::span<const ClipDropsLine> lines, double timeMs) {

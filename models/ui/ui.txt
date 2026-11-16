@@ -1,0 +1,79 @@
+# observex: where the game draws its interface (core/UiLayout reads this; tools/ui/make_anchors.py cuts the anchors).
+# Screen pixels of the screen it was measured on (2560 x 1440, Lineage 2 Reborn, the user's UI scale).
+#
+# anchor NAME MIN_SCORE W H from CLIP FIRST LAST X Y [from CLIP FIRST LAST X Y]...
+#   A small picture found anywhere on the screen: NAME.pgm (its grey pixels, the mean over frames FIRST to LAST of
+#   each clip named, where it sat at X Y, W x H) and NAME-mask.pgm (255 where those pixels never changed: the
+#   interface's own drawing; 0 where the world shows through, so it is never compared). Found where the masked
+#   pixels match at least MIN_SCORE (correlation, 1 = the same). observex reads only NAME and MIN_SCORE; the rest is
+#   for make_anchors.py. Cut it from frames where it stays put and the camera moves, or from two places with
+#   different backgrounds, else the world behind it counts as its own.
+# piece NAME X0 Y0 X1 Y1 at ANCHOR AX AY
+#   A piece of the interface: wherever ANCHOR is found, a piece NAME whose rectangle sits where X0 Y0 X1 Y1 (just
+#   past the last pixel) sat when ANCHOR was at AX AY, on the same image.
+#   Indented lines under it stretch a side to another anchor on that image, e.g. "right resize-corner 417 824": the
+#   nearest resize-corner to the right on the same row (within 3 pixels) moves the piece's right side with it, so a
+#   resized window is covered. Sides: left, right (same row), top, bottom (same column); "right?" if it may be missing
+#   (then the side stays as measured), otherwise the piece is only there when it is found, or hidden: a framed window
+#   begins across the way it was looked for, at most the piece's measured size past where the side was measured
+#   (then the side ends where that window begins: the piece's visible part). A search stops at the next ANCHOR of the
+#   same piece that way (the next window's corner). The side's anchor is looked for as far from the piece's nearer
+#   edge as when measured (a bottom corner stays with the bottom). Several lines for one side are tried in order: the
+#   first found sets it (the chat's top-right corner, else its bottom-right one); put a bottom line first if a right
+#   one sits at the bottom. "right line" stretches the side to the nearest frame
+#   line that way instead (a 1-pixel light line as framed windows have, along the piece for 40 pixels or more, at
+#   least 40 pixels from the other side), for an edge that is a frame line where no anchor holds (the target window).
+# Framed windows (a 1-pixel light line with darker pixels on both sides, all round, e.g. Map, Skills, Quest) need no
+# line here: observex finds them by their frames.
+
+anchor arrow-up 0.80 18 18 from 2026-11-12_11-34-03 1 1201 6 837
+anchor arrow-down 0.80 18 18 from 2026-11-12_11-34-03 1 1201 6 952
+anchor resize-corner 0.80 18 18 from 2026-11-12_11-34-03 1 1201 417 824
+anchor chat-icons 0.80 24 47 from 2026-11-12_11-34-03 1 1201 4 1363
+anchor chat-corner 0.80 24 56 from 2026-11-12_11-34-03 1 1201 412 1356 from 2026-11-12_11-55-54 554 1189 609 1356 from 2026-11-12_14-21-53 1 1205 560 1356
+anchor hotbar-row 0.80 36 20 from 2026-11-12_11-34-03 1 1201 931 1181 from 2026-11-12_11-34-03 1 1201 931 1239 from 2026-11-12_11-34-03 1 1201 931 1355
+anchor status-left 0.90 28 60 from 2026-11-12_11-34-03 1 1201 2 44
+anchor status-right 0.80 38 24 from 2026-11-12_11-34-03 1 1201 190 6
+anchor status-labels 0.90 22 28 from 2026-11-12_11-34-03 1 1201 34 53 from 2026-11-15_22-08-21 1 1300 34 53 from 2026-11-15_23-08-49 1 1300 34 53 keep 80 200
+anchor bar-left 0.80 28 26 from 2026-11-12_11-34-03 1 1201 4 1414
+anchor target-left-up 0.96 18 18 from 2026-11-12_11-55-54 1075 1189 1076 6 from 2026-11-14_14-47-58 1 1200 1076 6
+anchor target-left-down 0.96 18 18 from 2026-11-12_11-55-54 880 990 1076 6
+anchor menu-exit 0.80 28 60 from 2026-11-12_11-55-35 880 1050 2354 1244
+anchor compass 0.80 30 28 from 2026-11-12_11-34-03 1 1201 2058 9 from 2026-11-12_13-38-43 1 1211 2058 9 from 2026-11-12_11-55-54 1 1189 2058 9
+anchor buttons-corner 0.80 40 40 from 2026-11-12_11-34-03 1 1201 2354 1300 from 2026-11-12_11-55-54 1 1189 2354 1300 from 2026-11-11_23-41-18 1 1204 2354 1300
+anchor buttons-end 0.80 40 40 from 2026-11-12_11-34-03 1 1201 2512 1365 from 2026-11-12_11-55-54 1 1189 2512 1365 from 2026-11-11_23-41-18 1 1204 2512 1365
+anchor cast-left 0.80 24 34 from 2026-11-12_23-25-45 590 1060 1126 1054 unlike 540 575
+
+piece Messages 0 824 435 985 at arrow-up 6 837
+  right resize-corner 417 824
+  bottom arrow-down 6 952
+piece Chat 0 990 435 1414 at arrow-up 6 1001
+  bottom chat-icons 4 1363
+  right resize-corner 417 990
+  right chat-corner 412 1356
+piece Hotbar 929 1181 1569 1239 at hotbar-row 931 1181
+piece Status 0 0 229 105 at status-left 2 44
+  right? status-right 190 6
+# The Status window again by its bars' "HP" and "MP" letters (white strokes, dark outline; the bars' colours left out):
+# status-left holds the bars' left ends, so it lost the window with a bar empty (2026-11-15: the XP at 0.04% after a
+# level up). Its window and level box are see-through and its bracket is the target window's too.
+piece Status 0 0 229 105 at status-labels 34 53
+  right? status-right 190 6
+piece Target 1076 0 1501 100 at target-left-up 1076 6
+  right line
+piece Target 1076 0 1299 100 at target-left-down 1076 6
+  right line
+piece Menu 2350 830 2560 1305 at menu-exit 2354 1244
+piece Bar 0 1414 2560 1440 at bar-left 4 1414
+# The cast bar over the hotbar, only while a skill is cast (2026-11-12 night: its left end, the bar's light blue fill
+# growing to its right; stats.txt's cast line reads how far).
+piece Casting 1126 1054 1426 1088 at cast-left 1126 1054
+# The minimap is a framed window; this holds it where its frame is not seen (bright sky behind it, 2026-11-12). Its
+# compass sits just inside the frame, so where the window is found the compass is inside it and the window takes
+# the name Minimap (2026-11-15).
+piece Minimap 2053 4 2555 507 at compass 2058 9
+# The buttons at the bottom right (Character, Inventory, ...): no frame of their own, only their icons' (2026-11-12:
+# found as windows of icon frames, their corner lost where an icon broke the line).
+piece Buttons 2354 1301 2560 1414 at buttons-corner 2354 1300
+# The same by the last button, for when a tooltip covers the first's corner (the mouse on a button).
+piece Buttons 2354 1301 2560 1414 at buttons-end 2512 1365

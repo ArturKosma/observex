@@ -12,8 +12,9 @@
 extern "C" {
 
 // 5: GameGauge's at and key (skills' shortcuts, 2026-11-15). 6: setLook and GameStats::plate (Select Target's name
-// plate, 2026-11-15). 7: GameStats::minimap and location (the Geodata flag's position, 2026-11-15).
-inline constexpr std::uint32_t kObservexStatsAbi = 7;
+// plate, 2026-11-15). 7: GameStats::minimap and location (the Geodata flag's position, 2026-11-15). 8: GameStats::pickups
+// (items and adena picked up, for the Log, 2026-11-16).
+inline constexpr std::uint32_t kObservexStatsAbi = 8;
 
 struct ObservexStatsApi {
     std::uint32_t abi;       // kObservexStatsAbi when the DLL was built.

@@ -45,6 +45,11 @@ public:
     static constexpr int kBottomUnits = -16384;
     static constexpr double kLagMs = 13.0;
     static constexpr double kSpreadMs = 12.0;
+    // A wheel report's zoom shows on the frames captured from about this long after it, whole at once (the user's
+    // clips 2026-11-16_09-06-57 and 09-07-58: 11 of 12 lone notches first showed 16.8 to 18.9 ms after their report,
+    // and the own box was as tall as it stays from that frame on).
+    static constexpr double kWheelLagMs = 18.0;
+    static constexpr int kWheelPerNotch = 120; // Raw Input's wheel delta for one notch.
     // Live, the reports kept (older ones are only summed).
     static constexpr double kKeepMs = 3000.0;
     // The cone is taken only while no counts turned the camera this long before its image (it is drawn about 25 ms
@@ -76,6 +81,7 @@ public:
         int bottomUnits = kBottomUnits;
         double lagMs = kLagMs;
         double spreadMs = kSpreadMs;
+        double wheelLagMs = kWheelLagMs;
         double keepMs = kKeepMs; // A clip's: as long as it is.
     };
     MouseCamera() = default;
@@ -104,6 +110,9 @@ public:
         float yaw = 0.0f;   // Radians clockwise from north (the cone's), -pi to pi.
         float pitch = 0.0f; // Radians, + down (GroundCamera::pitch).
         double turned = 0.0; // turnUnits in radians.
+        // The wheel's notches the game has taken by the frame (+ away from the user: zooming out; summed since the
+        // first report): the game zooms only by them (core/Ground's ZoomHold; the user, 2026-11-16).
+        double wheelNotches = 0.0;
     };
     // The camera on a frame captured at `timeMs`.
     View at(double timeMs) const;
@@ -129,10 +138,12 @@ private:
         long long turn = 0;   // After it: units turned and the pitch.
         int pitch = 0;
         bool turning = false; // It turned or tilted the camera.
+        long long wheel = 0;  // The wheel's deltas summed since the first report, with it.
     };
     // The state the game had taken by `timeMs` (between the two reports around it).
     void stateAt(double timeMs, long long& turn, int& pitch) const;
     double lastTurningBefore(double timeMs) const;
+    long long wheelBy(double timeMs) const; // The wheel's sum of the reports up to `timeMs`.
     void shiftPitch(int units); // The pitch was off: all states moved.
     void closeRest();
 
@@ -154,6 +165,7 @@ private:
     int pinPush_ = 0; // Units pushed past the limit it is at,
     int pinNeed_ = 0; // and how far it must be to be pinned (how far off the pitch may be).
     double lastTurningMs_ = -1e300;
+    long long wheel_ = 0;
     // The yaw: the cone's heading less the counts' turn (radians), the middle of the last kRests rests' (each the
     // middle of its cones).
     bool yawKnown_ = false;
@@ -216,6 +228,8 @@ inline void mouseHints(const MouseCamera::View& view, GroundHints& hints) {
     hints.mouseTurned = view.turned;
     hints.mouseYaw = view.yaw;
     hints.mousePitch = view.pitch;
+    hints.wheelWatched = view.known;
+    hints.wheelNotches = view.wheelNotches;
 }
 
 // What the Stats tab's Camera card shows of `view` (the counts on the frame shown), in degrees, with how far off the

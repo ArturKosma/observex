@@ -28,6 +28,7 @@ BoxSnapper::BoxSnapper(const Screen& screen, ImageChannel& channel, std::shared_
     : heuristics_(std::move(heuristics)), width_(channel.width()), height_(channel.height()) {
     const Screen own = findOnOwnAdapter(screen); // So this device cannot hold up the others.
     gpu_ = createGpuDevice(own.adapter.Get());
+    setGpuPriority(gpu_.device.Get(), GpuPriority::Reaction);
     reader_ = std::make_unique<ImageReader>(gpu_.device.Get(), channel);
     thread_ = std::jthread([this](std::stop_token stop) { run(stop); });
 }

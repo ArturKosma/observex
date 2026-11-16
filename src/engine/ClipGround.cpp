@@ -31,12 +31,32 @@ ClipGround::~ClipGround() {
     }
 }
 
+const GroundHeights* heightsAmong(std::span<const ClipHeights> heights, double timeMs) {
+    const auto after = std::upper_bound(heights.begin(), heights.end(), timeMs,
+                                        [](double ms, const ClipHeights& line) { return ms < line.timeMs; });
+    return after == heights.begin() ? nullptr : (after - 1)->heights.get();
+}
+
 std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& follower,
                                              const std::filesystem::path& video, const ClipText& clip,
                                              const Guesses& shown, UiLayout* layout, std::stop_token stop,
                                              std::atomic<float>* progress, Stats* stats, bool notes,
-                                             std::vector<ClipCameraLine>* mouseCameras) {
+                                             std::vector<ClipCameraLine>* mouseCameras,
+                                             std::vector<ClipHeights>* heights) {
     follower.clear();
+    // The terrain on each frame it changed on, as the ground finder hands it out live.
+    if (heights != nullptr) {
+        heights->clear();
+    }
+    std::uint64_t heightsVersion = ~std::uint64_t{0};
+    auto spare = std::make_shared<GroundHeights>();
+    const auto noteHeights = [&](double timeMs) {
+        if (heights != nullptr && follower.heights(heightsVersion, *spare)) {
+            heightsVersion = spare->version;
+            heights->push_back({timeMs, spare->known ? std::shared_ptr<const GroundHeights>(std::move(spare)) : nullptr});
+            spare = std::make_shared<GroundHeights>();
+        }
+    };
     ClipReader reader(device, video);
     GreyMaker greys(device, reader.width(), reader.height(), 1);
     ComPtr<ID3D11DeviceContext> context;
@@ -168,6 +188,7 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
                 GroundCamera camera = follower.camera();
                 camera.timeMs = timeMs;
                 cameras.push_back(camera);
+                noteHeights(timeMs);
             }
             counted.headMs +=
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - headStart).count();
@@ -235,6 +256,7 @@ std::vector<GroundCamera> ClipGround::follow(ID3D11Device* device, Grounding& fo
         GroundCamera camera = follower.camera();
         camera.timeMs = timeMs;
         cameras.push_back(camera);
+        noteHeights(timeMs);
 
         const GroundNote note = follower.note();
         anchorMouse(mouse, timeMs, note, camera);
@@ -290,7 +312,7 @@ void ClipGround::run(std::stop_token stop, ComPtr<IDXGIAdapter1> gpu) {
         layout.load(uiFolder_, nullptr); // Only framed windows if it cannot be read, as live.
         const GpuDevice device = createGpuDevice(gpu.Get(), true);
         cameras_ = follow(device.device.Get(), *ground_, video_, *clip_, shown_, &layout, stop, &progress_, nullptr,
-                          false, &mouseCameras_);
+                          false, &mouseCameras_, &heights_);
         state_.store(State::Done, std::memory_order_release);
     } catch (const std::exception& e) {
         error_ = e.what();

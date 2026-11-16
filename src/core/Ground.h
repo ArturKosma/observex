@@ -113,6 +113,12 @@ std::optional<float> distanceForOwnBottom(const GroundCamera& camera, float bott
 // its width), at least kGroundOwnSure sure; null if none.
 inline constexpr float kGroundOwnSure = 0.5f;
 const Tracked* ownCharacter(std::span<const Tracked> things, int ownKind, float width);
+// Whether an interface piece (`windows`, core/UiLayout's) hides the own character's feet: its box (from `top` to
+// `bottom`, screen rows) starts above a piece across the screen's `middleX` and ends at most kFeetHiddenSlack above
+// its top edge, or into it. Its bottom is then the piece's edge, not the feet: zoomed in, the hotbar cut the box at
+// its top row and put the camera 1.5 own heights too far (clips 2026-11-16_09-06-57 and 09-07-58).
+inline constexpr float kFeetHiddenSlack = 4.0f;
+bool ownFeetHidden(float top, float bottom, float middleX, std::span<const GreyArea> windows);
 
 // A patch of the screen found again on a later image: its middle on the first and on the second, in pixels.
 struct GroundMatch {
@@ -120,6 +126,73 @@ struct GroundMatch {
     float y0 = 0.0f;
     float x1 = 0.0f;
     float y1 = 0.0f;
+};
+
+// The camera's distance moves only by the mouse's wheel (the user, 2026-11-16, on clip 2026-11-16_00-02-01: the ring
+// round the feet "sinusoidally grows and gets smaller, making the whole grid unstable ... it should only grow when we
+// zoom in"; then "you could listen to the scroll and calculate how much we move in/out"). The own character's box,
+// which says the distance, is as tall as its pose: running, it went from 134 to 255 pixels tall and back about three
+// times a second, and the distance drawn swung 13% either way with the wheel never turned. So the distance is the
+// middle of every distance the box said (of the last kKept, as logs; on that clip 1.2% either way after the first
+// 1.5 s), and each notch of the wheel moves it and them kStep (measured on the user's clips 2026-11-16_09-06-57 and
+// 09-07-58, 17 notches between steady boxes: the game's zoom is whole on the first frame that shows it, about
+// MouseCamera::kWheelLagMs after the report, and each notch went 0.64 to 0.98 own heights, 0.85 on average, nearer
+// and farther alike, by the box's bottom at 18 to 53 degrees down; a ratio fitted worse, 0.81 to 0.94 a notch).
+// Nearer than kFineBelow the notches come kFineStep (looking straight down, by the box's width: 1.18, 0.99, 0.80,
+// 0.60, 0.37 in, 1.35, 1.51, 1.67, 1.80, 2.66 out), down to kNearest; no farther than kFarthest (both clips stopped
+// at 9.8 to 10.1 looking down 19 to 25 degrees; the box put it farther looking down steeper, which is not followed).
+// Notches past a limit go for nothing, as in the game. After a notch the box is not taken for kSettleMs (the
+// tracker's box leads for two frames after a jump), and only the last kAfterStep distances are kept, moved: if the
+// game went otherwise the box's own say outweighs them a third of a second on (keeping 8, the replays of both clips
+// were off a little longer). A box saying nearer than kNearest or farther than kFarthest is taken as there (still
+// above or below the middle: it moves only if most are beyond): looking down 50 degrees at the farthest notch it said
+// 19.8 (its width said a sixth farther than at 19 degrees, the box's bottom twice as far; the tree's branches round
+// the camera), and held there the distance was a third too far for half a second after tilting back (clip 09-07-58,
+// 8.3 to 8.8 s). Left out instead, the running clip 2026-11-15_23-34-30 swung 2.6% either way, not 2.1. The box
+// puts the camera farther the steeper it looks (at 50 degrees 10 to 18% farther than at 18 at the same notch), which
+// the middle follows only slowly; kept for a shorter time (64), running pulsed again (2.7% either way, not 1). The motion fit and the search keep it
+// (GroundFit::motion and searched, heuristics/GroundMotion's find). It outlasts the camera being lost and found
+// again (GroundFit::reset): the wheel did not turn, so the distance is the same. The wheel not watched (a clip saved
+// before the mouse was), the distance follows the box as before.
+class ZoomHold {
+public:
+    static constexpr float kStep = 0.85f;      // Own heights a notch,
+    static constexpr float kFineBelow = 1.6f;  // and nearer than this kFineStep.
+    static constexpr float kFineStep = 0.2f;
+    static constexpr float kNearest = 0.4f;
+    static constexpr float kFarthest = 10.0f;
+    static constexpr double kSettleMs = 40.0;
+    static constexpr int kAfterStep = 4;       // About a quarter of a second of follows at 15 a second.
+    static constexpr int kKept = 512;          // About 34 s of them.
+    // The image at `timeMs`: whether the wheel is watched, and its notches the game has taken by then (GroundHints'
+    // wheel). Moves the distance held by the notches since the last image (from `current`, the camera's, if nothing
+    // was taken yet; 0 unknown); returns whether it did.
+    bool wheel(bool watched, double notches, double timeMs, float current);
+    // The wheel is watched: the distance holds (once anything said it).
+    bool holds() const { return holds_; }
+    // A distance the own character's box said on the image at `timeMs` (own heights), taken while it holds.
+    void take(float distance, double timeMs);
+    // The middle of the distances taken, moved by the notches since; none before the first.
+    std::optional<float> distance() const;
+    int samples() const { return count_; }
+    void clear() { *this = ZoomHold(); }
+    // `distance` moved by `notches` (+ farther): kStep each (kFineStep nearer than kFineBelow), kNearest to kFarthest
+    // (beyond one, only back towards it).
+    static float stepped(float distance, double notches);
+
+private:
+    void push(float log);
+    void keepLast(float shift); // Only the last kAfterStep, moved by `shift` (a log).
+    void middle(); // middle_ from the logs.
+
+    bool holds_ = false;
+    bool counted_ = false; // notches_ is the last image's.
+    double notches_ = 0.0;
+    double settleMs_ = -1e300; // The box is taken again from then on.
+    std::array<float, kKept> logs_{}; // The logs of the distances taken, the oldest at next_ once full.
+    int count_ = 0;
+    int next_ = 0;
+    float middle_ = 0.0f; // Their middle (a log).
 };
 
 // Follows the camera: the pitch from the ground's motion, the distance from the own character's box.
@@ -168,9 +241,19 @@ public:
     };
     static constexpr int kMotions = 7;
 
+    // The mouse's wheel on the image at `timeMs` (GroundHints' wheel; each image, before own()): its notches move the
+    // distance held (ZoomHold), and the camera's with it at once.
+    void wheel(bool watched, double notches, double timeMs);
+    // The distance held: the middle of the own boxes', taken at a measured pitch, moved by the wheel's notches since;
+    // none before the first (the distance then as before), or while the wheel is not watched.
+    std::optional<float> heldDistance() const;
+    const ZoomHold& zoom() const { return zoom_; }
     // The own character's box on the screen at `timeMs` (milliseconds, any clock), from `top` to `bottom`, on a
-    // screen `width` x `height`. Starts the camera at kGroundStartPitch if it is unknown.
-    void own(float top, float bottom, float width, float height, double timeMs);
+    // screen `width` x `height`. Starts the camera at kGroundStartPitch if it is unknown (at the distance held, if
+    // one is). While the wheel is watched, what the box says at a measured pitch is taken into the distance held
+    // (ZoomHold::take) and the distance is that; else it follows the box over kDistanceSmoothMs.
+    // `feetSeen` false (ownFeetHidden): the box keeps the camera known but says no distance.
+    void own(float top, float bottom, float width, float height, double timeMs, bool feetSeen = true);
     // The own character not seen on the image at `timeMs`: forgets the camera kKeepMs after it was last.
     void unseen(double timeMs) {
         if (camera_.known && timeMs - ownMs_ > kKeepMs) {
@@ -209,6 +292,10 @@ public:
     static constexpr double kKnownTurnSpread = 0.01;
     static constexpr double kKnownTiltSpread = 0.02;
     static constexpr double kHeldPitchSpread = 0.005;
+    // While the distance holds (heldDistance()), the fit's distance at the second image is held to it this tightly
+    // (a log), and at the first to the one given (the camera's then: a notch between moved it), and the own box counts
+    // for nothing: its bob would only move into the pitch instead.
+    static constexpr double kHeldDistanceSpread = 0.001;
     bool motion(std::span<const GroundMatch> matches, double firstMs, double secondMs, const Start& start);
     // When motion() did not fit (too few matches, or too few agreeing: in the fastest turns the image is blurred), the
     // motion heuristics/GroundMotion's search found instead: the ground turned `turn` round the feet after sliding
@@ -268,7 +355,14 @@ public:
     int lastAgreeing() const { return lastAgreeing_; }
     float lastMiss() const { return lastMiss_; }
     Motion lastMotion() const { return lastMotion_; }
-    void reset() { *this = GroundFit(); }
+    // Forgets the camera, but not the distance held: the wheel did not turn, so it is the same when found again.
+    void reset() {
+        const ZoomHold zoom = zoom_;
+        *this = GroundFit();
+        zoom_ = zoom;
+    }
+    // Forgets everything (another screen, another clip).
+    void forget() { *this = GroundFit(); }
 
 private:
     struct OwnSeen {
@@ -298,6 +392,7 @@ private:
     float lastMiss_ = 0.0f;
     Motion lastMotion_ = Motion::NoCamera;
     bool headed_ = false; // The yaw has come from the minimap (head()).
+    ZoomHold zoom_;
 };
 
 // What following the camera needs to know of an image besides its pixels. Plain data: it goes into
@@ -320,6 +415,12 @@ struct GroundHints {
     double mouseTurned = 0.0;
     float mouseYaw = 0.0f;
     float mousePitch = 0.0f;
+    // The mouse's wheel (since 2026-11-16, ABI 12): whether it is watched, and its notches the game has taken by the
+    // image (core/MouseCamera's wheelNotches): the game's camera comes nearer or goes farther only by them, so the
+    // camera's distance holds between them and moves by them (ZoomHold). Not watched (a clip saved before the mouse
+    // was), as before it.
+    bool wheelWatched = false;
+    double wheelNotches = 0.0;
 };
 
 // How following went on the last image (F3's numbers, the bench's notes). Plain data, as GroundHints.
@@ -353,6 +454,9 @@ struct GroundNote {
     float turnSpread = 0.0f;
     float turnHoldSpread = 0.0f;
     float turnMs = 0.0f; // How long it took (milliseconds).
+    // The distance held (the wheel watched: ZoomHold), the middle of this many own boxes.
+    bool zoomHeld = false;
+    int zoomSamples = 0;
 };
 
 // How a depth map went (Grounding::depth; F3's numbers, the bench's notes). Plain data, as GroundHints.
@@ -363,7 +467,106 @@ struct GroundDepthNote {
     float straight = 0.0f; // how far its rows were off the line (of their range),
     float then = 0.0f;     // the camera's pitch on the map's image,
     float pulled = 0.0f;   // and how far it was off (radians): the camera tilts there over the next images.
+    // The terrain (GroundHeights, heuristics/DepthTerrain): whether the map went into it, and if so its scale and
+    // offset fitted to the flat ground round the feet (network = scale x inverse depth + offset, inverse depth in
+    // 1 / own heights), over how many samples, how far they were off it (of its range), and how many cells it said.
+    bool shaped = false;
+    float shapeScale = 0.0f;
+    float shapeOffset = 0.0f;
+    int shapeSamples = 0;
+    float shapeMiss = 0.0f;
+    int shapeCells = 0;
 };
+
+// The terrain under the grid (the user asked, 2026-11-16: "the grid points should wrap around terrain which we can
+// get the shape of from the depth"): how high the ground is in cells of kCell own heights on the ground's own map
+// (GroundCamera's yaw and feet), a square of kCells each way round where the feet were, made from the depth network's
+// maps (heuristics/DepthTerrain). Heights are own heights on one level for the whole square (the feet's when it was
+// begun): the camera's feet are at the ground's height under them, so a point is groundHeight() above them. Where no
+// map saw the ground it is filled from round it, and towards the flat ground through the feet farther out. Plain
+// data: it comes out of observex_heuristics.dll (heuristics/Abi).
+struct GroundHeights {
+    static constexpr int kCells = 128;
+    static constexpr float kCell = 0.5f;
+    std::uint64_t version = 0; // Another number each time it changes; 0: none yet.
+    bool known = false;        // Some map has said it (else every height is the flat ground's).
+    double timeMs = 0.0;       // The image of the newest map in it.
+    float firstX = 0.0f;       // The ground's map point of cell (0, 0)'s middle (own heights); cell (x, y) is kCell x
+    float firstY = 0.0f;       // and y farther along.
+    std::array<float, kCells * kCells> height{}; // Row by row (y), own heights.
+    std::array<std::uint8_t, kCells * kCells> seen{}; // How surely: 0 never seen (filled), 255 seen well many times.
+    // What the newest map in it saw in front (since 2026-11-16: the user asked to hide the grid behind trunks and hill
+    // crests): for each cell of its screen, how far ahead of `frontCamera`'s eye (the camera on that map's image; not
+    // known: nothing) a point there can be and still be seen, farther being behind what the map saw there (what it
+    // saw and the depth's doubt: heuristics/DepthTerrain), as frontCode() (0: nothing said there: the interface, the
+    // sky, too far). A pixel (x, y) of frontCamera's screen is in cell (x times frontPerPixelX, y times
+    // frontPerPixelY), rounded down, below frontColumns and frontRows; row by row. `frontFeetLevel`: the level its
+    // feet were on (heightOnMap's).
+    static constexpr int kFrontColumns = 320;
+    static constexpr int kFrontRows = 180;
+    GroundCamera frontCamera;
+    float frontFeetLevel = 0.0f;
+    float frontPerPixelX = 0.0f;
+    float frontPerPixelY = 0.0f;
+    int frontColumns = 0;
+    int frontRows = 0;
+    std::array<std::uint8_t, kFrontColumns * kFrontRows> front{};
+};
+// GroundHeights::front's codes: how far ahead of the eye (own heights) on a log scale from kFrontNearest (code 1;
+// nearer is 1 too) to kFrontFarthest (255); farther is 0, nothing.
+inline constexpr float kFrontNearest = 0.25f;
+inline constexpr float kFrontFarthest = 400.0f;
+std::uint8_t frontCode(float ahead);
+float frontAhead(std::uint8_t code);
+// Whether the newest map in `heights` saw something in front of the ground's map point (mapX, mapY) on `level`
+// (heightOnMap's levels): a trunk, a wall, a crest the point is behind.
+bool groundHidden(const GroundHeights& heights, float mapX, float mapY, float level);
+// The level of `heights` at the ground's map point (mapX, mapY), between its cells; the nearest edge's outside them.
+float heightOnMap(const GroundHeights& heights, float mapX, float mapY);
+// How far the ground at map point (mapX, mapY) is above `camera`'s feet (own heights); 0 where `heights` is not known.
+float groundHeight(const GroundHeights& heights, const GroundCamera& camera, float mapX, float mapY);
+// The ground's map point `right` and `away` own heights from `camera`'s feet (mapToGround's other way).
+void groundToMap(const GroundCamera& camera, float right, float away, float& mapX, float& mapY);
+
+// The grid the Show flag Ground draws (app/Overlay, the bench's frames): cells kGridCell own heights wide (about
+// 2.5 m) on the ground's map, kGridCells each way from the cell under the feet, each cell's side in kGridSteps pieces
+// so it bends over the terrain (since 2026-11-16; GroundHeights' cells are a third of a grid cell).
+inline constexpr float kGridCell = 1.5f;
+inline constexpr int kGridCells = 20;
+inline constexpr int kGridSteps = 3;
+inline constexpr int kGridSide = 2 * kGridCells * kGridSteps + 1; // Points along a side.
+inline constexpr std::size_t kGridPoints = static_cast<std::size_t>(kGridSide) * kGridSide;
+struct GridPoint {
+    float x = 0.0f; // On the screen, in pixels,
+    float y = 0.0f;
+    float ahead = 0.0f; // this far ahead of the camera's eye (own heights).
+    float shown = 0.0f; // How strongly: fading out towards kGridCell x kGridCells from the feet (half as strong while
+                        // the pitch is only presumed, GroundCamera::pitchMeasured).
+    bool ok = false;    // Well ahead of the camera's eye (else not on the screen, or about to pass it).
+    bool hidden = false; // Something the terrain's newest map saw stands in front of it (groundHidden).
+    bool front = false;  // On the screen of the camera on that map's image, where (as x, y, ahead above):
+    float frontX = 0.0f;
+    float frontY = 0.0f;
+    float frontAhead = 0.0f;
+};
+// `camera`'s grid on `heights` (may be null: the flat ground) into `out` (kGridPoints): point i along the map's x and j
+// along its y is out[j * kGridSide + i]; points i and j multiples of kGridSteps are the cells' corners.
+void groundGrid(const GroundCamera& camera, const GroundHeights* heights, std::span<GridPoint> out);
+// The grid's lines hidden in parts (behind a trunk thinner than a piece): a piece between two points tested every
+// kGridTestPixels on the screen, in at most kGridMostSteps steps.
+inline constexpr float kGridTestPixels = 6.0f;
+inline constexpr int kGridMostSteps = 16;
+struct GridStep {
+    float x = 0.0f; // On the screen, in pixels.
+    float y = 0.0f;
+    bool hidden = false;
+};
+// How many steps the piece from `a` to `b` (next to each other in groundGrid's out, both ok) is tested in: 1 when
+// neither is on the screen of the terrain's newest map.
+int gridStepCount(const GridPoint& a, const GridPoint& b);
+// `steps` + 1 points evenly along that piece on the ground (the first a's, the last b's) into `out`: where on the
+// screen, and whether hidden, as GridPoint's (`heights`: what groundGrid had them on).
+void gridSteps(const GroundHeights& heights, const GridPoint& a, const GridPoint& b, int steps, std::span<GridStep> out);
 
 // Follows the game's camera over screen images (heuristics/GroundFollower): what the live ground finder
 // (engine/GroundFinder) and a clip's (engine/ClipGround) use, made by observex_heuristics.dll (engine/
@@ -398,6 +601,9 @@ public:
     // 2026-11-12: "make the grid position according to it", the pitch only came from the ground's motion and a
     // still camera kept a wrong one). Before the next begin() or headAreas().
     virtual GroundDepthNote depth(const DepthInput& map, double timeMs) = 0;
+    // The terrain the depth maps made (since 2026-11-16, ABI 13): copied into `out` if its version is not `version`
+    // (true), else nothing (false).
+    virtual bool heights(std::uint64_t version, GroundHeights& out) const = 0;
     // The camera as followed up to the last end(), or the last head() after it.
     virtual GroundCamera camera() const = 0;
     virtual GroundNote note() const = 0;

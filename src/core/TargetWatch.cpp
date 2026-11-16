@@ -37,14 +37,19 @@ void TargetWatch::reset(std::string_view target) {
     died_ = false;
     searching_ = 0;
     marked_.clear();
+    corpse_ = 0;
+    corpseAt_ = {};
 }
 
-std::uint32_t TargetWatch::boxUnder(StatsArea plate, std::span<const WatchedThing> things) {
+std::uint32_t TargetWatch::boxUnder(StatsArea plate, std::span<const WatchedThing> things, bool notOwn) {
     const int middle = (plate.x0 + plate.x1) / 2;
     const int row = (plate.y0 + plate.y1) / 2;
     std::uint32_t best = 0;
     int bestScore = 0;
     for (const WatchedThing& thing : things) {
+        if (notOwn && thing.own) {
+            continue;
+        }
         const StatsArea& box = thing.box;
         const int h = box.y1 - box.y0;
         // As findPlate: over its sides, give or take kSidePlay, above a third down it, and no higher than plateArea
@@ -63,20 +68,35 @@ std::uint32_t TargetWatch::boxUnder(StatsArea plate, std::span<const WatchedThin
     return best;
 }
 
-PlateLook TargetWatch::nextLook(std::span<const WatchedThing> things) {
-    if (things.empty()) {
-        return {};
-    }
-    const WatchedThing* next = nullptr;
-    for (const WatchedThing& thing : things) {
-        if (!has(looked_, thing.id)) {
-            next = &thing;
-            break;
+PlateLook TargetWatch::nextLook(std::span<const WatchedThing> things, bool notOwn, const StatsArea* near) {
+    // How far a box's middle is from `near`'s (squared, doubled pixels); 0 without one.
+    const auto far = [near](const StatsArea& box) {
+        if (near == nullptr) {
+            return 0LL;
         }
-    }
+        const long long dx = (box.x0 + box.x1) - (near->x0 + near->x1);
+        const long long dy = (box.y0 + box.y1) - (near->y0 + near->y1);
+        return dx * dx + dy * dy;
+    };
+    const auto pick = [&](bool skipLooked) {
+        const WatchedThing* next = nullptr;
+        for (const WatchedThing& thing : things) {
+            if ((notOwn && thing.own) || (skipLooked && has(looked_, thing.id))) {
+                continue;
+            }
+            if (next == nullptr || far(thing.box) < far(next->box)) {
+                next = &thing; // The first (no `near`: the first stays), or nearer.
+            }
+        }
+        return next;
+    };
+    const WatchedThing* next = pick(true);
     if (next == nullptr) { // All looked at: round again.
         looked_.clear();
-        next = &things.front();
+        next = pick(false);
+    }
+    if (next == nullptr) {
+        return {};
     }
     looked_.push_back(next->id);
     return {next->id, next->box};
@@ -122,8 +142,10 @@ TargetWatch::Output TargetWatch::step(const Input& in) {
 
     // The plate read, whoever asked for it: selected, the box under it is the target's.
     const NamePlate& plate = in.plate;
+    std::uint32_t under = 0; // The box the plate was read over on this reading (0: none).
     if (plate.look != 0) {
-        const std::uint32_t under = plate.seen && plate.selected ? boxUnder(plate.at, in.things) : 0;
+        // A dead target is never the own character (the corpse at its feet puts its plate over the own box too).
+        under = plate.seen && plate.selected ? boxUnder(plate.at, in.things, died_) : 0;
         if (under != 0) {
             box_ = under;
             misses_ = 0;
@@ -133,8 +155,9 @@ TargetWatch::Output TargetWatch::step(const Input& in) {
             ++misses_;
         }
     }
-    if (box_ != 0 && (misses_ >= kMisses || thingOf(in.things, box_) == nullptr)) {
-        box_ = 0; // Its plate not over it any more, or its box gone: looked for again.
+    const WatchedThing* boxThing = box_ != 0 ? thingOf(in.things, box_) : nullptr;
+    if (box_ != 0 && (misses_ >= kMisses || boxThing == nullptr || (died_ && boxThing->own))) {
+        box_ = 0; // Its plate not over it any more, its box gone, or dead and the own character's: looked for again.
         misses_ = 0;
         looked_.clear();
     }
@@ -147,18 +170,29 @@ TargetWatch::Output TargetWatch::step(const Input& in) {
         found_ = box_;
         say((out.died ? "box " : "Dead target " + named(target_) + " is box ") + std::to_string(box_) +
             ": marked dead");
+        // The box marked before, still on the screen, is not the corpse: the plate is over this one.
+        if (corpse_ != 0 && corpse_ != box_ && thingOf(in.things, corpse_) != nullptr) {
+            out.alive = corpse_;
+            marked_.erase(std::remove(marked_.begin(), marked_.end(), corpse_), marked_.end());
+            say("box " + std::to_string(corpse_) + " is not it: its dead mark taken back");
+        }
+        corpse_ = box_;
+        under = box_; // Where the corpse is seen (below).
     } else if (box_ != 0 && box_ != found_) {
         found_ = box_;
         say("Target " + named(target_) + " is box " + std::to_string(box_));
     }
     if (box_ != 0) {
-        if (!died_) {
-            out.look = {box_, thingOf(in.things, box_)->box}; // Its plate checked on every reading.
+        const StatsArea& at = thingOf(in.things, box_)->box;
+        out.look = {box_, at}; // Its plate checked on every reading, dead too (the tracker may hand its id on).
+        if (died_ && box_ == corpse_ && under == box_) {
+            corpseAt_ = at; // Only where its plate was over it: not where a live one that took its id walks.
         }
     } else if (!died_) {
-        out.look = nextLook(in.things);
+        out.look = nextLook(in.things, false);
     } else if (searching_ < kSearchReadings) {
-        out.look = nextLook(in.things);
+        // The corpse lies where it was: the boxes nearest its last one first.
+        out.look = nextLook(in.things, true, corpse_ != 0 ? &corpseAt_ : nullptr);
         if (++searching_ == kSearchReadings) {
             say("Dead target " + named(target_) + ": its box not found");
         }

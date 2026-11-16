@@ -2,6 +2,7 @@
 
 #include "core/Ground.h"
 #include "core/Heuristics.h"
+#include "heuristics/DepthTerrain.h"
 #include "heuristics/MinimapCone.h"
 #include "heuristics/TurnPitch.h"
 
@@ -116,10 +117,12 @@ public:
     // `camera` (known).
     void learn(const GreyView& image, const GroundCamera& camera, double timeMs);
     // Finds the patches learned last on `image` (shown at `timeMs`, later), `camera` being the camera they were
-    // learned with as it was going then, `turn` how far it turned since if known (radians, as GroundFit's): writes
+    // learned with as it was going then, `turn` how far it turned since if known (radians, as GroundFit's), `zoomHeld`
+    // whether the distance holds (core/Ground's ZoomHold: the search tries no zoom but the one the wheel's notches made,
+    // `camera`'s distance to the learned one's): writes
     // where each went into `out` (cleared). Returns how many.
     int find(const GreyView& image, const GroundCamera& camera, double timeMs, std::optional<float> turn,
-             std::vector<GroundMatch>& out);
+             bool zoomHeld, std::vector<GroundMatch>& out);
     // Between follows (GroundFollower::head): how far the camera turned from the image the patches were learned on to
     // `image` (shown at `timeMs`; only its eighth size read, kCoarseLevel), `camera` being the camera they were
     // learned with as it was going then; looked for from `reach` short of the nearer of `stopped` and `onward` to
@@ -248,7 +251,11 @@ public:
     // its motion says how the camera tilts, not where it looks. Steeper the maps say little (the table is steep, the
     // map's 39 degrees 60 to 82), and held so the grid lagged a fast tilt to straight down by 12 degrees (clip
     // 2026-11-12_16-53-29, 5.6 s) and one back up by 20 (2026-11-12_15-50-36, 7.95 s): the fit has it as before.
+    // Each map also goes into the terrain (DepthTerrain, the user asked 2026-11-16: the grid wrapped onto it), by the
+    // camera on its image (between the two kept round it), before its pitch: heights().
     GroundDepthNote depth(const DepthInput& map, double timeMs) override;
+    bool heights(std::uint64_t version, GroundHeights& out) const override;
+    const DepthTerrain& terrain() const { return terrain_; }
     static constexpr float kDepthMs = 100.0f;
     static constexpr double kDepthHeldMs = 1000.0;
     static constexpr float kDepthHeldWeight = 0.4f;
@@ -326,9 +333,9 @@ private:
     std::vector<GreyArea> avoid_; // begin()'s hints.avoid: the characters and the interface, out of the depth too.
     struct Pitched {
         double timeMs = 0.0;
-        float pitch = 0.0f;
+        GroundCamera camera;
     };
-    std::array<Pitched, kPitched> pitched_{}; // The camera's pitch on the last images (end()'s and head()'s), oldest
+    std::array<Pitched, kPitched> pitched_{}; // The camera on the last images (end()'s and head()'s), oldest
     int pitchedCount_ = 0;                    // first from pitchedNext_ on.
     int pitchedNext_ = 0;
     bool depthTaken_ = false; // A map has said the pitch since the camera was last found.
@@ -346,6 +353,9 @@ private:
     void notePitch(double timeMs);
     // The camera's pitch on the image at `timeMs`, between the two kept round it; none if older than all.
     std::optional<float> pitchAt(double timeMs) const;
+    // The camera on the image at `timeMs` likewise (its yaw the short way round); unknown if older than all.
+    GroundCamera cameraAt(double timeMs) const;
+    DepthTerrain terrain_;
     // The pitch by the camera's turns: the points learned on the image followed, the camera's pitch and yaw there, and
     // how the last follow's went (note()).
     // The camera by the mouse's counts (GroundHints' mouse) on the image begin() or headAreas() was for, and on the

@@ -16,14 +16,22 @@
 #include "app/StatsPanel.h"
 #include "app/Theme.h"
 #include "app/Thumbnails.h"
+#include "core/CameraFocus.h"
+#include "core/LookAround.h"
+#include "core/MonsterMemory.h"
 #include "core/Costs.h"
+#include "core/Distances.h"
 #include "core/Log.h"
+#include "core/DropPick.h"
+#include "core/Flee.h"
+#include "core/HpWatch.h"
 #include "core/LootWatch.h"
 #include "core/MouseCamera.h"
 #include "core/Recordings.h"
 #include "core/SkillRefresh.h"
 #include "core/SkillUse.h"
 #include "core/TargetSelect.h"
+#include "core/TargetHitWatch.h"
 #include "core/TargetWatch.h"
 #include "core/Tiles.h"
 #include "core/XpWatch.h"
@@ -142,8 +150,13 @@ private:
     // A line for the clip buffer's text about what the user did, e.g. "show Kinds off". Nothing while there is no buffer.
     void noteInClip(std::string_view text);
     // A line of observex's log (the Log tab; the user asked, 2026-11-13): into log_ (its file) and the clip buffer,
-    // timed at `qpc` (a QueryPerformanceCounter time a moment ago; 0: now).
+    // timed at `qpc` (a QueryPerformanceCounter time a moment ago; 0: now). Only what the game gave: XP got and items or
+    // adena picked up (the user asked, 2026-11-16: "in the log I just want the exp and drop pick up").
     void addLog(std::string text, std::int64_t qpc = 0);
+    // A line of observex's trace: everything else it says (observing, clips, the brain's tasks, why something did not
+    // start, Geodata, targets, drops seen), kept out of the Log tab: into trace_ (observex-trace.log, for reading back
+    // what happened) and the clip buffer (clip.txt's trace lines), timed the same way.
+    void addTrace(std::string text, std::int64_t qpc = 0);
     // What the Show flag Ground drew this UI frame (groundDrawn_), into the clip buffer if it changed: so a clip's
     // Recorded shows the grid exactly as it was seen.
     void noteGroundInClip();
@@ -222,6 +235,11 @@ private:
     // The monsters the live view shows (sure of the kind, seen now), each with its box on the screen image and on the
     // desktop (pixels): what Select Target chooses from. Empty when not observing or nothing is found.
     std::vector<SelectableMonster> selectableMonsters();
+    // The brain's Attacker (core/Attacker): the monsters the live view shows now (at least kAttackerKindSure a monster,
+    // seen now) within kAttackerReach of the own character, nearest first, each with its distance (own heights: along
+    // the ground by the camera shown, or on the screen while it is not known) and, as its desktop point, where to click
+    // it beside the own character's box. `ownBox`, if given, gets the own character's box (none: x1 0).
+    std::vector<SelectableMonster> attackerMonsters(StatsArea* ownBox = nullptr);
     // The same as the Mouse debug sweep takes them (their boxes on the desktop).
     std::vector<MouseTarget> visibleMonsters();
     // Acting: the brain's tasks drive the mouse and keyboard through the Pico controller (the user asked, 2026-11-15).
@@ -233,8 +251,37 @@ private:
     // active states alongside (runParallelTasks).
     void actuateBrain();
     // The Parallel tasks of the active states (statetree::Runner::parallelTasks), each started when its state becomes
-    // active and dropped when it is left (the user asked, 2026-11-15).
-    void runParallelTasks(std::chrono::steady_clock::time_point now);
+    // active and dropped when it is left (the user asked, 2026-11-15). `mouseTask`: the task one after another that
+    // runs uses the mouse (Select Target, Click Mouse), so Focus Camera lets go of it.
+    void runParallelTasks(std::chrono::steady_clock::time_point now, bool mouseTask);
+    // Focus Camera's step this UI frame (core/CameraFocus) on what is shown now: the target's box (the target watch's),
+    // the own character's, the camera's pitch (the mouse's counts) and distance (the ground finder's); its counts go to
+    // the controller with the right button held. At most one step a frame (focusRan_).
+    CameraFocuser::Output driveFocus(bool mouseTask);
+    // Flee's step this UI frame (core/Flee) on what is shown now: the target's box (the target watch's, or the one
+    // Select Target clicked), every character's, the drops', the interface's pieces, the camera on the image shown and
+    // the depth's terrain; its cursor moves and clicks go to the controller (a click only if `canClick`: no press
+    // held). Returns whether it is done (nothing to flee from). From the Attacker (`fleeFrom`), its box is
+    // attackerMonsters' nearest, and there is one to flee from while one was seen or HP was lost within
+    // kAttackerHoldSeconds.
+    bool driveFlee(double dt, bool canClick, statetree::FleeFrom fleeFrom);
+    // Lets go of Focus Camera's right button if it holds it (its task stopped).
+    void releaseFocus();
+    // Lets go of the right button if the task one after another (Look Around, Select Target turning) holds it.
+    void releaseTaskRight();
+    // The buttons observex holds now (the controller's report): a click's and the right button of a turn.
+    std::uint8_t buttonsHeld() const {
+        return static_cast<std::uint8_t>(heldButtons_ | (focusRight_ || taskRight_ ? 0x02 : 0));
+    }
+    // Whether the cursor is where the game puts it when it turns the camera (its window's middle).
+    bool cursorAtGameMiddle() const;
+    // The camera on the image shown (the ground finder's, turned and tilted on by the mouse's counts); unknown while
+    // the ground finder has not followed one.
+    GroundCamera cameraShown() const;
+    // Each UI frame: the newest look's monsters into the monster memory, while the camera is known.
+    void rememberMonsters();
+    // The selectable monsters' distances (own heights) and memory keys, by the camera shown.
+    void measureMonsters(std::vector<SelectableMonster>& monsters) const;
     // The Skills tab's Refresh (the user asked, 2026-11-15: the mouse over each skill on the hotbar, its MP cost read
     // off its tooltip; core/SkillRefresh): its button starts or stops it (Win+Esc stops it too); it only runs while a
     // live screen is observed and the brain is not active (both drive the controller). driveRefresh steps it each UI
@@ -256,12 +303,20 @@ private:
     // The boxes drawFound shows (the snapper's while it runs, else the recogniser's: one tracker, the same ids), the own
     // character's too, by id; none while the recogniser is not running.
     std::vector<WatchedThing> thingsShown();
+    // The own character's box on the newest look (screen image pixels; core/Ground's ownCharacter), and into `others`
+    // (when given) every other character's seen now; false, `own` untouched, while it is not seen.
+    bool ownShown(StatsArea& own, std::vector<StatsArea>* others) const;
     // Each UI frame while observing: the loot watch (core/LootWatch) picks where the drop finder looks (round the dead
     // target's box, then round its drops), from what is on the screen and the drop finder's newest look, and its lines
-    // go to the Log.
+    // go to the Log. Then the drops it shows are measured (lootDrops_) and counted (dropBook_).
     void watchLoot();
-    // The drops found and where they were looked for (the Show flag Drops), over the observed screen at `min` to `max`.
-    void drawDrops(ImDrawList* drawList, ImVec2 min, ImVec2 max);
+    // The Move To Drop task of the brain's looting branch: the first one in the branch of Root the current state is in
+    // (that child of Root and all under it), while the brain acts; null when it is in none (not looting).
+    const statetree::Task* lootTask() const;
+    // The drops found and where they were looked for (the Show flag Drops), over the observed screen at `min` to `max`,
+    // each tagged with how far it is by `camera` on the image shown and the terrain `heights` (null: flat ground).
+    void drawDrops(ImDrawList* drawList, ImVec2 min, ImVec2 max, const GroundCamera& camera,
+                   const GroundHeights* heights);
     // An open clip's reading on the frame shown (`today`: read again today, else as recorded) with the Nearby counts
     // of what its guesser shows there; null if none.
     const GameStats* clipStatsShown(bool today);
@@ -308,8 +363,10 @@ private:
     void drawCategoryChooser();
     void drawChooseScreen();
     void drawObservedScreen();
-    // The characters found on the observed screen, over its image at `min` to `max`.
-    void drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max);
+    // The characters found on the observed screen, over its image at `min` to `max`, each tagged with how far it is
+    // (as drawDrops).
+    void drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max, const GroundCamera& camera,
+                   const GroundHeights* heights);
     // Hands the ground finder what is on the screen now: the things shown and the interface's pieces.
     void hintGround();
 
@@ -365,6 +422,9 @@ private:
     // The bot's brain, edited in the State tile (the tree stays while observex runs).
     StateTreeView stateTree_;
     std::uint64_t brainImage_ = 0; // The reading the brain last stepped on.
+    // The events seen on the live readings since the brain's last step (by statetree::Event), for its next one only
+    // (the user asked, 2026-11-16: event-based conditions); none waits while it does not act.
+    std::array<bool, statetree::kEvents> brainEvents_{};
     StatsTile statsTile_;          // The Stats tile.
     SkillsView skillsView_;        // The Skills tab (its Add Skill popup keeps what it shows).
     SkillIcons skillIcons_;        // The profile's skills' icons, for both.
@@ -406,15 +466,22 @@ private:
                           "Rendering"};
     CostPart frameCosts_;
     std::chrono::steady_clock::time_point frameCostsSince_ = std::chrono::steady_clock::now();
-    // What observex did (core/Log), kept in observex.log next to observex.exe (in snapshot mode next to the PNG); made
-    // first in init(), gone after shutdown().
+    // The Log tab's lines (core/Log: XP and pickups, addLog), kept in observex.log next to observex.exe (in snapshot
+    // mode next to the PNG), and the trace (addTrace) in observex-trace.log beside it; made first in init(), gone after
+    // shutdown().
     std::unique_ptr<LogBook> log_;
-    std::filesystem::path crashLogFile_; // Where a crash is told (engine/CrashLog): the log,
+    std::unique_ptr<LogBook> trace_;
+    std::filesystem::path crashLogFile_; // Where a crash is told (engine/CrashLog): the trace,
     std::filesystem::path crashFolder_;  // and its dump.
     LogView logView_;
     LogView clipLogView_;          // An open clip's lines,
     std::uint64_t clipsOpened_ = 0; // which change with each clip opened.
     XpWatch xpWatch_;               // The XP read live, for "Got 0.12% XP" lines.
+    std::uint32_t pickupRun_ = 0;   // The stats reader's pickups (GameStats::pickups) logged: its run,
+    std::uint32_t pickupCount_ = 0; // and how many of its pickups,
+    std::int64_t pickupAdena_ = 0;  // and its Adena in all (PickupRead::adena), for brainTally_'s.
+    HpWatch hpWatch_;               // The own HP read live: the brain's HP Lost event, and "HP lost 12" lines.
+    TargetHitWatch targetHitWatch_; // The target's HP read live: the brain's Target Hit By Others event, and its lines.
     std::unique_ptr<Recognizer> recognizer_; // Looks for characters on the observed screen, shown or not.
     std::string recognizerError_;            // Why it could not start.
     // Puts the recogniser's boxes onto every new image; shown instead of the recogniser's while it runs. Shared with
@@ -436,8 +503,9 @@ private:
     struct GroundDrawn {
         bool drawn = false;
         std::uint64_t image = 0;    // The preview image it was drawn over,
-        std::uint64_t followed = 0; // from the ground finder's camera, of this image followed whole (GroundSeen).
+        std::uint64_t followed = 0; // from the ground finder's camera, of this image followed whole (GroundSeen),
         GroundCamera camera;
+        std::shared_ptr<const GroundHeights> heights; // on this terrain (null: flat).
     };
     GroundDrawn groundDrawn_;
     GroundDrawn groundNoted_;
@@ -511,6 +579,13 @@ private:
     std::string mouseTestStatus_;  // What the Settings button last reported (why it could not start, or that it did).
     // Acting (the brain drives the mouse/keyboard through the controller): off by default, toggled by the Act button.
     bool brainActs_ = false;
+    // What the brain got since it last started (the Stats tile's card Since the Brain Started; the user asked,
+    // 2026-11-16): reset by toggleActing, kills by watchTarget, adena by keepStats' pickups, while it acts. Its time from
+    // brainStartedAt_ to now, or to brainStoppedAt_ once stopped (brainTallyNow).
+    BrainTally brainTally_;
+    std::chrono::steady_clock::time_point brainStartedAt_{};
+    std::chrono::steady_clock::time_point brainStoppedAt_{};
+    BrainTally brainTallyNow() const;
     // The brain the clip buffer was given last (noteBrainInClip): its current state shown (0: none, inactive) and its
     // task; none yet since the buffer started.
     bool brainNoted_ = false;
@@ -532,7 +607,26 @@ private:
         std::chrono::steady_clock::time_point next;
     };
     std::vector<ParallelRun> parallelRuns_;
+    // Focus Camera (one at a time, Parallel or not): whether it holds the right button, whether it stepped this UI
+    // frame (and so the ground finder follows, for the camera's pitch and distance), and what that step said.
+    CameraFocuser focuser_;
+    bool focusRight_ = false;
+    bool focusRan_ = false;
+    CameraFocuser::Output focusOut_;
+    // The target's box as the target watch last found it (its tracker id), kept while it looks for it again; 0 when
+    // there is no target, or another one (by name) since.
+    std::uint32_t targetBox_ = 0;
+    std::string targetBoxName_;
     TargetSelector selector_;
+    // Look Around (core/LookAround), and whether it or Select Target (turning to a monster off the screen) holds the
+    // right button: the task one after another that runs, let go of when it stops.
+    LookAround looker_;
+    bool taskRight_ = false;
+    // The monsters remembered round the own character (core/MonsterMemory; the user asked, 2026-11-16): fed by every
+    // look while the camera is known (rememberMonsters), forgotten by Look Around, chosen from by Select Target, and
+    // counted in the Nearby gauges Monsters Around / Monster Distance.
+    MonsterMemory monsterMemory_;
+    std::uint64_t rememberedLook_ = 0; // The recogniser's (or snapper's) look it was fed last.
     SkillUser skillUser_;
     statetree::Variables skillVariables_;
     std::uint64_t skillVariablesImage_ = 0;
@@ -551,6 +645,11 @@ private:
     LootWatch lootWatch_;
     LootWatch::Output loot_;      // Where it looks closely now and what it found (watchLoot).
     std::vector<Detection> lootShown_; // The drops of the spot's newest close look, off the game's interface.
+    // The distances written this UI frame (core/Distances; game units, under 0 none), by the characters drawFound drew
+    // (the snapper's or the recogniser's newest, in their order) and by lootShown_: what the brain's conditions are to
+    // read (the user, 2026-11-16: "later on this distance will be used as a condition").
+    std::vector<float> thingDistances_;
+    std::vector<float> dropDistances_;
     std::uint64_t lootImage_ = 0;      // The screen image of that look.
     bool dropsNoted_ = false;          // What noteDropsInClip handed the clip buffer last: the spot drawn round
     LootSquare dropsNotedSquare_{};    // (empty: nothing drawn), the close look's image and whether a kill's.
@@ -558,6 +657,24 @@ private:
     bool dropsNotedKill_ = false;
     std::uint32_t deadNow_ = 0;   // A box the target watch marked dead since the last watchLoot,
     std::string deadName_;        // and the target's name then.
+    // When the target last died (the target watch's death, the reading's screen image's QPC; 0: no kill yet): the
+    // Since Kill gauge (addLiveNearby) the brain waits on for a kill's drops.
+    std::int64_t killQpc_ = 0;
+    // When HP was last lost (hpWatch_; QPC, 0: not yet; also starts the recogniser's close-up looks, lookCloser) and when
+    // Flee's Attacker was last seen (QPC, 0: not yet).
+    std::int64_t hpLostQpc_ = 0;
+    std::int64_t attackerSeenQpc_ = 0;
+    // Looting (the user asked, 2026-11-16: drops picked up before the next monster): the drops of lootShown_ as looting
+    // sees them (lootDrops_, each frame in watchLoot: distance and place round the own feet by the camera shown),
+    // which of them count (dropBook_: the Drops and Drop Distance numbers, those given up on left out) and the Move To
+    // Drop task (dropPicker_).
+    std::vector<LootDrop> lootDrops_;
+    DropBook dropBook_;
+    DropBook::Output dropsCounted_;
+    DropPicker dropPicker_;
+    // The Flee task (core/Flee), and whether it is the task that runs (the depth finder runs for it).
+    FleeWalker flee_;
+    bool fleeing_ = false;
     // A Click Mouse / Use Skill press is held for a short while, not tapped, so the game registers it. The held mouse
     // button rides along with Select Target's moves (so it can drag), and both are released after their time.
     std::uint8_t heldButtons_ = 0;

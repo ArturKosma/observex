@@ -20,7 +20,9 @@
 #include "engine/ScreenCapture.h"
 #include "heuristics/GroundMotion.h"
 #include "heuristics/LocationReader.h"
+#include "heuristics/MessageLines.h"
 #include "heuristics/MinimapScroll.h"
+#include "heuristics/PickupReader.h"
 #include "heuristics/Snapper.h"
 #include "heuristics/TextOcr.h"
 
@@ -240,13 +242,17 @@ int geodataBench(int argc, char** argv) {
         GreyImage grey;
         std::vector<UiPiece> pieces(UiPieces::kMax);
         MinimapScroll minimap;
+        MessageLines messages;
         LocationReader location;
+        PickupReader pickups;
         if (firstLines) {
-            location.takeFirstLines();
+            messages.takeFirstLines();
         }
         TextOcr ocr;
         LocationRead located{};
+        PickupRead picked{};
         std::uint32_t lastCount = 0;
+        std::uint32_t lastPickups = 0;
         WorldPosition position;
         if (scale > 0.0f) {
             position.setScale(scale);
@@ -309,16 +315,30 @@ int geodataBench(int argc, char** argv) {
             minimapMs += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
             start = Clock::now();
             std::string why;
+            ColourPart messagesPart{};
             if (messagesPiece != nullptr) {
-                const ColourPart part = partOf(LocationReader::area(*messagesPiece, width, height));
-                location.read(messagesPiece, &part, map, ocr, located, why);
-            } else {
-                location.read(nullptr, nullptr, map, ocr, located, why);
+                messagesPart = partOf(MessageLines::area(*messagesPiece, width, height));
             }
+            messages.look(messagesPiece != nullptr ? &messagesPart : nullptr);
+            location.read(messages, map, ocr, located, why);
+            pickups.read(messages, ocr, picked, why);
             const double readMs = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
             locationMs += readMs;
             if (all && readMs > 1.0) {
                 std::printf("%8.0f ms  messages read in %.1f ms\n", timeMs - firstMs, readMs);
+            }
+            // Items and adena picked up, as the Log says them.
+            for (; lastPickups < picked.count; ++lastPickups) {
+                const Pickup& pickup = picked.items[lastPickups % PickupRead::kMax];
+                std::printf("%8.0f ms  Picked up %s\n", timeMs - firstMs, pickupText(pickup).c_str());
+            }
+            if (all) {
+                for (const MessageLines::Line& line : messages.lines()) {
+                    if (line.fresh) {
+                        std::printf("%8.0f ms  new %s line at rows %d-%d\n", timeMs - firstMs,
+                                    line.white ? "white" : "yellow", line.top, line.bottom);
+                    }
+                }
             }
             ++samples;
             seen += map.seen ? 1 : 0;
@@ -433,6 +453,73 @@ int geodataBench(int argc, char** argv) {
         std::printf("%s\n", e.what());
         return 1;
     }
+    return 0;
+}
+
+int pickupsBench(int argc, char** argv) {
+    if (argc < 1) {
+        std::printf("usage: observex_bench --pickups IMAGE... [--layout FOLDER]\n");
+        return 2;
+    }
+    fs::path layoutFolder = "models/ui";
+    std::vector<fs::path> images;
+    for (int i = 0; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--layout") == 0 && i + 1 < argc) {
+            layoutFolder = argv[++i];
+        } else {
+            images.emplace_back(argv[i]);
+        }
+    }
+    UiLayout layout;
+    std::string error;
+    if (!layout.load(layoutFolder, &error)) {
+        std::printf("%s\n", error.c_str());
+        return 1;
+    }
+    TextOcr ocr;
+    GreyImage grey;
+    std::vector<UiPiece> pieces(UiPieces::kMax);
+    int found = 0;
+    for (const fs::path& path : images) {
+        ImageData image;
+        try {
+            image = readImageFile(path);
+        } catch (const std::exception& e) {
+            std::printf("%s: %s\n", toUtf8(path.c_str()).c_str(), e.what());
+            continue;
+        }
+        const int width = static_cast<int>(image.width);
+        const int height = static_cast<int>(image.height);
+        const std::size_t pitch = static_cast<std::size_t>(width) * 4;
+        grey.fromBgra(image.bgra.data(), width, height, static_cast<std::ptrdiff_t>(pitch));
+        const GreyView view = grey.view(1);
+        const int count = layout.find(view.levels[0], pieces.data(), static_cast<int>(pieces.size()));
+        const UiPiece* messagesPiece = pieceNamed(pieces, count, kMessagesPiece);
+        std::printf("%s\n", toUtf8(path.filename().c_str()).c_str());
+        if (messagesPiece == nullptr) {
+            std::printf("  no Messages window\n");
+            continue;
+        }
+        const StatsArea area = MessageLines::area(*messagesPiece, width, height);
+        const ColourPart part{area, image.bgra.data() + static_cast<std::size_t>(area.y0) * pitch +
+                                        static_cast<std::size_t>(area.x0) * 4,
+                              pitch};
+        MessageLines lines;
+        lines.takeFirstLines(); // Every line shown is read.
+        lines.look(&part);
+        PickupReader reader;
+        PickupRead picked{};
+        std::string why;
+        const Clock::time_point start = Clock::now();
+        reader.read(lines, ocr, picked, why);
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        for (std::uint32_t i = 0; i < picked.count && i < static_cast<std::uint32_t>(PickupRead::kMax); ++i) {
+            std::printf("  Picked up %s\n", pickupText(picked.items[i]).c_str());
+            ++found;
+        }
+        std::printf("  (%zu lines, %.1f ms) %s\n", lines.lines().size(), ms, why.c_str());
+    }
+    std::printf("%d pickups in %zu images\n", found, images.size());
     return 0;
 }
 

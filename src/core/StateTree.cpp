@@ -10,18 +10,33 @@ namespace observex::statetree {
 
 namespace {
 
-constexpr const char* kVariableNames[kVariables] = {"Number", "HP",       "MP",         "XP",      "Target HP",
-                                                    "Cast",   "Cooldown", "Characters", "Monsters"};
-constexpr const char* kVariableWords[kVariables] = {"",     "hp",       "mp",         "xp",      "target-hp",
-                                                    "cast", "cooldown", "characters", "monsters"}; // In the file.
-constexpr const char* kTaskNames[kTaskKinds] = {"Use Skill", "Select Target", "Click Mouse", "Debug Print"};
-constexpr const char* kTaskWords[kTaskKinds] = {"use-skill", "select-target", "click-mouse",
-                                                "debug-print"}; // In the file.
+constexpr const char* kVariableNames[kVariables] = {"Number",   "HP",         "MP",       "XP",
+                                                    "Target HP", "Cast",      "Cooldown", "Characters",
+                                                    "Monsters", "Monsters Around", "Monster Distance",
+                                                    "Drops",    "Drop Distance", "Since Kill",
+                                                    "Target Distance"};
+constexpr const char* kVariableWords[kVariables] = {"",         "hp",         "mp",       "xp",
+                                                    "target-hp", "cast",      "cooldown", "characters",
+                                                    "monsters", "monsters-around", "nearest-monster",
+                                                    "drops",    "drop-distance", "since-kill",
+                                                    "target-distance"}; // In the file
+                                                                                      // (Monster Distance's is its
+                                                                                      // old name's).
+constexpr const char* kTaskNames[kTaskKinds] = {"Use Skill",   "Select Target", "Click Mouse",
+                                                "Debug Print", "Focus Camera",  "Look Around",
+                                                "Move To Drop", "Flee"};
+constexpr const char* kTaskWords[kTaskKinds] = {"use-skill",   "select-target", "click-mouse",
+                                                "debug-print", "focus-camera",  "look-around",
+                                                "move-to-drop", "flee"}; // In the file.
+constexpr const char* kFocusModeNames[kFocusModes] = {"Character + Target"};
+constexpr const char* kFocusModeWords[kFocusModes] = {"character-target"}; // In the file.
+constexpr const char* kFleeFromNames[kFleeFroms] = {"Target", "Attacker"};
+constexpr const char* kFleeFromWords[kFleeFroms] = {"target", "attacker"}; // In the file.
 constexpr std::string_view kParallelWord = "parallel"; // Before a Parallel task's kind in the file.
 // Select Target's word in files written before it was renamed (it was Lock Mouse Onto until 2026-11-15).
 constexpr std::string_view kOldSelectTargetWord = "lock-mouse";
-constexpr const char* kTargetNames[kTargets] = {"Nearest Monster"};
-constexpr const char* kTargetWords[kTargets] = {"nearest-monster"}; // In the file.
+constexpr const char* kTargetNames[kTargets] = {"Nearest Monster", "Attacker"};
+constexpr const char* kTargetWords[kTargets] = {"nearest-monster", "attacker"}; // In the file.
 constexpr const char* kClickButtonNames[kClickButtons] = {"Left", "Right"};
 constexpr const char* kClickButtonWords[kClickButtons] = {"left", "right"}; // In the file.
 constexpr char kHex[] = "0123456789abcdef";
@@ -29,6 +44,9 @@ constexpr const char* kSkillIsNames[kSkillIs] = {"Ready", "Cooling down", "Being
 constexpr const char* kSkillIsWords[kSkillIs] = {"ready", "cooling", "cast"}; // In the file.
 constexpr const char* kNeedNames[kNeeds] = {"Any Skill", "All Skills"};
 constexpr const char* kNeedWords[kNeeds] = {"any", "all"}; // In the file.
+constexpr const char* kEventNames[kEvents] = {"HP Lost", "Target Hit By Others"};
+constexpr const char* kEventWords[kEvents] = {"hp-lost", "target-hit-by-others"}; // In the file.
+constexpr const char* kEventSpoken[kEvents] = {"HP lost", "target hit by others"}; // In describe().
 constexpr const char* kWhenNames[kWhens] = {"Any time", "Tasks done"}; // After the details' "When".
 constexpr char kTasksDoneWord[] = "done"; // After a go line's target: When Tasks Done.
 constexpr char kListSeparator = '|'; // Between the skills of a list in the file (a skill's name has none).
@@ -181,6 +199,10 @@ const char* nameOf(Need need) {
     return kNeedNames[static_cast<int>(need)];
 }
 
+const char* nameOf(Event event) {
+    return kEventNames[static_cast<int>(event)];
+}
+
 const char* nameOf(TaskKind kind) {
     return kTaskNames[static_cast<int>(kind)];
 }
@@ -191,6 +213,14 @@ const char* nameOf(Target target) {
 
 const char* nameOf(ClickButton button) {
     return kClickButtonNames[static_cast<int>(button)];
+}
+
+const char* nameOf(FocusMode mode) {
+    return kFocusModeNames[static_cast<int>(mode)];
+}
+
+const char* nameOf(FleeFrom from) {
+    return kFleeFromNames[static_cast<int>(from)];
 }
 
 const char* nameOf(When when) {
@@ -275,14 +305,11 @@ bool Tree::moveTransition(int from, std::size_t index, int to, std::size_t befor
         before > target->transitions.size()) {
         return false;
     }
-    if (source == target && (before == index || before == index + 1)) {
-        return true; // Just before or after itself: where it is.
+    if (source == target) {
+        return moveWithin(source->transitions, index, before); // A new order: they are tried in order.
     }
     Transition moved = std::move(source->transitions[index]);
     source->transitions.erase(source->transitions.begin() + static_cast<std::ptrdiff_t>(index));
-    if (source == target && before > index) {
-        --before; // It was counted before it went.
-    }
     target->transitions.insert(target->transitions.begin() + static_cast<std::ptrdiff_t>(before), std::move(moved));
     return true;
 }
@@ -366,14 +393,21 @@ Variables variablesOf(const GameStats& stats) {
                 {std::string(textOf(gauge.name)), found, found ? gauge.full * 100.0f : 0.0f, found && gauge.pressed});
         } else if (textOf(gauge.piece) == kNearbyPiece && gauge.seen) {
             // The model's counts (the app puts them in).
-            const Variable variable = textOf(gauge.name) == kCharactersGauge ? Variable::Characters
-                                      : textOf(gauge.name) == kMonstersGauge ? Variable::Monsters
-                                                                             : Variable::None;
-            int count = 0;
+            const std::string_view name = textOf(gauge.name);
+            const Variable variable = name == kCharactersGauge       ? Variable::Characters
+                                      : name == kMonstersGauge       ? Variable::Monsters
+                                      : name == kMonstersAroundGauge ? Variable::MonstersAround
+                                      : name == kMonsterDistanceGauge ? Variable::MonsterDistance
+                                      : name == kDropsGauge          ? Variable::Drops
+                                      : name == kDropDistanceGauge   ? Variable::DropDistance
+                                      : name == kSinceKillGauge      ? Variable::SinceKill
+                                      : name == kTargetDistanceGauge ? Variable::TargetDistance
+                                                                     : Variable::None;
+            float number = 0.0f; // A count, or (Since Kill) seconds.
             const std::string_view text = textOf(gauge.text);
             if (variable != Variable::None &&
-                std::from_chars(text.data(), text.data() + text.size(), count).ec == std::errc()) {
-                variables.value[static_cast<std::size_t>(variable)] = static_cast<float>(count);
+                std::from_chars(text.data(), text.data() + text.size(), number).ec == std::errc()) {
+                variables.value[static_cast<std::size_t>(variable)] = number;
                 variables.known[static_cast<std::size_t>(variable)] = true;
             }
         }
@@ -427,6 +461,7 @@ bool holds(const Condition& condition, const Variables& variables) {
         return condition.need == Need::AllSkills ? std::ranges::all_of(condition.skills, ready)
                                                  : std::ranges::any_of(condition.skills, ready);
     }
+    case Kind::Event: return variables.events[static_cast<std::size_t>(condition.event)];
     }
     bool known = true;
     const float left = valueOf(condition.left, variables, &known);
@@ -488,6 +523,7 @@ std::string describe(const std::vector<Condition>& conditions) {
                     : c.need == Need::AllSkills ? spoken(c.skills, "and") + " ready"
                                                 : spoken(c.skills, "or") + " ready";
             break;
+        case Kind::Event: text += kEventSpoken[static_cast<int>(c.event)]; break;
         }
     }
     return text;
@@ -656,6 +692,7 @@ std::string conditionLine(const Condition& c) {
     case Kind::SkillsReady:
         text += std::string("skills-ready ") + kNeedWords[static_cast<int>(c.need)] + " " + listText(c.skills);
         break;
+    case Kind::Event: text += std::string("event ") + kEventWords[static_cast<int>(c.event)]; break;
     }
     return text + "\n";
 }
@@ -665,7 +702,7 @@ std::string conditionLine(const Condition& c) {
 std::string writeTree(const Tree& tree) {
     std::string text = std::string(kHeader) + "\n";
     for (const Skill& skill : tree.skills()) {
-        text += std::string("skill ") + (skill.cooldown ? "cooldown " : "no-cooldown ") +
+        text += std::string("skill ") + (skill.active ? "active " : "utility ") +
                 (skill.key.empty() ? "" : "key=" + skill.key + " ") +
                 (skill.mp > 0 ? "mp=" + std::to_string(skill.mp) + " " : "") + std::to_string(skill.side) + " ";
         if (skill.bgr.empty()) {
@@ -700,6 +737,18 @@ std::string writeTree(const Tree& tree) {
                 break;
             case TaskKind::DebugPrint:
                 text += "\n";
+                break;
+            case TaskKind::LookAround:
+                text += task.degrees != kLookAroundDegrees ? " " + std::to_string(task.degrees) + "\n" : "\n";
+                break;
+            case TaskKind::FocusCamera:
+                text += std::string(" ") + kFocusModeWords[static_cast<int>(task.focus)] + "\n";
+                break;
+            case TaskKind::MoveToDrop:
+                text += task.reach != kDropReach ? " " + std::to_string(task.reach) + "\n" : "\n";
+                break;
+            case TaskKind::Flee:
+                text += std::string(" ") + kFleeFromWords[static_cast<int>(task.from)] + "\n";
                 break;
             }
         }
@@ -787,7 +836,10 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
                 ids.emplace_back(id, tree.add(idOf(parent), std::string(name)));
             }
         } else if (kind == "skill") {
-            const std::string_view has = nextWord(line, &at);
+            // Active or utility (before 2026-11-16 the words were cooldown and no-cooldown: the same two).
+            const std::string_view group = nextWord(line, &at);
+            const bool active = group == "active" || group == "cooldown";
+            const bool utility = group == "utility" || group == "no-cooldown";
             std::string_view sideWord = nextWord(line, &at);
             std::string_view key;
             int mp = 0;
@@ -807,11 +859,11 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
             const std::string_view pixels = nextWord(line, &at);
             const std::string_view name = trimmed(line.substr(at));
             const std::size_t bytes = static_cast<std::size_t>(std::max(side, 0)) * static_cast<std::size_t>(side) * 3;
-            if ((has != "cooldown" && has != "no-cooldown") || !sized || !mpRead || side < 0 || side > 64 ||
-                name.empty() || (pixels != "-" && pixels.size() != bytes * 2) || (pixels == "-" && side != 0)) {
-                return fail("a skill is: skill cooldown|no-cooldown [key=KEY] [mp=MP] SIDE PIXELS NAME");
+            if ((!active && !utility) || !sized || !mpRead || side < 0 || side > 64 || name.empty() ||
+                (pixels != "-" && pixels.size() != bytes * 2) || (pixels == "-" && side != 0)) {
+                return fail("a skill is: skill active|utility [key=KEY] [mp=MP] SIDE PIXELS NAME");
             }
-            Skill skill{std::string(name), has == "cooldown", side, {}, std::string(key), mp};
+            Skill skill{std::string(name), active, side, {}, std::string(key), mp};
             skill.bgr.reserve(bytes);
             for (std::size_t i = 0; i < bytes; ++i) {
                 const auto digit = [](char c) {
@@ -857,6 +909,24 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
                     const auto* found = std::find(std::begin(kClickButtonWords), std::end(kClickButtonWords), rest);
                     if (found != std::end(kClickButtonWords)) {
                         task.button = static_cast<ClickButton>(found - std::begin(kClickButtonWords));
+                    }
+                } else if (taskKind == TaskKind::FocusCamera) {
+                    const auto* found = std::find(std::begin(kFocusModeWords), std::end(kFocusModeWords), rest);
+                    if (found != std::end(kFocusModeWords)) {
+                        task.focus = static_cast<FocusMode>(found - std::begin(kFocusModeWords));
+                    }
+                } else if (taskKind == TaskKind::LookAround) {
+                    if (int degrees = 0; toInt(rest, &degrees)) { // Nothing (or not a number): all the way round.
+                        task.degrees = std::clamp(degrees, kLookMinDegrees, kLookMaxDegrees);
+                    }
+                } else if (taskKind == TaskKind::MoveToDrop) {
+                    if (int reach = 0; toInt(rest, &reach)) { // Nothing (or not a number): kDropReach.
+                        task.reach = std::clamp(reach, kDropMinReach, kDropMaxReach);
+                    }
+                } else if (taskKind == TaskKind::Flee) {
+                    const auto* found = std::find(std::begin(kFleeFromWords), std::end(kFleeFromWords), rest);
+                    if (found != std::end(kFleeFromWords)) {
+                        task.from = static_cast<FleeFrom>(found - std::begin(kFleeFromWords));
                     }
                 }
                 tree.find(idOf(of))->tasks.push_back(std::move(task));
@@ -930,6 +1000,15 @@ std::optional<Tree> readTree(std::string_view text, std::string* error) {
                 }
                 condition.kind = Kind::HasTarget;
                 condition.compare = answer == "yes" ? Compare::Equal : Compare::NotEqual;
+            } else if (left == "event") {
+                const std::string_view event = nextWord(line, &at);
+                const auto* word = std::find(std::begin(kEventWords), std::end(kEventWords), event);
+                if (word == std::end(kEventWords)) {
+                    return fail("an event condition is: if and|or event hp-lost|target-hit-by-others");
+                }
+                condition.kind = Kind::Event;
+                condition.compare = Compare::Equal;
+                condition.event = static_cast<Event>(word - std::begin(kEventWords));
             } else {
                 const std::string_view compare = nextWord(line, &at);
                 const std::string_view right = nextWord(line, &at);

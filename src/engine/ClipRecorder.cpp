@@ -104,7 +104,8 @@ struct Snap {
 struct Note {
     std::int64_t qpc = 0;
     std::string text;
-    bool log = false; // A line of observex's log (ClipRecorder::logged), made at `when`.
+    bool log = false;   // A line of observex's log (ClipRecorder::logged), made at `when`,
+    bool trace = false; // or of its trace (ClipRecorder::traced).
     std::string when;
 };
 
@@ -114,7 +115,20 @@ struct Grounded {
     std::uint64_t image = 0;
     std::uint64_t followed = 0;
     GroundCamera camera;
+    std::shared_ptr<const GroundHeights> heights; // The terrain it lay on (null: flat).
 };
+
+// The terrains `grounds` lay on, each once, in the order they first did: heights.bin's, which the heights lines number
+// from 1.
+std::vector<const GroundHeights*> terrainsOf(std::span<const Grounded> grounds) {
+    std::vector<const GroundHeights*> terrains;
+    for (const Grounded& ground : grounds) {
+        if (ground.heights && std::find(terrains.begin(), terrains.end(), ground.heights.get()) == terrains.end()) {
+            terrains.push_back(ground.heights.get());
+        }
+    }
+    return terrains;
+}
 
 // The depth map the Show flag Depth drew over one screen image (ClipRecorder::depthShown).
 struct DepthShown {
@@ -452,6 +466,8 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
 
     looks = 0;
     std::vector<char> lookLines(kExactLookChars);
+    const std::vector<const GroundHeights*> terrains = terrainsOf(job.grounds);
+    std::size_t terrainWritten = 0; // The terrain the last heights line named (0: flat, as before the first).
     for (const Item& item : items) {
         if (item.order == 0) {
             const Packet& packet = *job.packets[item.index];
@@ -472,6 +488,8 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
             const Note& note = job.notes[item.index];
             if (note.log) {
                 appendLog(text, ms(note.qpc), LogLine{note.when, note.text});
+            } else if (note.trace) {
+                appendTrace(text, ms(note.qpc), LogLine{note.when, note.text});
             } else {
                 appendNote(text, ms(note.qpc), note.text);
             }
@@ -479,6 +497,15 @@ std::string clipText(const SaveJob& job, unsigned& looks) {
             const Grounded& ground = job.grounds[item.index];
             appendGround(text, static_cast<unsigned long long>(ground.image), ms(ground.qpc),
                          static_cast<unsigned long long>(ground.followed), ground.camera);
+            const std::size_t terrain =
+                ground.heights ? static_cast<std::size_t>(std::find(terrains.begin(), terrains.end(),
+                                                                    ground.heights.get()) - terrains.begin()) + 1
+                               : 0;
+            if (terrain != terrainWritten) {
+                appendHeights(text, static_cast<unsigned long long>(ground.image), ms(ground.qpc),
+                              static_cast<unsigned long long>(terrain));
+                terrainWritten = terrain;
+            }
         } else if (item.order == 6) {
             const Brained& brained = job.brains[item.index];
             appendBrain(text, static_cast<unsigned long long>(brained.image), ms(brained.qpc), brained.brain);
@@ -530,6 +557,9 @@ ClipInfo writeClip(const SaveJob& job) {
     }
     if (!job.depths.empty()) {
         writeDepthFile(job.folder / kClipDepth, job.depths);
+    }
+    if (const std::vector<const GroundHeights*> terrains = terrainsOf(job.grounds); !terrains.empty()) {
+        writeHeightsFile(job.folder / kClipHeights, terrains);
     }
 
     ClipInfo info;
@@ -1181,13 +1211,18 @@ void ClipRecorder::note(std::string_view text) {
 
 void ClipRecorder::logged(std::int64_t qpc, const LogLine& line) {
     std::scoped_lock lock(impl_->mutex);
-    impl_->newNotes.push_back({qpc, line.text, true, line.when});
+    impl_->newNotes.push_back({qpc, line.text, true, false, line.when});
+}
+
+void ClipRecorder::traced(std::int64_t qpc, const LogLine& line) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->newNotes.push_back({qpc, line.text, false, true, line.when});
 }
 
 void ClipRecorder::grounded(std::int64_t shownQpc, std::uint64_t image, std::uint64_t followed,
-                            const GroundCamera& drawn) {
+                            const GroundCamera& drawn, std::shared_ptr<const GroundHeights> heights) {
     std::scoped_lock lock(impl_->mutex);
-    impl_->newGrounds.push_back({shownQpc, image, followed, drawn});
+    impl_->newGrounds.push_back({shownQpc, image, followed, drawn, std::move(heights)});
 }
 
 void ClipRecorder::depthed(std::shared_ptr<const DepthRecord> record) {

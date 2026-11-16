@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Depth.h"
+#include "core/Ground.h"
 #include "core/Heuristics.h"
 
 #include <array>
@@ -64,5 +65,14 @@ private:
 void writeDepthFile(const std::filesystem::path& file, std::span<const std::shared_ptr<const DepthRecord>> records);
 // Reads them back (imageQpc 0), in the order written. Empty and `error` set (if given) when it cannot.
 std::vector<DepthRecord> readDepthFile(const std::filesystem::path& file, std::string* error = nullptr);
+
+// The terrains a clip's grid lay on (core/Ground's GroundHeights, with what its newest map saw in front: about 135 kB
+// each; files from before 2026-11-16 late morning read without it): heights.bin beside clip.txt, whose heights lines
+// say which from when (core/ClipLines), in the order the lines number them (from 1).
+inline constexpr char kClipHeights[] = "heights.bin";
+// Writes `heights` (none null) into `file`. Throws on failure.
+void writeHeightsFile(const std::filesystem::path& file, std::span<const GroundHeights* const> heights);
+// Reads them back, in the order written: those it could read (none: no file, or not one).
+std::vector<std::shared_ptr<const GroundHeights>> readHeightsFile(const std::filesystem::path& file);
 
 } // namespace observex

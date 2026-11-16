@@ -51,7 +51,9 @@ void SkillUser::press(const Input& in, int index, Output& out) {
     pressedAt_ = in.now;
     lastShown_ = -1.0;
     castAt_ = -1.0;
+    castEndAt_ = -1.0;
     coolingAt_ = -1.0;
+    mpKnown_ = false;
     // The MP before it: the most from here on is what its cost comes off.
     mpTop_ = in.variables != nullptr && in.variables->mpPointsKnown ? in.variables->mpPoints : -1.0f;
 }
@@ -102,10 +104,10 @@ SkillUser::Output SkillUser::step(const Input& in) {
         press(in, pick, out);
         out.log = "Use Skill " + chosen_.name + ": pressed " + chosen_.key +
                   (notReady.empty() ? std::string() : " (not ready: " + notReady + ")");
-        if (!chosen_.cooldown && chosen_.mp <= 0) {
-            done_ = true; // Nothing to watch it by.
+        if (!chosen_.active) {
+            done_ = true; // Pressed, held a moment and let go (the app waits for the let-go).
             out.done = true;
-            out.log += ", done (no cooldown or MP cost to watch)";
+            out.log += ", a utility skill: done once its key is let go";
         }
         return out;
     }
@@ -114,25 +116,27 @@ SkillUser::Output SkillUser::step(const Input& in) {
     if (fresh && in.shown >= pressedAt_) {
         const statetree::Variables& v = *in.variables;
         lastShown_ = in.shown;
-        // Its MP cost taken (done), or the most MP since the press (regeneration before the cost comes off).
+        // Its MP taken (done: what an active skill is done by), or the most MP since the press (regeneration before
+        // the cost comes off). With no MP Cost set, any point lost counts.
+        mpKnown_ = v.mpPointsKnown;
         if (v.mpPointsKnown) {
-            if (chosen_.mp > 0 && mpTop_ >= 0.0f &&
-                mpTop_ - v.mpPoints >= kMpShare * static_cast<float>(chosen_.mp)) {
-                finish(out, "done, its MP taken (" + points(mpTop_) + " -> " + points(v.mpPoints) + ", it costs " +
-                                std::to_string(chosen_.mp) + pressesNote() + ")");
+            const float needed = chosen_.mp > 0 ? kMpShare * static_cast<float>(chosen_.mp) : 1.0f;
+            if (mpTop_ >= 0.0f && mpTop_ - v.mpPoints >= needed) {
+                finish(out, "done, its MP taken (" + points(mpTop_) + " -> " + points(v.mpPoints) +
+                                (chosen_.mp > 0 ? ", it costs " + std::to_string(chosen_.mp) : ", no MP Cost set") +
+                                pressesNote() + ")");
                 return out;
             }
             mpTop_ = std::max(mpTop_, v.mpPoints);
         }
         // Its cast: the cast bar with its name (or a cast not named: the bar's skill is the one whose cooldown began
-        // last, unknown for one without), until it shows no cast.
+        // last, unknown for one without), until it shows no cast. Its end is no done by itself (a cast can be broken
+        // off): its MP is waited for.
         const bool ours = v.castShown && (v.casting.empty() || sameText(v.casting, chosen_.name));
         if (ours && castAt_ < 0.0) {
             castAt_ = in.shown;
-        } else if (!ours && castAt_ >= 0.0) {
-            finish(out, "done, its cast ended (" + seconds(in.shown - castAt_) + " after its cast bar showed" +
-                            pressesNote() + ")");
-            return out;
+        } else if (!ours && castAt_ >= 0.0 && castEndAt_ < 0.0) {
+            castEndAt_ = in.shown;
         }
         // Its pressed look is no sign: the game flashes the slot also when it refuses the skill.
         const statetree::SkillSeen* seen = v.skill(chosen_.name);
@@ -144,21 +148,31 @@ SkillUser::Output SkillUser::step(const Input& in) {
 
     // 3. When to stop waiting.
     if (firstPressAt_ >= 0.0 && in.now - firstPressAt_ >= kMostSeconds) {
-        finish(out, "gave up waiting, no cast end or MP taken seen in " + seconds(kMostSeconds));
+        finish(out, "gave up waiting, no MP taken seen in " + seconds(kMostSeconds));
         return out;
     }
-    if (castAt_ >= 0.0) {
+    if (castAt_ >= 0.0 && castEndAt_ < 0.0) { // Casting.
         if (lastShown_ - castAt_ >= kCastSeconds) {
             finish(out, "done, its cast bar did not end in " + seconds(kCastSeconds));
         }
         return out;
     }
+    // The game took it (its cast ended, or its cooldown began with no cast bar) and its MP was not seen taken yet: at
+    // most kMpWait for it; with MP not read, that sign is all there is.
+    if (castEndAt_ >= 0.0) {
+        if (!mpKnown_) {
+            finish(out, "done, its cast ended (" + seconds(castEndAt_ - castAt_) +
+                            " after its cast bar showed; MP not read, so its end counts" + pressesNote() + ")");
+        } else if (lastShown_ - castEndAt_ >= kMpWait) {
+            finish(out, "done, its cast ended but no MP was seen taken in " + seconds(kMpWait) + pressesNote());
+        }
+        return out;
+    }
     if (coolingAt_ >= 0.0) {
-        const bool mpWatched = chosen_.mp > 0 && mpTop_ >= 0.0f;
-        if (mpWatched && lastShown_ - coolingAt_ >= kMpWait) {
-            finish(out, "done, its cooldown began but its MP was not seen taken" + pressesNote());
-        } else if (!mpWatched && lastShown_ - coolingAt_ >= kInstantWait) {
-            finish(out, "done, its cooldown began with no cast bar (instant" + pressesNote() + ")");
+        if (!mpKnown_ && lastShown_ - coolingAt_ >= kInstantWait) {
+            finish(out, "done, its cooldown began with no cast bar (instant; MP not read" + pressesNote() + ")");
+        } else if (mpKnown_ && lastShown_ - coolingAt_ >= kMpWait) {
+            finish(out, "done, its cooldown began but no MP was seen taken in " + seconds(kMpWait) + pressesNote());
         }
         return out;
     }

@@ -38,11 +38,38 @@ ImU32 barColour(std::string_view piece, std::string_view name) {
     return theme::kTextMuted;
 }
 
+// `value` with a comma between thousands, as the game writes adena: "12,345".
+std::string grouped(long long value) {
+    const std::string digits = std::to_string(value < 0 ? -value : value);
+    std::string out = value < 0 ? "-" : "";
+    for (std::size_t i = 0; i < digits.size(); ++i) {
+        if (i > 0 && (digits.size() - i) % 3 == 0) {
+            out += ',';
+        }
+        out += digits[i];
+    }
+    return out;
+}
+
+// How long, to the minute once it is one: "45 s", "12 min", "1 h 05 min".
+std::string duration(double seconds) {
+    const long long whole = static_cast<long long>(std::max(seconds, 0.0));
+    char text[32];
+    if (whole < 60) {
+        std::snprintf(text, sizeof(text), "%lld s", whole);
+    } else if (whole < 3600) {
+        std::snprintf(text, sizeof(text), "%lld min", whole / 60);
+    } else {
+        std::snprintf(text, sizeof(text), "%lld h %02lld min", whole / 3600, whole % 3600 / 60);
+    }
+    return text;
+}
+
 // What a row shows for one gauge.
 struct Value {
     float full = -1.0f; // Below 0: the bar drawn empty.
     char text[40] = {};
-    char percent[16] = {};
+    char percent[32] = {}; // Or a row's note ("123,456 an hour").
     bool doubted = false;
     bool none = false;  // Nothing known: muted.
     bool noBar = false; // Words or a count only (the target's name, Nearby).
@@ -104,7 +131,14 @@ Value valueOf(const GameGauge* gauge) {
         return value;
     }
     value.full = gauge->full;
-    if (gauge->text[0] != '\0') {
+    if (piece == kNearbyPiece && std::strcmp(gauge->name.data(), kSinceKillGauge) == 0 && gauge->text[0] != '\0') {
+        // Seconds; "inf" before any kill.
+        if (std::strcmp(gauge->text.data(), "inf") == 0) {
+            std::snprintf(value.text, sizeof(value.text), "no kill yet");
+        } else {
+            std::snprintf(value.text, sizeof(value.text), "%s s", gauge->text.data());
+        }
+    } else if (gauge->text[0] != '\0') {
         std::snprintf(value.text, sizeof(value.text), "%s", gauge->text.data());
     } else if (gauge->doubted[0] != '\0') {
         std::snprintf(value.text, sizeof(value.text), "%s?", gauge->doubted.data());
@@ -257,7 +291,7 @@ private:
 
 void StatsTile::draw(const theme::Fonts& fonts, const GameStats* stats, const char* empty, const char* problem,
                      const std::vector<statetree::Skill>& skills, const SkillIcons& icons, float dpi,
-                     const CameraShown& camera, const char* cameraProblem) {
+                     const CameraShown& camera, const char* cameraProblem, const BrainTally& tally) {
     ImVec2 start = ImGui::GetCursorScreenPos();
     const ImVec2 tileStart = start;
     const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
@@ -294,6 +328,31 @@ void StatsTile::draw(const theme::Fonts& fonts, const GameStats* stats, const ch
         const Drawer drawer(fonts, icons, dpi);
         start.y = drawer.card(card, start.x, start.y, width, drawer.labelWidth({card})) + std::round(kCardGap * dpi);
     }
+    if (tally.shown) {
+        // What the brain got since its last start, the whole width: each count, and per hour once a minute has gone.
+        Card card{"Since the brain started", {}, "Counted once the brain starts"};
+        if (tally.started) {
+            const bool hourly = tally.seconds >= 60.0;
+            const auto counted = [&](const char* label, long long value) {
+                Row row;
+                row.label = label;
+                row.text = grouped(value);
+                if (hourly) {
+                    row.note = grouped(std::llround(static_cast<double>(value) * 3600.0 / tally.seconds)) + " an hour";
+                }
+                card.rows.push_back(row);
+            };
+            counted("Kills", tally.kills);
+            counted("Adena", tally.adena);
+            Row time;
+            time.label = "Time";
+            time.text = duration(tally.seconds);
+            time.note = tally.acting ? "active" : "stopped";
+            card.rows.push_back(time);
+        }
+        const Drawer drawer(fonts, icons, dpi);
+        start.y = drawer.card(card, start.x, start.y, width, drawer.labelWidth({card})) + std::round(kCardGap * dpi);
+    }
     float bottom = start.y;
     if (stats == nullptr) {
         drawList->AddText(start, theme::kTextMuted, empty != nullptr ? empty : "Nothing read yet");
@@ -302,12 +361,12 @@ void StatsTile::draw(const theme::Fonts& fonts, const GameStats* stats, const ch
         // The cards, each its gauges in the order read: You (the status window and the cast bar), Cooldowns (the
         // profile's skills with one, then any other read: a clip's), Nearby, Target (its name first), any other.
         Card you{kYou, {}, nullptr};
-        Card cooldowns{kCooldowns, {}, "No skills with a cooldown yet (Skills tab)"};
+        Card cooldowns{kCooldowns, {}, "No active skills yet (Skills tab)"};
         Card nearby{kNearby, {}, nullptr};
         Card target{kTarget, {}, "No target"};
         std::vector<Card> others;
         for (const statetree::Skill& skill : skills) {
-            if (skill.cooldown) {
+            if (skill.active) { // A utility skill has no cooldown.
                 cooldowns.rows.push_back({stats->find(kSkillsPiece, skill.name), skill.name, true});
             }
         }

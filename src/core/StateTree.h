@@ -27,11 +27,44 @@ enum class Variable : std::uint8_t {
               // skills reachable from conditions).
     Characters, // How many characters the model sees, you left out (a count; the user asked, 2026-11-14).
     Monsters,   // How many of them are monsters (a count).
+    // The monster memory (core/MonsterMemory; the user asked, 2026-11-16: turn round first, remember every monster and
+    // its distance, then go for the nearest): how many monsters it remembers round the own character (a count; those
+    // Select Target gave up on left out), and how far the nearest of them is: Monster Distance (game units, as the
+    // live tags; not known while it remembers none, so "Monster Distance < 600" says some monster it knows, on the
+    // screen or off it, is nearer than 600; the user asked for it by that name, 2026-11-16; "Nearest Monster" until
+    // then, its file word still nearest-monster).
+    MonstersAround,
+    MonsterDistance,
+    // The drops (the user asked, 2026-11-16: loot them before seeking the next monster): how many the drop finder
+    // sees (core/LootWatch's spot; the count held kLostMs after they vanish, so one missed look or the own character
+    // standing on them does not end the loot; drops given up on left out), and how far the nearest of those seen now
+    // is (game units, as the live tags; not known while none shows or the camera is not known).
+    Drops,
+    DropDistance,
+    // Seconds since the target last died (core/TargetWatch's death: its HP bar read empty on 2 readings, as the Kills
+    // counter), timed by the screen image of each reading; before the first kill since observex started, as long ago
+    // as can be (infinity: "Since Kill > 0.75" holds, "< 0.5" does not; until 2026-11-16 not known, so neither held and
+    // the user's Root never left for Seek Monster) (the user asked, 2026-11-16: an explicit condition to wait a moment
+    // for a kill's drops, as the drop finder sees them 0.05-0.25 s after the death, after the brain had already gone to
+    // Rest).
+    SinceKill,
+    // How far the target is from the own character (game units, as the live tags): its box on the screen now as
+    // core/TargetWatch knows it, its feet on the ground; not known with no target, its box not known or off the
+    // screen, or the camera not known (the user's clip 2026-11-16_14-04-25: Wind Strike kept being cast at an Imp 640
+    // away, "The distance is too far", while another hit the own character; with it, "HP Lost and Target Distance >
+    // 300" can go to Select Target's Attacker).
+    TargetDistance,
 };
-inline constexpr int kVariables = 9;
+inline constexpr int kVariables = 15;
 const char* nameOf(Variable variable); // "HP", ..., "Cast", "Cooldown"; "Number" for None.
-// Whether `variable` is a count (shown as a number), not a percent.
-inline bool isCount(Variable variable) { return variable == Variable::Characters || variable == Variable::Monsters; }
+// Whether `variable` is shown as a plain number (a count, or a distance in game units), not a percent.
+inline bool isCount(Variable variable) {
+    return variable == Variable::Characters || variable == Variable::Monsters || variable == Variable::MonstersAround ||
+           variable == Variable::MonsterDistance || variable == Variable::Drops || variable == Variable::DropDistance ||
+           variable == Variable::TargetDistance;
+}
+// Whether `variable` is in seconds (shown "0.4 s"), neither a count nor a percent.
+inline bool isSeconds(Variable variable) { return variable == Variable::SinceKill; }
 
 struct Operand {
     Variable variable = Variable::None;
@@ -54,6 +87,7 @@ enum class Kind : std::uint8_t {
     Skill,      // A skill is ready, cooling down or being cast.
     HasTarget,  // Something is targeted (its window shows), or (compare !=) nothing is (the user asked, 2026-11-12).
     SkillsReady, // Is Skill Ready: of a list of skills, any one is ready, or all are (the user asked, 2026-11-15).
+    Event,       // An event came (see Event below; the user asked, 2026-11-16).
 };
 enum class SkillIs : std::uint8_t { Ready, CoolingDown, Cast };
 inline constexpr int kSkillIs = 3;
@@ -62,6 +96,20 @@ const char* nameOf(SkillIs is); // "Ready", "Cooling down", "Being cast".
 enum class Need : std::uint8_t { AnySkill, AllSkills };
 inline constexpr int kNeeds = 2;
 const char* nameOf(Need need); // "Any Skill", "All Skills".
+
+// What happened in the game, as UE's StateTree events (the user asked, 2026-11-16: "event-based conditions", to leave
+// Rest once HP was lost): the app notes each on the reading it was seen on, and the brain's next step has it, for that
+// one step only. Taken by a transition or not, it is gone then, so one that came while in another state never waits
+// to fire later. An Event condition holds on that step; on an Any time transition it is UE's On Event trigger.
+enum class Event : std::uint8_t {
+    HpLost, // The own HP fell (core/HpWatch: its number read lower twice in a row; a lower most left out).
+    // The target's HP bar fell while the own character did not hit it: no MP taken and no cast ended near it
+    // (core/TargetHitWatch; the user asked, 2026-11-16: someone nearer started hitting the monster the own character
+    // runs to, so leave it to them, no kill steal).
+    TargetHitByOthers,
+};
+inline constexpr int kEvents = 2;
+const char* nameOf(Event event); // "HP Lost", "Target Hit By Others".
 
 // One condition of a transition. Each fails while what it reads is not known (a bar unseen, no target, a skill not
 // found on screen).
@@ -75,6 +123,7 @@ struct Condition {
     SkillIs is = SkillIs::Ready; // Skill.
     std::vector<std::string> skills; // SkillsReady: the skills' names (none: never holds),
     Need need = Need::AnySkill;      // and whether any or all must be ready.
+    Event event = Event::HpLost;     // Event: the one it waits for.
 };
 
 // When a transition is tried, as UE's transition trigger (the user asked, 2026-11-15: "transition at any time OR after
@@ -100,42 +149,109 @@ struct Transition {
 // once the one before is done; after the last nothing runs until the state is entered again. Done:
 // - Select Target (Lock Mouse Onto until 2026-11-15): the target is chosen, the cursor moved onto it quickly and
 //   smoothly, and once the game shows it hovered (its name plate over it, grey orbs) clicked; done once the game shows
-//   it is the new target (its plate's orbs coloured, and the target window up with its name).
+//   it is the new target (its plate's orbs coloured, and the target window up with its name); also done, without a
+//   target, once there is nothing to select a moment (core/TargetSelect's kNoneWait).
 // - Use Skill: of its skills, top to bottom, the first ready one is pressed (the user asked, 2026-11-15); done once the
 //   game shows it was used: its cast ended, or its MP cost (the Skills tab) was taken (core/SkillUse says how, with
 //   its fallbacks).
 // - Click Mouse: done once clicked.
 // - Debug Print (the user asked, 2026-11-15, to see a parallel task work): writes where the brain is into the Log,
 //   "Debug Print: Combat > Attack Spell, running Use Skill"; done once written. Parallel, it writes that every 0.3 s.
+// - Focus Camera (the user asked, 2026-11-16: "rotate with rmb + move gently to make the target box stay within a
+//   treshold in 1/4 or 3/4 of the screen", meant to be Parallel in Combat, "whenever lmb mouse is free"): in its mode
+//   (FocusMode) Character + Target, short right-button turns of the camera keep the target a quarter of the width
+//   from the own character, the pitch within 20-30 degrees (core/CameraFocus); done once the target is in place (or
+//   there is none). Parallel, it goes on the whole time, waiting while Select Target or Click Mouse runs.
+// - Look Around (the user asked, 2026-11-16: "before we decide to select a monster, we first rotate around, remember
+//   all monsters and their distances"): the camera turned once all the way round by the right button (core/LookAround;
+//   Task::degrees, 360 unless set otherwise), the monster memory (core/MonsterMemory) forgotten first and filled by
+//   every look on the way; done once turned (or, so it never stays stuck, given up on with a note). Left mid-turn (an
+//   Any time transition), it lets go of the right button at once.
+// - Move To Drop (the user asked, 2026-11-16: "order our character to move on top of it, and then spam the Pick Up
+//   skill"): the nearest drop the drop finder sees (core/DropPick); done at once when it lies within Task::reach game
+//   units of the own character, or none shows; else the cursor glides onto it and left-clicks (the game walks there;
+//   a click on an item picks it up too), the ground just short of it when a character's box covers it; done once it is
+//   within reach or gone. Fallbacks: no nearer kRetry after a click, clicked again; kClicks clicks or kGiveUp, given up
+//   on (left out of Drops for a while) and done.
+// - Flee (the user asked, 2026-11-16: "a task Flee, with parameter, for now just Target ... using depth decides where
+//   to click, and keeps moving away"): from what Task::from says (FleeFrom), the ground clicked away from it, again and
+//   again (core/Flee: its feet on the ground, the ways over the depth's terrain, off the interface and every box);
+//   done once there is nothing to flee from (Target: no target, or it died; Attacker: none seen and no HP lost for
+//   kAttackerHoldSeconds). It holds the mouse, so Focus Camera waits while it runs.
 // A Parallel task (Task::parallel; the user asked, 2026-11-15: "a parallel task", as UE's tasks of an active state)
 // is not one of them: it runs the whole time its state is active (current, or above the current one: Combat's while
 // its child Attack Spell runs; Root's only while Root is current), alongside them, starting when its state becomes
-// active and stopping when it is left; it is never done. Only kinds that share nothing with the tasks one after
-// another can be (canRunParallel): Debug Print for now; Use Skill, Select Target and Click Mouse press the keyboard
-// and mouse the one-after-another tasks use.
-enum class TaskKind : std::uint8_t { UseSkill, SelectTarget, ClickMouse, DebugPrint };
-inline constexpr int kTaskKinds = 4;
-const char* nameOf(TaskKind kind); // "Use Skill", "Select Target", "Click Mouse", "Debug Print".
+// active and stopping when it is left; it is never done. Only kinds that do not clash with the tasks one after
+// another can be (canRunParallel): Debug Print, and Focus Camera, which lets go of the mouse while one of them wants
+// it; Use Skill, Select Target and Click Mouse press the keyboard and mouse the one-after-another tasks use.
+enum class TaskKind : std::uint8_t {
+    UseSkill,
+    SelectTarget,
+    ClickMouse,
+    DebugPrint,
+    FocusCamera,
+    LookAround,
+    MoveToDrop,
+    Flee,
+};
+inline constexpr int kTaskKinds = 8;
+// "Use Skill", "Select Target", "Click Mouse", "Debug Print", "Focus Camera", "Look Around", "Move To Drop", "Flee".
+const char* nameOf(TaskKind kind);
 // Whether a task of `kind` can be Parallel.
-inline bool canRunParallel(TaskKind kind) { return kind == TaskKind::DebugPrint; }
+inline bool canRunParallel(TaskKind kind) { return kind == TaskKind::DebugPrint || kind == TaskKind::FocusCamera; }
 // How often a Parallel Debug Print writes.
 inline constexpr double kDebugPrintSeconds = 0.3;
 
-// What Select Target picks. No distances yet (the user asked, 2026-11-15), so Nearest Monster is the biggest monster
-// on the screen for now; later it will be the closest.
-enum class Target : std::uint8_t { NearestMonster };
-inline constexpr int kTargets = 1;
-const char* nameOf(Target target); // "Nearest Monster".
+// What Select Target picks: Nearest Monster is the nearest by its distance (the user asked, 2026-11-16), of those on
+// the screen and those the monster memory keeps off it (the camera turned to it first); one with no distance (far
+// off, or the camera not known yet) after all that have one, the biggest first. Attacker (the user's clip
+// 2026-11-16_14-04-25: an Imp hit the own character from beside it while the brain went for one 640 away) is the
+// monster hitting the own character, as core/Attacker takes it: the nearest on the screen now within kAttackerReach
+// (300 game units), at least kAttackerKindSure a monster, clicked beside the own character's box; none: done without
+// a target, as Nearest Monster with nothing to select. Meant for "HP Lost" transitions.
+enum class Target : std::uint8_t { NearestMonster, Attacker };
+inline constexpr int kTargets = 2;
+const char* nameOf(Target target); // "Nearest Monster", "Attacker".
 
 enum class ClickButton : std::uint8_t { Left, Right };
 inline constexpr int kClickButtons = 2;
 const char* nameOf(ClickButton button); // "Left", "Right".
+
+// What Focus Camera keeps on the screen (the user asked, 2026-11-16, for a chooseable mode): Character + Target, the own
+// character in the middle (the camera circles it) and the target at 1/4 or 3/4 of the width.
+enum class FocusMode : std::uint8_t { CharacterAndTarget };
+inline constexpr int kFocusModes = 1;
+const char* nameOf(FocusMode mode); // "Character + Target".
+
+// What Flee runs from (the user asked, 2026-11-16: "with parameter, for now just Target"): the target, its box on the
+// screen (the target watch's, or the one Select Target clicked) or, off it, where it was last seen; or the Attacker
+// (as Select Target's: the monster nearest the own character within kAttackerReach), while one was seen or HP was lost
+// within kAttackerHoldSeconds.
+enum class FleeFrom : std::uint8_t { Target, Attacker };
+inline constexpr int kFleeFroms = 2;
+const char* nameOf(FleeFrom from); // "Target", "Attacker".
+inline constexpr double kAttackerHoldSeconds = 1.5;
+
+// How far Look Around turns the camera: all the way round unless set otherwise (a part turn, e.g. to look back).
+inline constexpr int kLookAroundDegrees = 360;
+inline constexpr int kLookMinDegrees = 10;
+inline constexpr int kLookMaxDegrees = 720;
+
+// How near Move To Drop brings the own character to a drop (game units; the own character is 47 tall, a kill's drops
+// lie within 70 of the corpse): a guess to tune live, as the game's Pick Up reach is not known.
+inline constexpr int kDropReach = 80;
+inline constexpr int kDropMinReach = 20;
+inline constexpr int kDropMaxReach = 400;
 
 struct Task {
     TaskKind kind = TaskKind::UseSkill;
     std::vector<std::string> skills;        // UseSkill: the skills' names, tried top to bottom (none: none chosen yet).
     Target target = Target::NearestMonster; // SelectTarget: what it selects.
     ClickButton button = ClickButton::Left; // ClickMouse: which button is clicked.
+    FocusMode focus = FocusMode::CharacterAndTarget; // FocusCamera: what it keeps on the screen.
+    int degrees = kLookAroundDegrees; // LookAround: how far it turns (kLookMinDegrees to kLookMaxDegrees).
+    int reach = kDropReach;           // MoveToDrop: near enough, game units (kDropMinReach to kDropMaxReach).
+    FleeFrom from = FleeFrom::Target; // Flee: what it runs from.
     bool parallel = false; // Runs alongside the others the whole time its state is active (see TaskKind).
 };
 
@@ -148,13 +264,16 @@ struct TaskAt {
 };
 
 // A skill the user added (the Skills tab; the user asked, 2026-11-14: "a pocket with all skills", kept in the profile
-// like the tree): its name, whether it has a cooldown to read, its miniature (ready) on the hotbar slot it is in,
-// side x side, 3 bytes a pixel (blue, green, red), shown as its icon and turned grey for the stats reader, and its
+// like the tree): its name, whether it is an active or a utility skill, its miniature (ready) on the hotbar slot it is
+// in, side x side, 3 bytes a pixel (blue, green, red), shown as its icon and turned grey for the stats reader, and its
 // shortcut: the key written on that slot (the user asked, 2026-11-15: for the Pico to press later). Both follow the
 // skill when it is moved to another slot (app/App's followSkills).
 struct Skill {
     std::string name;
-    bool cooldown = true;
+    // The Skills tab's two columns (the user asked, 2026-11-16, in place of Has Cooldown): an active skill (Wind
+    // Strike) has a cooldown to read and Use Skill is done once its MP was taken; a utility skill (Sit, Pick Up) has
+    // none, and Use Skill is done once its key was pressed, held a moment and let go.
+    bool active = true;
     int side = 0;
     std::vector<std::uint8_t> bgr;
     // As read off the slot (heuristics/KeyLabels), e.g. "F2", "A+K1"; a '?' for each letter not known yet; "-" for a
@@ -178,6 +297,27 @@ struct State {
     std::vector<Transition> transitions; // Tried in order.
     std::vector<Task> tasks;             // In order.
 };
+
+// `items`' item at `index` moved to just before the one at `before` (counted before the move; their count: as the
+// last), as the tile's drag and drop puts a state's transitions, tasks and enter conditions (the user asked,
+// 2026-11-16: tasks and enter conditions dragged as transitions are). False, and nothing moved, for an `index` or a
+// `before` past the end.
+template <class T>
+bool moveWithin(std::vector<T>& items, std::size_t index, std::size_t before) {
+    if (index >= items.size() || before > items.size()) {
+        return false;
+    }
+    if (before == index || before == index + 1) {
+        return true; // Just before or after itself: where it is.
+    }
+    T moved = std::move(items[index]);
+    items.erase(items.begin() + static_cast<std::ptrdiff_t>(index));
+    if (before > index) {
+        --before; // It was counted before it went.
+    }
+    items.insert(items.begin() + static_cast<std::ptrdiff_t>(before), std::move(moved));
+    return true;
+}
 
 // A state as listed: depth-first, children in order, Root first at depth 0.
 struct Row {
@@ -251,6 +391,9 @@ struct Variables {
     bool mpPointsKnown = false;
     float mpPoints = 0.0f;
     float mpMax = 0.0f;
+    // The events that came since the brain's last step (by Event; the app puts them in, variablesOf() leaves them
+    // all false): they hold for this one step.
+    std::array<bool, kEvents> events{};
 
     const SkillSeen* skill(std::string_view name) const; // Null if no such skill was read.
 };
@@ -282,8 +425,9 @@ std::string describe(const std::vector<Condition>& conditions);
 // - Picking again: once the current state's tasks are all done, its parent (it itself while it has children, as none
 //   could be picked) picks again, as when entered, on every reading; it moves only when that lands on another state (so
 //   a skill is not pressed again while its state stays picked: Sit twice stands up). Not under Root.
-// (UE's StateTree also has failure, events, priorities and backtracking; CLAUDE.md's State tree paragraph keeps how,
-// for when the tree needs it.)
+// Events (Variables::events) are read by Event conditions like any other condition, on the step they came.
+// (UE's StateTree also has failure, priorities and backtracking; CLAUDE.md's State tree paragraph keeps how, for when
+// the tree needs it.)
 //
 // It also keeps which of the current state's tasks runs (they run one after another, see TaskKind): the first when a
 // state is entered (by a transition to itself too), the next on finishTask(). Parallel tasks are not among them: they
@@ -354,15 +498,20 @@ std::string whereText(const Tree& tree, int current, int task);
 // A tree saved as text (the files in Settings' brains folder; the user asked, 2026-11-12, for observex's own
 // extension), one line each:
 //   observex-brain 1
-//   skill cooldown|no-cooldown [key=KEY] [mp=MP] SIDE PIXELS NAME   a skill, in order: KEY its shortcut (left out
+//   skill active|utility [key=KEY] [mp=MP] SIDE PIXELS NAME   a skill, in order: KEY its shortcut (left out
 //                                 while not read); MP its MP cost (left out while 0); PIXELS its miniature in hex, 6
 //                                 digits a pixel (blue, green, red), rows top to bottom; NAME the rest of the line
+//                                 (files before 2026-11-16 say cooldown for active, no-cooldown for utility)
 //   state ID PARENT NAME          Root first (PARENT 0), every parent before its children, children in order
 //   task ID use-skill SKILLS      a task of state ID, in order; SKILLS the rest of the line, names between "|" (may be
 //                                 empty)
 //   task ID select-target TARGET  TARGET = nearest-monster ("lock-mouse", its word before 2026-11-15, is read too)
 //   task ID click-mouse BUTTON    BUTTON = left | right
 //   task ID debug-print
+//   task ID focus-camera MODE     MODE = character-target
+//   task ID look-around [DEGREES] DEGREES how far it turns (left out: 360; written only when not 360)
+//   task ID move-to-drop [REACH]  REACH near enough, game units (left out: kDropReach; written only when not that)
+//   task ID flee FROM             FROM = target
 //   task ID parallel KIND ...     a Parallel task: "parallel" before its kind (only kinds that canRunParallel; on
 //                                 another it is read as not Parallel)
 //                                 (a task line of an unknown kind, e.g. a name typed in before 2026-11-14, is left out)
@@ -370,12 +519,14 @@ std::string whereText(const Tree& tree, int current, int task);
 //   go FROM TO [done]             a transition of FROM, in order; the if lines after it are its conditions; "done": When
 //                                 Tasks Done (without it Any Time, as every transition before 2026-11-15)
 //   if JOIN LEFT COMPARE RIGHT    a condition: JOIN and / or; LEFT and RIGHT hp, mp, xp, target-hp, cast, characters,
-//                                 monsters, cooldown:SKILL (a space in SKILL written "_") or a number; COMPARE < <= == !=
-//                                 >= >
+//                                 monsters, monsters-around, nearest-monster, drops, drop-distance, since-kill,
+//                                 cooldown:SKILL (a space in SKILL written
+//                                 "_") or a number; COMPARE < <= == != >= >
 //   if JOIN target-name ==|!= TEXT                  TEXT the rest of the line (may be empty)
 //   if JOIN skill ready|cooling|cast SKILL          SKILL the rest of the line
 //   if JOIN skills-ready any|all SKILLS             SKILLS the rest of the line, names between "|"
 //   if JOIN has-target yes|no
+//   if JOIN event EVENT                             EVENT = hp-lost, target-hit-by-others
 inline constexpr char kTreeExtension[] = ".brain";
 std::string writeTree(const Tree& tree);
 // A tree written by writeTree (ids may change); nothing, and why in *error, if `text` is not one.

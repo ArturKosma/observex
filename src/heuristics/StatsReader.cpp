@@ -587,7 +587,7 @@ int StatsReader::areas(std::span<const UiPiece> pieces, int width, int height, S
             minimapArea_ = MinimapScroll::area(piece, width, height);
             out[count++] = minimapArea_;
         } else if (messagesArea_.x1 == 0 && std::strcmp(piece.name.data(), kMessagesPiece) == 0 && count < max) {
-            messagesArea_ = LocationReader::area(piece, width, height);
+            messagesArea_ = MessageLines::area(piece, width, height);
             out[count++] = messagesArea_;
         }
     }
@@ -904,9 +904,12 @@ void StatsReader::read(std::span<const UiPiece> pieces, std::span<const ColourPa
                       static_cast<double>(minimap_.lastMatch()), minimap_.points());
         because(note);
     }
-    location_.read(messages, messages != nullptr ? partAt(messagesArea_) : nullptr, out.minimap, ocr_, located_,
-                   why_);
+    // The Messages window's new lines: a /loc answer (white), items and adena picked up (yellow).
+    messages_.look(messages != nullptr ? partAt(messagesArea_) : nullptr);
+    location_.read(messages_, out.minimap, ocr_, located_, why_);
     out.location = located_;
+    pickups_.read(messages_, ocr_, picked_, why_);
+    out.pickups = picked_;
     copyName(out.why, why_);
 }
 

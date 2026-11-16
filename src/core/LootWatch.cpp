@@ -42,6 +42,14 @@ Spread spreadOf(std::span<const DropSeen> drops) {
     return {(x0 + x1) * 0.5f, (y0 + y1) * 0.5f, x1 - x0, y1 - y0, largest};
 }
 
+// Whether (x, y) lies in the middle 80% of `square` (where the drop model was taught to find drops).
+bool inside(const LootSquare& square, float x, float y) {
+    const float margin = static_cast<float>(square.side) * 0.1f;
+    return !square.empty() && x >= static_cast<float>(square.x) + margin &&
+           x <= static_cast<float>(square.x + square.side) - margin && y >= static_cast<float>(square.y) + margin &&
+           y <= static_cast<float>(square.y + square.side) - margin;
+}
+
 // The corpse size (lootSquareAt's `longest`) whose square fits drops spread so (lootSquareRound).
 float spotLongest(const Spread& spread) {
     constexpr float kInside = 0.8f; // tools/train/loot.py's LOOT_INSIDE.
@@ -176,6 +184,20 @@ LootWatch::Output LootWatch::step(const Input& in) {
             longest_ = spotLongest(spread);
         }
     }
+    // Looting: the ground round the own feet, where the own character hides what lies under and behind it.
+    const bool feet = in.looting && in.own && in.ownBox.y1 > in.ownBox.y0;
+    LootSquare feetSquare{};
+    if (feet) {
+        const StatsArea& own = in.ownBox;
+        feetSquare = lootSquareAt(static_cast<float>(own.x0 + own.x1) * 0.5f, static_cast<float>(own.y1),
+                                  static_cast<float>(own.y1 - own.y0), in.width, in.height);
+        if (spot_ == Spot::None) {
+            start(Spot::Found, in);
+            dropsX_ = static_cast<float>(own.x0 + own.x1) * 0.5f;
+            dropsY_ = static_cast<float>(own.y1);
+            longest_ = static_cast<float>(own.y1 - own.y0);
+        }
+    }
     if (spot_ == Spot::None) {
         return out;
     }
@@ -207,12 +229,14 @@ LootWatch::Output LootWatch::step(const Input& in) {
         longest_ = static_cast<float>(std::max(box.x1 - box.x0, box.y1 - box.y0));
         square_ = lootSquare(box, in.width, in.height);
         seen_ = in.ms;
+    } else if (feet && (most_ == 0 || inside(feetSquare, dropsX_, dropsY_))) {
+        square_ = feetSquare; // No drop found yet, or they lie round the own feet.
     } else if (spot_ == Spot::Found || most_ > 0) {
         square_ = lootSquareAt(dropsX_, dropsY_, longest_, in.width, in.height);
     }
 
-    // The end.
-    const bool lost = in.ms - seen_ > kLostMs;
+    // The end (a found spot goes on while looting: the own feet are looked at).
+    const bool lost = in.ms - seen_ > kLostMs && !(feet && spot_ == Spot::Found);
     const bool tooLong = spot_ == Spot::Kill && in.ms - started_ > kMaxMs;
     if (lost || tooLong) {
         if (spot_ == Spot::Found) {

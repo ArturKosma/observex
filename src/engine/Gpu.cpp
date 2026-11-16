@@ -3,6 +3,7 @@
 #include <d3d11_4.h> // ID3D11Multithread.
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cwchar>
 #include <iterator>
@@ -202,6 +203,31 @@ GpuDevice createGpuDevice(IDXGIAdapter* adapter, bool video) {
         multithread->SetMultithreadProtected(TRUE);
     }
     return gpu;
+}
+
+namespace {
+
+std::atomic<bool> gpuPrioritiesOn{true};
+
+} // namespace
+
+bool setGpuPriority(ID3D11Device* device, GpuPriority priority) {
+    if (!gpuPrioritiesOn.load(std::memory_order_relaxed) || priority == GpuPriority::Normal || device == nullptr) {
+        return true;
+    }
+    ComPtr<IDXGIDevice> dxgi;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgi)))) {
+        return false;
+    }
+    return SUCCEEDED(dxgi->SetGPUThreadPriority(priority == GpuPriority::Reaction ? 7 : -7));
+}
+
+void useGpuPriorities(bool on) {
+    gpuPrioritiesOn.store(on, std::memory_order_relaxed);
+}
+
+bool gpuPrioritiesUsed() {
+    return gpuPrioritiesOn.load(std::memory_order_relaxed);
 }
 
 } // namespace observex

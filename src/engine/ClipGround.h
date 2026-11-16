@@ -10,12 +10,21 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace observex {
+
+// The terrain from the frame at `timeMs` on (Today's: ClipGround), as the ground finder handed it out live.
+struct ClipHeights {
+    double timeMs = 0.0;
+    std::shared_ptr<const GroundHeights> heights; // Null: none from then on.
+};
+// Among `heights` (in time order) the one at `timeMs`: the last at or before it; null if none.
+const GroundHeights* heightsAmong(std::span<const ClipHeights> heights, double timeMs);
 
 // The game's camera over a saved clip, followed as the ground finder follows it live (engine/GroundFinder; the user
 // asked, 2026-11-12: the Ground flag on clips too): the same following (core/Ground's Grounding, today's
@@ -55,6 +64,8 @@ public:
     // The Stats tab's Camera card on each frame (the camera by the clip's mouse lines, anchored by this following as
     // live: Today's; none on a clip saved before them), in order. Valid once state() is Done.
     const std::vector<ClipCameraLine>& mouseCameras() const { return mouseCameras_; }
+    // The terrain the clip's depth maps made, from each frame it changed on, in order. Valid once state() is Done.
+    const std::vector<ClipHeights>& heights() const { return heights_; }
 
     // How a follow went, for the bench.
     struct Stats {
@@ -105,12 +116,13 @@ public:
     // Foundation needs it), on `device` (made with video support: createGpuDevice(adapter, true)), e.g. the bench's.
     // `layout` may be null (nothing of the interface left out). Throws if the video cannot be decoded. `mouseCameras`
     // (may be null) gets the Camera card on each frame, after its own following anchored the mouse's camera (none
-    // without mouse lines).
+    // without mouse lines); `heights` (may be null) the terrain from each frame it changed on.
     static std::vector<GroundCamera> follow(ID3D11Device* device, Grounding& ground, const std::filesystem::path& video,
                                             const ClipText& clip, const Guesses& shown, UiLayout* layout,
                                             std::stop_token stop = {}, std::atomic<float>* progress = nullptr,
                                             Stats* stats = nullptr, bool notes = false,
-                                            std::vector<ClipCameraLine>* mouseCameras = nullptr);
+                                            std::vector<ClipCameraLine>* mouseCameras = nullptr,
+                                            std::vector<ClipHeights>* heights = nullptr);
 
 private:
     void run(std::stop_token stop, ComPtr<IDXGIAdapter1> gpu);
@@ -122,6 +134,7 @@ private:
     std::filesystem::path uiFolder_;
     std::vector<GroundCamera> cameras_;
     std::vector<ClipCameraLine> mouseCameras_;
+    std::vector<ClipHeights> heights_;
     std::string error_;
     std::atomic<float> progress_{0.0f};
     std::atomic<State> state_{State::Working};

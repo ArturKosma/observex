@@ -59,6 +59,14 @@ struct ClipGroundLine {
     GroundCamera camera;             // As drawn (its timeMs: timeMs); not known: nothing drawn from then on.
 };
 
+// The terrain the Show flag Ground's grid lay on from one screen image on (since 2026-11-16; core/ClipLines' heights
+// line).
+struct ClipHeightsLine {
+    unsigned long long image = 0;   // The screen image it was drawn over first,
+    double timeMs = 0.0;            // which the screen showed then.
+    unsigned long long terrain = 0; // heights.bin's, from 1; 0: flat.
+};
+
 // The depth map the Show flag Depth drew over one screen image live (since 2026-11-12; core/ClipLines' depth line).
 struct ClipDepthLine {
     unsigned long long image = 0; // The screen image it was drawn over,
@@ -105,6 +113,7 @@ struct ClipText {
     std::vector<ClipNote> notes;
     std::vector<ClipGroundLine> grounds; // In time order; none before 2026-11-12.
     std::vector<ClipDepthLine> depths;   // Likewise.
+    std::vector<ClipHeightsLine> heights; // Likewise; none before 2026-11-16.
     std::vector<ClipDropsLine> drops;    // Likewise; none before the night of 2026-11-15.
     std::vector<ClipBrainLine> brains;   // Likewise; none before 2026-11-15.
     std::vector<ClipCameraLine> cameras; // Likewise; none before the night of 2026-11-15 (23:50).
@@ -127,6 +136,9 @@ GroundCamera recordedGround(std::span<const ClipGroundLine> lines, double timeMs
 // The depth map the app drew live when the screen showed the image of `timeMs` (Recorded's depth): the map of the last
 // line at or before it; 0 before the first or where nothing was drawn.
 unsigned long long recordedDepth(std::span<const ClipDepthLine> lines, double timeMs);
+// The terrain the app laid the grid on live then (Recorded's): the last heights line's at or before `timeMs`
+// (heights.bin's, from 1); 0 before the first or where the grid was flat.
+unsigned long long recordedHeights(std::span<const ClipHeightsLine> lines, double timeMs);
 // What the Show flag Drops drew live at `timeMs` (Recorded's drops): the last line at or before it; null before the
 // first or where nothing was drawn.
 const ClipDropsLine* recordedDrops(std::span<const ClipDropsLine> lines, double timeMs);

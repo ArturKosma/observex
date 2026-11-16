@@ -9,7 +9,7 @@
 
 // What observex_heuristics.dll hands the app (engine/HeuristicsLibrary): plain C, so the two only need to agree on
 // this and on Detection and Tracked (core/Detection), GreyView, GreyArea and SnapFind (core/Heuristics) and
-// GroundCamera, GroundHints, GroundNote and GroundDepthNote (core/Ground) and DepthInput (core/Depth), which the sizes
+// GroundCamera, GroundHints, GroundNote, GroundDepthNote and GroundHeights (core/Ground) and DepthInput (core/Depth), which the sizes
 // below check.
 // Change any of them and bump kObservexHeuristicsAbi: the app then refuses a DLL built for another one, and keeps the
 // heuristics it has, until both are rebuilt. 2 since 2026-11-11: snapping; 3 since that evening: snapping's searches
@@ -17,10 +17,14 @@
 // that evening: the ground turned by the minimap between follows (headAreas, head); 6 then: by the ground itself
 // (headFirstLevel); 7 later that night: the pitch by the depth network's maps (Grounding::depth); 8 since 2026-11-15:
 // the pitch by the camera's turns (GroundCamera::pitchByTurns, GroundNote's turns); 9 that evening:
-// GroundNote::turnTilt; 10 that night: the camera by the mouse's counts (GroundHints' mouse).
+// GroundNote::turnTilt; 10 that night: the camera by the mouse's counts (GroundHints' mouse); 11 since 2026-11-16: the
+// distance held while the mouse's wheel does not turn (GroundHints' wheel, GroundNote's zoom); 12 that morning: moved
+// by the wheel's notches (GroundHints::wheelNotches); 13 then: the terrain from the depth maps (Grounding::heights,
+// GroundHeights, GroundDepthNote's shape); 14 late that morning: what the newest map saw in front, so the grid hides
+// behind it (GroundHeights' front).
 extern "C" {
 
-inline constexpr std::uint32_t kObservexHeuristicsAbi = 10;
+inline constexpr std::uint32_t kObservexHeuristicsAbi = 14;
 
 struct ObservexHeuristicsApi {
     std::uint32_t abi;           // kObservexHeuristicsAbi when the DLL was built.
@@ -79,6 +83,9 @@ struct ObservexHeuristicsApi {
     std::uint32_t depthInputSize; // sizeof(DepthInput) and sizeof(GroundDepthNote) when the DLL was built.
     std::uint32_t groundDepthNoteSize;
     bool (*groundDepth)(void* ground, const observex::DepthInput* map, double timeMs, observex::GroundDepthNote* out);
+    // Grounding's heights (1 copied, 0 the same version, -1 failed: nothing written).
+    std::uint32_t groundHeightsSize; // sizeof(GroundHeights) when the DLL was built.
+    int (*groundHeights)(void* ground, std::uint64_t version, observex::GroundHeights* out);
 };
 
 // The one function the DLL exports, by this name.

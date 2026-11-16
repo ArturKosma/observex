@@ -14,12 +14,14 @@
 
 namespace observex {
 
-// A square part of the image to look at instead of all of it (a side of 0: all of it), in image pixels; moved to lie
-// inside the image if it does not.
+// A part of the image to look at instead of all of it (a side of 0: all of it), in image pixels; moved to lie inside
+// the image if it does not. A square (drops round a corpse), or `side` wide and `height` tall (the close-up round the
+// own character: the screen's own shape, so characters look as on the whole screen).
 struct DetectArea {
     int x = 0;
     int y = 0;
     int side = 0;
+    int height = 0; // 0: `side` (a square).
 };
 
 // One trained model (models/<category>/model.onnx, written by tools/train) running on the GPU through TensorRT.
@@ -39,9 +41,11 @@ public:
     // model.engine: about 35 s on an RTX 4090, during which `progress` goes from 0 to 1 and a stop request ends it.
     // Later starts load the saved engine in under a second. Detectors load or prepare one at a time: a second one
     // waits (a stop request ends the wait). Also loads the kind update there, if there is a valid one. Throws on
-    // failure, saying why.
+    // failure, saying why. The network runs on a CUDA stream of the top priority for GpuPriority::Reaction (the live
+    // recogniser) and of the lowest otherwise (CUDA's default), so among observex's networks the characters go first;
+    // the caller gives `device` its own priority (setGpuPriority).
     Detector(ID3D11Device* device, IDXGIAdapter* adapter, const std::filesystem::path& modelFolder, unsigned width,
-             unsigned height, std::stop_token stop, std::atomic<float>& progress);
+             unsigned height, GpuPriority priority, std::stop_token stop, std::atomic<float>& progress);
     ~Detector();
 
     Detector(const Detector&) = delete;

@@ -3,6 +3,8 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -181,6 +183,48 @@ TEST_CASE("a transition moves before another of its state's, last, or to another
     CHECK_FALSE(tree.moveTransition(99, 0, a, 0)); // nor such states.
     CHECK_FALSE(tree.moveTransition(a, 0, 99, 0));
     CHECK(targets(a) == std::vector<int>{b, a});
+
+    // Written in its new order, it reads back the same.
+    const std::optional<Tree> read = readTree(writeTree(tree), nullptr);
+    REQUIRE(read);
+    CHECK(writeTree(*read) == writeTree(tree));
+}
+
+TEST_CASE("a task or an enter condition moves before another of its list, or last, keeping what it is") {
+    std::vector<int> items{0, 1, 2, 3};
+    CHECK(moveWithin(items, 2, 0)); // Up, first.
+    CHECK(items == std::vector<int>{2, 0, 1, 3});
+    CHECK(moveWithin(items, 0, 4)); // Down, last.
+    CHECK(items == std::vector<int>{0, 1, 3, 2});
+    CHECK(moveWithin(items, 0, 2)); // Down one: before the one after the next.
+    CHECK(items == std::vector<int>{1, 0, 3, 2});
+    CHECK(moveWithin(items, 1, 1)); // Just before itself,
+    CHECK(moveWithin(items, 1, 2)); // or after it: where it is.
+    CHECK(items == std::vector<int>{1, 0, 3, 2});
+    CHECK_FALSE(moveWithin(items, 4, 0)); // No such item,
+    CHECK_FALSE(moveWithin(items, 0, 5)); // nor such a place.
+    CHECK(items == std::vector<int>{1, 0, 3, 2});
+
+    // A state's tasks and enter conditions, with what each has.
+    Tree tree;
+    const int a = tree.add(tree.root(), "A");
+    State& state = *tree.find(a);
+    statetree::Task skill;
+    skill.kind = statetree::TaskKind::UseSkill;
+    skill.skills = {"Wind Strike"};
+    statetree::Task click;
+    click.kind = statetree::TaskKind::ClickMouse;
+    click.button = statetree::ClickButton::Right;
+    state.tasks = {skill, click};
+    state.enter = {hpBelow(30.0f), hpBelow(60.0f, Join::Or)};
+    CHECK(moveWithin(state.tasks, 1, 0));
+    CHECK(state.tasks[0].kind == statetree::TaskKind::ClickMouse);
+    CHECK(state.tasks[0].button == statetree::ClickButton::Right);
+    CHECK(state.tasks[1].skills == std::vector<std::string>{"Wind Strike"});
+    CHECK(moveWithin(state.enter, 1, 0)); // Its join goes with it.
+    CHECK(state.enter[0].right.number == 60.0f);
+    CHECK(state.enter[0].join == Join::Or);
+    CHECK(state.enter[1].right.number == 30.0f);
 
     // Written in its new order, it reads back the same.
     const std::optional<Tree> read = readTree(writeTree(tree), nullptr);
@@ -461,6 +505,32 @@ TEST_CASE("a Parallel task is written with parallel before its kind, and only ki
     CHECK(odd->find(2)->tasks[0].skills == std::vector<std::string>{"Wind Strike"});
 }
 
+TEST_CASE("Focus Camera can run alongside and is written with its mode") {
+    CHECK(canRunParallel(TaskKind::FocusCamera));
+    CHECK(std::string(nameOf(TaskKind::FocusCamera)) == "Focus Camera");
+    CHECK(std::string(nameOf(FocusMode::CharacterAndTarget)) == "Character + Target");
+    Tree tree;
+    const int combat = tree.add(tree.root(), "Combat");
+    Task focus{TaskKind::FocusCamera};
+    focus.parallel = true;
+    tree.find(combat)->tasks = {focus, {TaskKind::FocusCamera}};
+    const std::string text = writeTree(tree);
+    CHECK(text.find("task 2 parallel focus-camera character-target\ntask 2 focus-camera character-target\n") !=
+          std::string::npos);
+    std::string error;
+    const std::optional<Tree> read = readTree(text, &error);
+    REQUIRE_MESSAGE(read.has_value(), error);
+    CHECK(writeTree(*read) == text);
+    REQUIRE(read->find(2)->tasks.size() == 2);
+    CHECK(read->find(2)->tasks[0].kind == TaskKind::FocusCamera);
+    CHECK(read->find(2)->tasks[0].parallel);
+    CHECK(read->find(2)->tasks[0].focus == FocusMode::CharacterAndTarget);
+    CHECK_FALSE(read->find(2)->tasks[1].parallel);
+    // Its Parallel task is listed while Combat's child runs.
+    const int attack = tree.add(combat, "Attack");
+    CHECK(Runner::parallelTasks(tree, attack) == std::vector<TaskAt>{{combat, 0}});
+}
+
 TEST_CASE("Select Target is written as select-target, and Lock Mouse Onto's old word reads as it") {
     CHECK(std::string(nameOf(TaskKind::SelectTarget)) == "Select Target");
     Tree tree;
@@ -543,16 +613,29 @@ TEST_CASE("the profile's skills are written and read back, and old typed tasks a
     Tree tree;
     tree.skills() = {{"Wind Strike", true, 2, {1, 2, 3, 4, 5, 6, 7, 8, 9, 250, 251, 252}}, {"Sit", false, 0, {}}};
     const std::string text = writeTree(tree);
-    CHECK(text.find("skill cooldown 2 010203040506070809fafbfc Wind Strike\n") != std::string::npos);
-    CHECK(text.find("skill no-cooldown 0 - Sit\n") != std::string::npos);
+    CHECK(text.find("skill active 2 010203040506070809fafbfc Wind Strike\n") != std::string::npos);
+    CHECK(text.find("skill utility 0 - Sit\n") != std::string::npos);
     std::string error;
     const std::optional<Tree> read = readTree(text, &error);
     REQUIRE_MESSAGE(read.has_value(), error);
     CHECK(read->skills() == tree.skills());
     REQUIRE(read->skill("wind strike") != nullptr); // Ignoring case.
     CHECK(read->skill("wind strike")->side == 2);
-    CHECK_FALSE(read->skill("Sit")->cooldown);
+    CHECK(read->skill("Wind Strike")->active);
+    CHECK_FALSE(read->skill("Sit")->active);
     CHECK(read->skill("Heal") == nullptr);
+
+    // A profile from before 2026-11-16: cooldown is an active skill, no-cooldown a utility one.
+    const std::optional<Tree> older = readTree(
+        "observex-brain 1\nskill cooldown key=F2 mp=10 0 - Wind Strike\nskill no-cooldown 0 - Sit\nstate 1 0 Root\n",
+        &error);
+    REQUIRE_MESSAGE(older.has_value(), error);
+    REQUIRE(older->skills().size() == 2);
+    CHECK(older->skills()[0].active);
+    CHECK(older->skills()[0].mp == 10);
+    CHECK_FALSE(older->skills()[1].active);
+    CHECK(writeTree(*older).find("skill active key=F2 mp=10 0 - Wind Strike\nskill utility 0 - Sit\n") !=
+          std::string::npos);
 
     // A brain from before tasks had kinds: its typed tasks are left out, the rest read.
     const std::optional<Tree> old =
@@ -573,9 +656,9 @@ TEST_CASE("a skill's shortcut is written and read back, and a profile without sh
     Tree tree;
     tree.skills() = {{"Wind Strike", true, 0, {}, "F2"}, {"Sit", false, 0, {}, "A+K1"}, {"Heal", true, 0, {}, ""}};
     const std::string text = writeTree(tree);
-    CHECK(text.find("skill cooldown key=F2 0 - Wind Strike\n") != std::string::npos);
-    CHECK(text.find("skill no-cooldown key=A+K1 0 - Sit\n") != std::string::npos);
-    CHECK(text.find("skill cooldown 0 - Heal\n") != std::string::npos); // Not read yet: no key word.
+    CHECK(text.find("skill active key=F2 0 - Wind Strike\n") != std::string::npos);
+    CHECK(text.find("skill utility key=A+K1 0 - Sit\n") != std::string::npos);
+    CHECK(text.find("skill active 0 - Heal\n") != std::string::npos); // Not read yet: no key word.
     std::string error;
     const std::optional<Tree> read = readTree(text, &error);
     REQUIRE_MESSAGE(read.has_value(), error);
@@ -888,8 +971,8 @@ TEST_CASE("enter conditions, skill lists, Is Skill Ready and MP costs are writte
     tree.find(strike)->tasks = {{TaskKind::UseSkill, {"Wind Strike", "Ice Bolt"}}};
     tree.find(combat)->transitions = {{strike, {skillsReady({"Ice Bolt"})}}};
     const std::string text = writeTree(tree);
-    CHECK(text.find("skill cooldown key=F2 mp=10 0 - Wind Strike\n") != std::string::npos);
-    CHECK(text.find("skill no-cooldown key=F12 0 - Sit\n") != std::string::npos); // No cost: no mp word.
+    CHECK(text.find("skill active key=F2 mp=10 0 - Wind Strike\n") != std::string::npos);
+    CHECK(text.find("skill utility key=F12 0 - Sit\n") != std::string::npos); // No cost: no mp word.
     CHECK(text.find("task 3 use-skill Wind Strike|Ice Bolt\n") != std::string::npos);
     CHECK(text.find("enter 3\nif and skills-ready all Wind Strike|Ice Bolt\nif or hp < 90\n") != std::string::npos);
     CHECK(text.find("go 2 3\nif and skills-ready any Ice Bolt\n") != std::string::npos);
@@ -1061,4 +1144,282 @@ TEST_CASE("a state's path of names finds it again in a tree read back") {
     CHECK_FALSE(Runner::activeFrom(tree, strike, tree.root()));
     CHECK_FALSE(Runner::activeFrom(tree, strike, rest));
     CHECK(Runner::activeFrom(tree, tree.root(), tree.root()));
+}
+
+TEST_CASE("Look Around is written with its degrees when not all the way round, and never runs alongside") {
+    CHECK(std::string(nameOf(TaskKind::LookAround)) == "Look Around");
+    CHECK_FALSE(canRunParallel(TaskKind::LookAround));
+    Tree tree;
+    const int seek = tree.add(tree.root(), "Seek Monster");
+    Task part{TaskKind::LookAround};
+    part.degrees = 90;
+    tree.find(seek)->tasks = {{TaskKind::LookAround}, part};
+    const std::string text = writeTree(tree);
+    CHECK(text.find("task 2 look-around\ntask 2 look-around 90\n") != std::string::npos);
+    std::string error;
+    const std::optional<Tree> read = readTree(text, &error);
+    REQUIRE_MESSAGE(read.has_value(), error);
+    CHECK(writeTree(*read) == text);
+    REQUIRE(read->find(2)->tasks.size() == 2);
+    CHECK(read->find(2)->tasks[0].kind == TaskKind::LookAround);
+    CHECK(read->find(2)->tasks[0].degrees == kLookAroundDegrees);
+    CHECK(read->find(2)->tasks[1].degrees == 90);
+    // Past its range: brought into it.
+    const std::optional<Tree> far =
+        readTree("observex-brain 1\nstate 1 0 Root\nstate 2 1 Seek\ntask 2 look-around 5000\n", &error);
+    REQUIRE_MESSAGE(far.has_value(), error);
+    CHECK(far->find(2)->tasks[0].degrees == kLookMaxDegrees);
+}
+
+TEST_CASE("Monsters Around and Monster Distance are read from the monster memory's gauges") {
+    GameStats stats;
+    addRemembered(stats, true, 3, 235.0f);
+    const Variables variables = variablesOf(stats);
+    CHECK(variables.known[static_cast<int>(Variable::MonstersAround)]);
+    CHECK(variables.value[static_cast<int>(Variable::MonstersAround)] == 3.0f);
+    CHECK(variables.known[static_cast<int>(Variable::MonsterDistance)]);
+    CHECK(variables.value[static_cast<int>(Variable::MonsterDistance)] == 235.0f);
+    CHECK(holds({Join::And, {Variable::MonstersAround, 0.0f}, Compare::Greater, {Variable::None, 0.0f}}, variables));
+    CHECK(holds({Join::And, {Variable::MonsterDistance, 0.0f}, Compare::Less, {Variable::None, 300.0f}}, variables));
+    // None remembered: a count of 0, and no distance.
+    GameStats none;
+    addRemembered(none, true, 0, -1.0f);
+    const Variables empty = variablesOf(none);
+    CHECK(empty.known[static_cast<int>(Variable::MonstersAround)]);
+    CHECK(empty.value[static_cast<int>(Variable::MonstersAround)] == 0.0f);
+    CHECK_FALSE(empty.known[static_cast<int>(Variable::MonsterDistance)]);
+    CHECK(holds({Join::And, {Variable::MonstersAround, 0.0f}, Compare::Equal, {Variable::None, 0.0f}}, empty));
+    // Their words in a file.
+    std::string error;
+    const std::optional<Tree> read = readTree("observex-brain 1\nstate 1 0 Root\nstate 2 1 Seek\nstate 3 1 Go\n"
+                                              "go 2 3 done\nif and monsters-around > 0\nif and nearest-monster < 500\n",
+                                              &error);
+    REQUIRE_MESSAGE(read.has_value(), error);
+    CHECK(writeTree(*read).find("if and monsters-around > 0\nif and nearest-monster < 500\n") != std::string::npos);
+}
+
+TEST_CASE("Since Kill is a Nearby gauge in seconds, endless before a kill, and lets the brain wait for drops") {
+    const auto sinceKill = static_cast<int>(Variable::SinceKill);
+    GameStats stats;
+    addSinceKill(stats, 0.25);
+    CHECK(variablesOf(stats).known[sinceKill]);
+    CHECK(variablesOf(stats).value[sinceKill] == 0.25f);
+    CHECK(isSeconds(Variable::SinceKill));
+    CHECK_FALSE(isCount(Variable::SinceKill));
+    CHECK(std::string(nameOf(Variable::SinceKill)) == "Since Kill");
+    addSinceKill(stats, 9.0); // Added once.
+    CHECK(variablesOf(stats).value[sinceKill] == 0.25f);
+    // No kill yet: as long ago as can be, so "Since Kill > 0.75" holds and "< 0.5" does not (the user's Root -> Seek
+    // Monster if Since Kill > 0.75 never left Root while it was not known, 2026-11-16).
+    GameStats none;
+    addSinceKill(none, -1.0);
+    REQUIRE(variablesOf(none).known[sinceKill]);
+    CHECK(std::isinf(variablesOf(none).value[sinceKill]));
+    CHECK_FALSE(holds({Join::And, {Variable::SinceKill, 0.0f}, Compare::Less, {Variable::None, 0.5f}}, variablesOf(none)));
+    CHECK(holds({Join::And, {Variable::SinceKill, 0.0f}, Compare::Greater, {Variable::None, 0.75f}}, variablesOf(none)));
+    // So written in a clip's line, and read back the same.
+    std::string line;
+    appendStatsLine(line, 7, -100.0, none);
+    CHECK(line.find("Nearby Since_Kill - inf") != std::string::npos);
+    GameStats back;
+    std::uint64_t image = 0;
+    double ms = 0.0;
+    REQUIRE(readStatsLine(line, &image, &ms, &back));
+    CHECK(std::isinf(variablesOf(back).value[sinceKill]));
+    // The user's Root (2026-11-16): -> Loot if Drops > 0, -> Rest if HP < 50 or MP < 30 and Since Kill > 0.5, -> Seek
+    // Monster if Since Kill > 0.75. Before any kill, with HP and MP fine, it goes to Seek Monster.
+    Tree mage;
+    const int seekMonster = mage.add(mage.root(), "Seek Monster");
+    const int lootState = mage.add(mage.root(), "Loot");
+    const int restState = mage.add(mage.root(), "Rest");
+    const Condition hpLow{Join::And, {Variable::Hp, 0.0f}, Compare::Less, {Variable::None, 50.0f}};
+    const Condition mpLow{Join::Or, {Variable::Mp, 0.0f}, Compare::Less, {Variable::None, 30.0f}};
+    const Condition waited{Join::And, {Variable::SinceKill, 0.0f}, Compare::Greater, {Variable::None, 0.5f}};
+    mage.find(mage.root())->transitions = {
+        {lootState, {{Join::And, {Variable::Drops, 0.0f}, Compare::Greater, {Variable::None, 0.0f}}}},
+        {restState, {hpLow, mpLow, waited}},
+        {seekMonster, {{Join::And, {Variable::SinceKill, 0.0f}, Compare::Greater, {Variable::None, 0.75f}}}}};
+    GameStats fresh;
+    addDrops(fresh, true, 0, -1.0f);
+    addSinceKill(fresh, -1.0);
+    Variables fine = variablesOf(fresh);
+    for (const Variable v : {Variable::Hp, Variable::Mp}) {
+        fine.value[static_cast<int>(v)] = 90.0f;
+        fine.known[static_cast<int>(v)] = true;
+    }
+    Runner start;
+    CHECK(start.tick(mage, fine));
+    CHECK(start.current(mage) == seekMonster);
+
+    // The tree the user planned (2026-11-16): Root -> Loot if Drops > 0, -> Wait For Drops if Since Kill < 0.5, ->
+    // Rest if HP < 50 or MP < 30, -> Seek Monster; Wait For Drops -> Loot if Drops > 0, -> Root if Since Kill > 0.5.
+    const std::string text = "observex-brain 1\n"
+                             "state 1 0 Root\nstate 2 1 Loot\nstate 3 1 Wait For Drops\nstate 4 1 Rest\n"
+                             "state 5 1 Seek Monster\n"
+                             "go 1 2\nif and drops > 0\n"
+                             "go 1 3\nif and since-kill < 0.5\n"
+                             "go 1 4\nif and hp < 50\nif or mp < 30\n"
+                             "go 1 5\n"
+                             "go 3 2\nif and drops > 0\n"
+                             "go 3 1\nif and since-kill > 0.5\n";
+    std::string error;
+    const std::optional<Tree> tree = readTree(text, &error);
+    REQUIRE_MESSAGE(tree.has_value(), error);
+    CHECK(writeTree(*tree) == text);
+    const int loot = 2;
+    const int wait = 3;
+    const int rest = 4;
+    // One reading: HP, the drops seen, and Since Kill (below 0: no kill yet).
+    const auto reading = [](float hp, int drops, double seconds) {
+        GameStats read;
+        addDrops(read, true, drops, drops > 0 ? 300.0f : -1.0f);
+        addSinceKill(read, seconds);
+        Variables variables = variablesOf(read);
+        variables.value[static_cast<int>(Variable::Hp)] = hp;
+        variables.known[static_cast<int>(Variable::Hp)] = true;
+        return variables;
+    };
+    // Low HP before any kill: straight to Rest, as before.
+    Runner first;
+    CHECK(first.tick(*tree, reading(30.0f, 0, -1.0)));
+    CHECK(first.current(*tree) == rest);
+    // Low HP on the kill's reading: waits; the drop seen 0.2 s later goes to Loot, not Rest (the user's 13:25:19 kill).
+    Runner kill;
+    CHECK(kill.tick(*tree, reading(30.0f, 0, 0.0)));
+    CHECK(kill.current(*tree) == wait);
+    CHECK_FALSE(kill.tick(*tree, reading(30.0f, 0, 0.1))); // Stays: a child of Root without tasks has no other pick.
+    CHECK(kill.current(*tree) == wait);
+    CHECK(kill.tick(*tree, reading(30.0f, 1, 0.2)));
+    CHECK(kill.current(*tree) == loot);
+    // No drop in 0.5 s: back to Root, which goes on to Rest.
+    Runner dry;
+    CHECK(dry.tick(*tree, reading(30.0f, 0, 0.0)));
+    CHECK_FALSE(dry.tick(*tree, reading(30.0f, 0, 0.4)));
+    CHECK(dry.tick(*tree, reading(30.0f, 0, 0.6)));
+    CHECK(dry.current(*tree) == tree->root());
+    CHECK(dry.tick(*tree, reading(30.0f, 0, 0.7)));
+    CHECK(dry.current(*tree) == rest);
+}
+
+TEST_CASE("an Event condition holds on the step its event came, and is written and read back") {
+    Condition hit;
+    hit.kind = Kind::Event;
+    hit.compare = Compare::Equal;
+    hit.event = Event::HpLost;
+    Variables none;
+    CHECK_FALSE(holds(hit, none));
+    Variables lost;
+    lost.events[static_cast<int>(Event::HpLost)] = true;
+    CHECK(holds(hit, lost));
+    CHECK_FALSE(variablesOf(GameStats{}).events[static_cast<int>(Event::HpLost)]); // The app puts them in.
+    CHECK(std::string(nameOf(Event::HpLost)) == "HP Lost");
+    CHECK(describe({ofKind(Kind::HasTarget, "", Compare::NotEqual), hit}) == "no target and HP lost");
+
+    // Rest -> Seek Monster on HP Lost: it stays while no event comes, and goes on the step one does.
+    Tree tree;
+    const int seek = tree.add(tree.root(), "Seek Monster");
+    const int rest = tree.add(tree.root(), "Rest");
+    tree.find(tree.root())->transitions = {{rest, {}}};
+    tree.find(rest)->transitions = {{seek, {hit}}};
+    Runner runner;
+    CHECK(runner.tick(tree, none)); // Root -> Rest.
+    CHECK(runner.current(tree) == rest);
+    CHECK_FALSE(runner.tick(tree, none));
+    CHECK(runner.current(tree) == rest);
+    CHECK(runner.tick(tree, lost));
+    CHECK(runner.current(tree) == seek);
+
+    // The file: "if and event hp-lost".
+    const std::string text = writeTree(tree);
+    CHECK(text.find("if and event hp-lost\n") != std::string::npos);
+    std::string error;
+    const std::optional<Tree> read = readTree(text, &error);
+    REQUIRE_MESSAGE(read.has_value(), error);
+    CHECK(writeTree(*read) == text);
+    const std::vector<Condition>& conditions = read->find(read->rows()[2].state)->transitions[0].conditions;
+    REQUIRE(conditions.size() == 1);
+    CHECK(conditions[0].kind == Kind::Event);
+    CHECK(conditions[0].event == Event::HpLost);
+    CHECK_FALSE(readTree("observex-brain 1\nstate 1 0 Root\ngo 1 1\nif and event hp-gone\n", &error).has_value());
+    CHECK(error.starts_with("Line 4: an event condition is"));
+    // As an enter condition too.
+    CHECK(readTree("observex-brain 1\nstate 1 0 Root\nstate 2 1 Flee\nenter 2\nif and event hp-lost\n", &error)
+              .has_value());
+}
+
+TEST_CASE("Target Hit By Others is an event of its own, written and read back") {
+    Condition others;
+    others.kind = Kind::Event;
+    others.compare = Compare::Equal;
+    others.event = Event::TargetHitByOthers;
+    CHECK(std::string(nameOf(Event::TargetHitByOthers)) == "Target Hit By Others");
+    CHECK(describe({others}) == "target hit by others");
+    Variables lost;
+    lost.events[static_cast<int>(Event::HpLost)] = true;
+    CHECK_FALSE(holds(others, lost)); // Only its own event.
+    Variables hit;
+    hit.events[static_cast<int>(Event::TargetHitByOthers)] = true;
+    CHECK(holds(others, hit));
+
+    // Approach -> Seek Monster when someone else hits the target.
+    Tree tree;
+    const int seek = tree.add(tree.root(), "Seek Monster");
+    const int approach = tree.add(tree.root(), "Approach");
+    tree.find(approach)->transitions = {{seek, {others}}};
+    const std::string text = writeTree(tree);
+    CHECK(text.find("if and event target-hit-by-others\n") != std::string::npos);
+    std::string error;
+    const std::optional<Tree> read = readTree(text, &error);
+    REQUIRE_MESSAGE(read.has_value(), error);
+    CHECK(writeTree(*read) == text);
+    const std::vector<Condition>& conditions = read->find(read->rows()[2].state)->transitions[0].conditions;
+    REQUIRE(conditions.size() == 1);
+    CHECK(conditions[0].event == Event::TargetHitByOthers);
+}
+
+TEST_CASE("Select Target's Attacker, Flee's Attacker and Target Distance are written, read back and named") {
+    // The user's clip 2026-11-16_14-04-25: Wind Strike kept going at an Imp 640 away while another hit the own
+    // character from beside it; "HP Lost and Target Distance > 300" goes to selecting the Attacker.
+    Tree tree;
+    const int retarget = tree.add(tree.root(), "Retarget");
+    const int run = tree.add(tree.root(), "Run");
+    Task select{TaskKind::SelectTarget};
+    select.target = Target::Attacker;
+    tree.find(retarget)->tasks = {select};
+    Task flee{TaskKind::Flee};
+    flee.from = FleeFrom::Attacker;
+    tree.find(run)->tasks = {flee};
+    Condition hit;
+    hit.kind = Kind::Event;
+    hit.event = Event::HpLost;
+    const Condition far{Join::And, {Variable::TargetDistance, 0.0f}, Compare::Greater, {Variable::None, 300.0f}};
+    tree.find(tree.root())->transitions = {{retarget, {hit, far}}};
+    const std::string text = writeTree(tree);
+    CHECK(text.find("select-target attacker\n") != std::string::npos);
+    CHECK(text.find(" flee attacker\n") != std::string::npos);
+    CHECK(text.find("if and target-distance > 300\n") != std::string::npos);
+    std::string error;
+    const std::optional<Tree> read = readTree(text, &error);
+    REQUIRE_MESSAGE(read.has_value(), error);
+    CHECK(writeTree(*read) == text);
+    CHECK(read->find(retarget)->tasks[0].target == Target::Attacker);
+    CHECK(read->find(run)->tasks[0].from == FleeFrom::Attacker);
+    CHECK(std::string(nameOf(Target::Attacker)) == "Attacker");
+    CHECK(std::string(nameOf(FleeFrom::Attacker)) == "Attacker");
+    CHECK(std::string(nameOf(Variable::TargetDistance)) == "Target Distance");
+    CHECK(isCount(Variable::TargetDistance));
+
+    // A Nearby gauge in game units; not known with no target box (or no camera).
+    const auto distance = static_cast<int>(Variable::TargetDistance);
+    GameStats stats;
+    addTargetDistance(stats, 640.4f);
+    CHECK(variablesOf(stats).known[distance]);
+    CHECK(variablesOf(stats).value[distance] == 640.0f);
+    CHECK(holds(far, variablesOf(stats)));
+    addTargetDistance(stats, 50.0f); // Added once.
+    CHECK(variablesOf(stats).value[distance] == 640.0f);
+    GameStats none;
+    addTargetDistance(none, -1.0f);
+    CHECK_FALSE(variablesOf(none).known[distance]);
+    CHECK_FALSE(holds(far, variablesOf(none)));
 }

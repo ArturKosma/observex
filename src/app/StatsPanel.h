@@ -26,16 +26,30 @@ namespace observex {
 // same night: its camera lines, or Today's from its mouse lines): its yaw (degrees clockwise from north, the
 // minimap's, or only turned since the counts began), pitch (down) and what said it, and how far the minimap's cone and
 // the camera's turns were off the counts lately.
+// The card Since the Brain Started (the user asked, 2026-11-16: "a mob kill counter, which counts since i start the
+// brain", then "also adena picker which counts how much adena was picked"): the kills and the adena picked up while the
+// brain acted, from its last start, each also per hour, and for how long it has acted; kept once it stops, until it
+// starts again.
+
+// What the card Since the Brain Started shows (App counts it).
+struct BrainTally {
+    bool shown = false;   // The card is drawn (live only, not on a clip).
+    bool started = false; // The brain started since observex did; else the card says what it will count.
+    bool acting = false;  // It acts now (its time still runs).
+    double seconds = 0.0; // From its start to now, or to when it stopped.
+    int kills = 0;        // Targets that died while it acted (core/TargetWatch's death).
+    long long adena = 0;  // Adena picked up while it acted (the game's "You have obtained N Adena." messages).
+};
 
 class StatsTile {
 public:
     // Draws the tile at the cursor in the current window, taking the room it drew in. `stats` null: `empty` is said
     // instead. `problem` (may be null or empty): why nothing is read, said under it. `skills`: the profile's, whose
     // icons `icons` draws. `camera`: the card Camera, first (not known: none, or one saying `cameraProblem` if that is
-    // not empty).
+    // not empty). `tally`: the card Since the Brain Started, next (shown false: none).
     void draw(const theme::Fonts& fonts, const GameStats* stats, const char* empty, const char* problem,
               const std::vector<statetree::Skill>& skills, const SkillIcons& icons, float dpiScale,
-              const CameraShown& camera = {}, const char* cameraProblem = nullptr);
+              const CameraShown& camera = {}, const char* cameraProblem = nullptr, const BrainTally& tally = {});
 };
 
 } // namespace observex

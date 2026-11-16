@@ -51,6 +51,9 @@ struct GroundSeen {
     GroundCamera camera; // Its timeMs: the image's (ImageStamp::shownQpc in milliseconds, groundMs).
     std::uint64_t image = 0;    // ImageStamp::number; 0 before the first.
     std::uint64_t followed = 0; // The newest followed whole (the camera on images since only turned with the minimap).
+    // The terrain the depth maps made (Grounding::heights; null: none yet), the grid laid on it. Shared, never
+    // changed once made: a new one each time it changes (each depth map, about 20 a second).
+    std::shared_ptr<const GroundHeights> heights;
 };
 
 // The screen's QPC time `qpc` in the milliseconds GroundSeen's camera counts.

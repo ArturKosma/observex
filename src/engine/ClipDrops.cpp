@@ -44,8 +44,8 @@ void ClipDrops::run(std::stop_token stop) {
 
     std::unique_ptr<Detector> detector;
     try {
-        detector = std::make_unique<Detector>(gpu_.device.Get(), adapter_.Get(), modelFolder_, width_, height_, stop,
-                                              progress_);
+        detector = std::make_unique<Detector>(gpu_.device.Get(), adapter_.Get(), modelFolder_, width_, height_,
+                                              GpuPriority::Background, stop, progress_);
     } catch (const std::exception& e) {
         if (!stop.stop_requested()) {
             fail(e.what());

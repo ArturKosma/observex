@@ -3,7 +3,9 @@
 #include "core/GameStats.h"
 #include "heuristics/KeyLabels.h"
 #include "heuristics/LocationReader.h"
+#include "heuristics/MessageLines.h"
 #include "heuristics/MinimapScroll.h"
+#include "heuristics/PickupReader.h"
 #include "heuristics/TextOcr.h"
 
 #include <array>
@@ -263,12 +265,16 @@ private:
     TextOcr ocr_;
     std::string ocrError_;
     // Where the character is: the minimap's window and the Messages window's lowest rows as areas() asked for them
-    // (x1 0: none), the map followed, the /loc answers read and the newest one.
+    // (x1 0: none), the map followed, the window's lines, the /loc answers read and the newest one; and the items and
+    // adena picked up.
     mutable StatsArea minimapArea_{};
     mutable StatsArea messagesArea_{};
     MinimapScroll minimap_;
+    MessageLines messages_;
     LocationReader location_;
     LocationRead located_{};
+    PickupReader pickups_;
+    PickupRead picked_{};
 
     // Working memory, kept from read to read.
     std::vector<float> grey_;

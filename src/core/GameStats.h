@@ -33,7 +33,8 @@ struct StatsArea {
 //   framed light blue, for half a second or so, before the cast begins: neither ready nor cooling); at its miniature on
 //   screen, and key the key written on that slot (heuristics/KeyLabels), read only while it is ready.
 // - What the model sees around (piece "Nearby", put in by the app, not read off the interface): names "Characters"
-//   (every character on screen but you) and "Monsters", text the count.
+//   (every character on screen but you) and "Monsters", text the count; and what the monster memory keeps round you
+//   (core/MonsterMemory): "Monsters Around", text the count, and "Monster Distance", text its nearest one's distance in game units.
 struct GameGauge {
     std::array<char, 16> piece{}; // The piece it is in (ui.txt's name, e.g. "Status").
     std::array<char, 32> name{};  // stats.txt's name, e.g. "HP", or the skill's.
@@ -58,6 +59,12 @@ inline constexpr char kTargetNameGauge[] = "Name";
 inline constexpr char kNearbyPiece[] = "Nearby";   // The model's count: names "Characters" and "Monsters".
 inline constexpr char kCharactersGauge[] = "Characters";
 inline constexpr char kMonstersGauge[] = "Monsters";
+inline constexpr char kMonstersAroundGauge[] = "Monsters Around"; // The monster memory's count,
+inline constexpr char kMonsterDistanceGauge[] = "Monster Distance"; // and its nearest one's distance (game units).
+inline constexpr char kDropsGauge[] = "Drops";                 // The drops the drop finder sees (core/LootWatch),
+inline constexpr char kDropDistanceGauge[] = "Drop Distance";  // and the nearest one's distance (game units).
+inline constexpr char kSinceKillGauge[] = "Since Kill"; // Seconds since the target last died (core/TargetWatch).
+inline constexpr char kTargetDistanceGauge[] = "Target Distance"; // The target's distance (game units).
 inline constexpr char kMinimapPiece[] = "Minimap";   // Its map followed (MinimapRead).
 inline constexpr char kMessagesPiece[] = "Messages"; // The game's system messages, where /loc answers (LocationRead).
 
@@ -84,6 +91,24 @@ struct LocationRead {
     std::int32_t z = 0;
     MinimapRead map{};
     std::array<char, 96> text{}; // What was read, for the log.
+};
+
+// What the character picked up, as the game wrote it in yellow among its messages ("You have obtained 69 Adena.",
+// "You have earned 1st Onyx Talisman."), read by the stats reader (heuristics/PickupReader) when it appears (the user
+// asked, 2026-11-16, for the log). A reader that may skip readings (the UI takes the newest) logs those after the count
+// it saw last, at most kMax.
+struct Pickup {
+    std::array<char, 48> item{}; // "Adena", "1st Onyx Talisman".
+    std::int64_t amount = 1;     // 69 (adena), 3 (a stack); 1 when the message gives none.
+};
+// As the Log says it: "69 Adena", "1st Onyx Talisman" (one: no number), "3 Animal Bone".
+std::string pickupText(const Pickup& pickup);
+struct PickupRead {
+    static constexpr int kMax = 4;
+    std::uint32_t run = 0;   // The reader's: another's (the stats DLL reloaded, observing again) never repeats; 0: none.
+    std::uint32_t count = 0; // Pickups this reader read so far; the newest is items[(count - 1) % kMax].
+    std::int64_t adena = 0;  // All the Adena this reader read, so a counter loses none to the ring.
+    std::array<Pickup, kMax> items{};
 };
 
 // A skill the user added (the Skills tab, kept in the profile), as the stats reader gets it: its miniature when added
@@ -152,6 +177,8 @@ struct GameStats {
     // The minimap followed and the newest /loc answer (the Geodata flag's position, app/GeodataView); not in clips.
     MinimapRead minimap{};
     LocationRead location{};
+    // Items and adena picked up (the Log's "Picked up 69 Adena"); not in clips (the Log lines are).
+    PickupRead pickups{};
 
     // The gauge named `name` in piece `piece`, or null.
     const GameGauge* find(std::string_view piece, std::string_view name) const;
@@ -202,6 +229,23 @@ void appendStatsLine(std::string& text, std::uint64_t image, double ms, const Ga
 // count. `kinds` are the model's kinds by number ("monster", "own", ...; none: Monsters is not seen). `seen` false:
 // nothing is looked at (both not seen).
 void addNearby(GameStats& stats, bool seen, std::span<const Tracked> things, std::span<const std::string> kinds);
+// The monster memory's Nearby gauges added to `stats`, unless it has them: Monsters Around, `count`, and Nearest
+// Monster, `nearestUnits` rounded (not seen while below 0: none remembered). `seen` false: no memory (both not seen).
+void addRemembered(GameStats& stats, bool seen, int count, float nearestUnits);
+// The drops' Nearby gauges added to `stats`, unless it has them (the user asked, 2026-11-16: loot before seeking the
+// next monster): Drops, `count` (core/LootWatch's held count, those given up on left out), and Drop Distance,
+// `nearestUnits` rounded (not seen while below 0: none shows, or the camera is not known). `seen` false: no drop finder
+// (both not seen).
+void addDrops(GameStats& stats, bool seen, int count, float nearestUnits);
+// Since Kill as a Nearby gauge added to `stats` (the user asked, 2026-11-16: wait a moment for a kill's drops before
+// resting), unless it has it: `seconds` since the target last died, written to the hundredth. Below 0 (no kill yet
+// since observex started) it is as long ago as can be, written "inf": Since Kill > 0.75 holds and < 0.5 does not (the
+// user's Root -> Seek Monster if Since Kill > 0.75 never left Root before a first kill, 2026-11-16, while it was not
+// known, which fails every condition).
+void addSinceKill(GameStats& stats, double seconds);
+// Target Distance as a Nearby gauge added to `stats`, unless it has it: `units` rounded (game units; not seen while
+// below 0: no target box on the screen, or the camera not known).
+void addTargetDistance(GameStats& stats, float units);
 // One such line back (with or without its newline); false if it is not one.
 bool readStatsLine(std::string_view line, std::uint64_t* image, double* ms, GameStats* stats);
 

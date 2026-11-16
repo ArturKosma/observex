@@ -123,7 +123,7 @@ void Finder::run(std::stop_token stop) {
             if (!detector || image.width != width || image.height != height) {
                 detector.reset();
                 detector = std::make_unique<Detector>(gpu.device.Get(), adapter.Get(), modelFolder_, image.width,
-                                                      image.height, stop, progress_);
+                                                      image.height, GpuPriority::Normal, stop, progress_);
                 width = image.width;
                 height = image.height;
                 squares = inSquares ? lootTiles(static_cast<int>(width), static_cast<int>(height))

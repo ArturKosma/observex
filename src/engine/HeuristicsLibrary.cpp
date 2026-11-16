@@ -156,6 +156,9 @@ public:
         GroundDepthNote note;
         return api_.groundDepth(ground_, &map, timeMs, &note) ? note : GroundDepthNote{};
     }
+    bool heights(std::uint64_t version, GroundHeights& out) const override {
+        return api_.groundHeights(ground_, version, &out) == 1;
+    }
     GroundCamera camera() const override {
         GroundCamera camera;
         return api_.groundCamera(ground_, &camera) ? camera : GroundCamera{};
@@ -234,7 +237,8 @@ std::shared_ptr<HeuristicsLibrary> HeuristicsLibrary::load(const fs::path& file)
         api->greyAreaSize != sizeof(GreyArea) || api->snapFindSize != sizeof(SnapFind) ||
         api->groundCameraSize != sizeof(GroundCamera) || api->groundHintsSize != sizeof(GroundHints) ||
         api->groundNoteSize != sizeof(GroundNote) || api->depthInputSize != sizeof(DepthInput) ||
-        api->groundDepthNoteSize != sizeof(GroundDepthNote)) {
+        api->groundDepthNoteSize != sizeof(GroundDepthNote) ||
+        api->groundHeightsSize != sizeof(GroundHeights)) {
         throw std::runtime_error(utf8(file.filename()) +
                                  " was built for another observex: rebuild the app too (observex)");
     }

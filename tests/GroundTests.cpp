@@ -237,6 +237,169 @@ TEST_CASE("the camera is forgotten a while after the own character was last seen
     CHECK_FALSE(fit.motion(matchesOf(truth, truth, 0.04f), 9000.0, 9066.0));
 }
 
+TEST_CASE("the distance holds: the middle of what the box said, moved by the wheel's notches") {
+    ZoomHold hold;
+    CHECK_FALSE(hold.wheel(false, 0.0, 0.0, 0.0f)); // Not watched (a clip from before the mouse was): nothing held.
+    CHECK_FALSE(hold.holds());
+    hold.take(7.0f, 0.0);
+    CHECK_FALSE(hold.distance());
+    CHECK_FALSE(hold.wheel(true, 3.0, 0.0, 0.0f)); // The first image: its notches are where it starts.
+    CHECK(hold.holds());
+    for (const float distance : {7.0f, 9.0f, 6.0f, 7.5f, 30.0f}) {
+        hold.take(distance, 10.0);
+    }
+    REQUIRE(hold.distance());
+    CHECK(*hold.distance() == doctest::Approx(7.5f)); // The middle: one far-off box moves it nowhere.
+    // A notch in (the sum one less): kStep nearer, at once.
+    CHECK(hold.wheel(true, 2.0, 100.0, 0.0f));
+    CHECK(*hold.distance() == doctest::Approx(7.5f - ZoomHold::kStep));
+    CHECK(hold.samples() == ZoomHold::kAfterStep);
+    hold.take(20.0f, 100.0 + ZoomHold::kSettleMs - 1.0); // The tracker's box still leading the jump: not taken.
+    CHECK(hold.samples() == ZoomHold::kAfterStep);
+    CHECK_FALSE(hold.wheel(true, 2.0, 150.0, 0.0f)); // No notch since.
+    // Two out between images: one farther than before.
+    CHECK(hold.wheel(true, 4.0, 200.0, 0.0f));
+    CHECK(*hold.distance() == doctest::Approx(7.5f + ZoomHold::kStep));
+    // No farther than kFarthest, no nearer than kNearest.
+    hold.wheel(true, 30.0, 300.0, 0.0f);
+    CHECK(*hold.distance() == doctest::Approx(ZoomHold::kFarthest));
+    hold.wheel(true, -30.0, 400.0, 0.0f);
+    CHECK(*hold.distance() == doctest::Approx(ZoomHold::kNearest));
+    // Only kAfterStep were kept over the notches: the box after them outweighs them once it said more.
+    for (int i = 0; i < ZoomHold::kAfterStep + 1; ++i) {
+        hold.take(3.0f, 500.0 + i);
+    }
+    CHECK(*hold.distance() == doctest::Approx(3.0f));
+    // Farther than the game goes: taken as at kFarthest (the tree round the camera), so most such hold it there.
+    for (int i = 0; i < 20; ++i) {
+        hold.take(19.8f, 600.0 + i);
+    }
+    CHECK(*hold.distance() == doctest::Approx(ZoomHold::kFarthest));
+    // Beyond a limit (the box said so), a notch on only stays there.
+    CHECK(ZoomHold::stepped(12.0f, 1.0) == doctest::Approx(12.0f));
+    CHECK(ZoomHold::stepped(12.0f, -1.0) == doctest::Approx(12.0f - ZoomHold::kStep));
+    // Nearer than kFineBelow the game's notches are small, both ways.
+    CHECK(ZoomHold::stepped(2.0f, -1.0) == doctest::Approx(2.0f - ZoomHold::kStep));
+    CHECK(ZoomHold::stepped(1.15f, -1.0) == doctest::Approx(1.15f - ZoomHold::kFineStep));
+    CHECK(ZoomHold::stepped(1.0f, 3.0) == doctest::Approx(1.0f + 3.0f * ZoomHold::kFineStep));
+    CHECK(ZoomHold::stepped(ZoomHold::kFineBelow, 1.0) == doctest::Approx(ZoomHold::kFineBelow + ZoomHold::kStep));
+    // Nothing taken yet: a notch moves the camera's distance given.
+    ZoomHold fresh;
+    fresh.wheel(true, 0.0, 0.0, 6.0f);
+    CHECK_FALSE(fresh.distance());
+    CHECK(fresh.wheel(true, 1.0, 50.0, 6.0f));
+    CHECK(*fresh.distance() == doctest::Approx(6.0f + ZoomHold::kStep));
+    fresh.wheel(false, 1.0, 60.0, 6.0f); // Not watched again: forgotten.
+    CHECK_FALSE(fresh.distance());
+}
+
+TEST_CASE("the own box's feet hidden by an interface piece across the screen's middle say no distance") {
+    const std::array<GreyArea, 1> hotbar{GreyArea{929, 1130, 1569, 1188}};
+    CHECK(ownFeetHidden(650.0f, 1131.0f, 1280.0f, hotbar));       // Cut at its top edge,
+    CHECK(ownFeetHidden(650.0f, 1127.0f, 1280.0f, hotbar));       // within the slack above it,
+    CHECK(ownFeetHidden(650.0f, 1160.0f, 1280.0f, hotbar));       // or seen into it.
+    CHECK_FALSE(ownFeetHidden(650.0f, 1100.0f, 1280.0f, hotbar)); // Ending clear above it,
+    CHECK_FALSE(ownFeetHidden(650.0f, 1131.0f, 900.0f, hotbar));  // not across the middle,
+    CHECK_FALSE(ownFeetHidden(1140.0f, 1180.0f, 1280.0f, hotbar)); // or inside it: not cut by it.
+    // Hidden, the box keeps a known camera but says no distance; an unknown one starts only from the distance held.
+    const GroundCamera truth = groundCamera(0.5f, 6.0f, kWidth, kHeight);
+    const OwnRows rows = ownRows(truth);
+    GroundFit fit;
+    fit.own(rows.top, rows.bottom, kWidth, kHeight, 0.0, false);
+    CHECK_FALSE(fit.camera().known);
+    fit.own(rows.top, rows.bottom, kWidth, kHeight, 0.0);
+    REQUIRE(fit.camera().known);
+    const float distance = fit.camera().distance;
+    fit.own(rows.top, rows.bottom + 40.0f, kWidth, kHeight, 66.0, false);
+    CHECK(fit.camera().known);
+    CHECK(fit.camera().distance == distance);
+}
+
+TEST_CASE("running (the own box bobbing) moves the distance only while the wheel is not watched") {
+    const GroundCamera truth = groundCamera(0.5f, 7.0f, kWidth, kHeight);
+    const OwnRows rows = ownRows(truth);
+    // The box as a camera this far would show it: the run's poses make it taller and shorter.
+    const OwnRows near = ownRows(groundCamera(0.5f, 5.5f, kWidth, kHeight));
+    const OwnRows far = ownRows(groundCamera(0.5f, 9.0f, kWidth, kHeight));
+    for (const bool watched : {true, false}) {
+        CAPTURE(watched);
+        GroundFit fit;
+        double timeMs = 0.0;
+        fit.wheel(watched, 0.0, timeMs);
+        fit.own(rows.top, rows.bottom, kWidth, kHeight, timeMs);
+        for (int pair = 0; pair < 8; ++pair, timeMs += 66.0) { // Turns first, so it knows the pitch.
+            fit.wheel(watched, 0.0, timeMs + 66.0);
+            fit.own(rows.top, rows.bottom, kWidth, kHeight, timeMs + 66.0);
+            fit.motion(matchesOf(truth, truth, 0.05f), timeMs, timeMs + 66.0);
+        }
+        REQUIRE(fit.camera().pitch == doctest::Approx(0.5f).epsilon(0.01));
+        REQUIRE(fit.camera().distance == doctest::Approx(7.0f).epsilon(0.01));
+        float least = 1e9f;
+        float most = 0.0f;
+        for (int pair = 0; pair < 30; ++pair, timeMs += 66.0) {
+            const OwnRows& bob = pair % 2 == 0 ? near : far;
+            fit.wheel(watched, 0.0, timeMs + 66.0);
+            fit.own(bob.top, bob.bottom, kWidth, kHeight, timeMs + 66.0);
+            fit.motion(matchesOf(truth, truth, 0.03f), timeMs, timeMs + 66.0);
+            least = std::min(least, fit.camera().distance);
+            most = std::max(most, fit.camera().distance);
+        }
+        if (watched) {
+            CHECK(fit.zoom().holds());
+            CHECK(least == doctest::Approx(7.0f).epsilon(0.01));
+            CHECK(most == doctest::Approx(7.0f).epsilon(0.01));
+            CHECK(fit.camera().pitch == doctest::Approx(0.5f).epsilon(0.01)); // The bob moved into nothing.
+        } else {
+            CHECK_FALSE(fit.zoom().holds());
+            CHECK(most / least > 1.1f); // As before 2026-11-16: the ring pulsed with the run.
+        }
+    }
+}
+
+TEST_CASE("the wheel's notches move the distance at once, the box after them settles it, a lost camera keeps it") {
+    const GroundCamera truth = groundCamera(0.5f, 9.0f, kWidth, kHeight);
+    const OwnRows rows = ownRows(truth);
+    GroundFit fit;
+    double timeMs = 0.0;
+    fit.wheel(true, 0.0, timeMs);
+    fit.own(rows.top, rows.bottom, kWidth, kHeight, timeMs);
+    for (int pair = 0; pair < 8; ++pair, timeMs += 66.0) {
+        fit.wheel(true, 0.0, timeMs + 66.0);
+        fit.own(rows.top, rows.bottom, kWidth, kHeight, timeMs + 66.0);
+        fit.motion(matchesOf(truth, truth, 0.05f), timeMs, timeMs + 66.0);
+    }
+    REQUIRE(fit.heldDistance());
+    CHECK(*fit.heldDistance() == doctest::Approx(9.0f).epsilon(0.01));
+    // Three notches in: the camera comes 3 kStep nearer on that image, before any box says so.
+    const float foretold = *fit.heldDistance() - 3.0f * ZoomHold::kStep;
+    fit.wheel(true, -3.0, timeMs);
+    CHECK(fit.camera().distance == doctest::Approx(foretold).epsilon(0.001));
+    // The game went a little otherwise (6.6, not 6.45): the boxes after say so within twice kAfterStep follows.
+    const GroundCamera zoomed = groundCamera(0.5f, 6.6f, kWidth, kHeight);
+    const OwnRows nearer = ownRows(zoomed);
+    for (int pair = 0; pair < 2 * ZoomHold::kAfterStep; ++pair, timeMs += 66.0) {
+        fit.wheel(true, -3.0, timeMs + 66.0);
+        fit.own(nearer.top, nearer.bottom, kWidth, kHeight, timeMs + 66.0);
+        fit.motion(matchesOf(zoomed, zoomed, 0.03f), timeMs, timeMs + 66.0);
+    }
+    REQUIRE(fit.heldDistance());
+    CHECK(*fit.heldDistance() == doctest::Approx(6.6f).epsilon(0.02));
+    CHECK(fit.camera().distance == doctest::Approx(6.6f).epsilon(0.02));
+    // Lost (the own character unseen a while) and found again with a shorter box: the wheel did not turn, so the
+    // distance is the one held.
+    const float held = *fit.heldDistance();
+    fit.unseen(timeMs + GroundFit::kKeepMs + 1.0);
+    REQUIRE_FALSE(fit.camera().known);
+    timeMs += GroundFit::kKeepMs + 66.0;
+    const OwnRows farther = ownRows(groundCamera(0.5f, 9.0f, kWidth, kHeight));
+    fit.wheel(true, -3.0, timeMs);
+    fit.own(farther.top, farther.bottom, kWidth, kHeight, timeMs);
+    REQUIRE(fit.camera().known);
+    CHECK(fit.camera().distance == doctest::Approx(held));
+    fit.forget();
+    CHECK(fit.zoom().samples() == 0);
+}
+
 TEST_CASE("a camera goes on along its speeds, and lies between two") {
     GroundCamera camera = groundCamera(0.5f, 10.0f, kWidth, kHeight);
     camera.timeMs = 100.0;

@@ -5,6 +5,7 @@
 #include "app/Snapshot.h"
 #include "app/StatsPanel.h"
 #include "app/Widgets.h"
+#include "core/Attacker.h"
 #include "engine/CrashLog.h"
 #include "heuristics/KeyLabels.h"
 
@@ -430,7 +431,7 @@ int App::run() {
             } else if (state == ClipRecorder::SaveState::Failed) {
                 clipSaving_ = false;
                 clipSaveError_ = "Could not save the clip: " + clipRecorder_->saveError();
-                addLog(clipSaveError_);
+                addTrace(clipSaveError_);
             }
         }
         pollShots(); // Shift+Win works while the window is minimized or behind the game too.
@@ -530,9 +531,15 @@ int App::run() {
         // geodata's grid with it, the Stats tab's Camera card: the mouse's counts are anchored by what it follows;
         // the user asked, 2026-11-15, after its Pitch stayed "Not read yet" with both flags off), afresh each time it
         // starts again. The grid is drawn only with Ground on; the depth finder still waits for its flags.
-        const bool cameraShown = settings_.showGameStats && !settings_.showSkills;
+        const bool cameraCard = settings_.showGameStats && !settings_.showSkills;
+        // And while Focus Camera runs: the camera's pitch (the counts' anchors) and its distance come from it. And
+        // while the brain acts at all: the monster memory and Select Target's distances hang on the camera.
+        const bool focusing = brainActs_;
+        // And while Characters or Drops show: their tags say how far each is (the user asked, 2026-11-16: "distance
+        // has to be written whenever flags character or drop are on"), by the camera.
+        const bool measuring = settings_.showCharacters || settings_.showDrops;
         const bool following = groundFinder_ && groundFinder_->state() != GroundFinder::State::Failed && !away &&
-                               (settings_.showGround || settings_.showGeodata || cameraShown);
+                               (settings_.showGround || settings_.showGeodata || cameraCard || focusing || measuring);
         if (following && !groundFollowing_) {
             groundFinder_->restart();
         }
@@ -544,8 +551,11 @@ int App::run() {
         // The depth finder only while a flag needs it (the user asked, 2026-11-12 late: the grid and the depth work
         // only with their flags on): Depth draws its maps (shaded only then), Ground tilts the grid's pitch by them.
         // Made the first time one is on while observing; with both off it is handed no images (the network stays
-        // loaded). It leaves out the interface the UI finder found.
-        const bool depthNeeded = settings_.showDepth || settings_.showGround || settings_.showGeodata;
+        // loaded). It leaves out the interface the UI finder found. Characters and Drops need it too: their distances
+        // hang on the grid's pitch, which its maps pull (without them 55-82% off the geodata's, with them 19%).
+        // And while Flee runs: its ways go over the terrain the depth maps make (core/Flee).
+        const bool depthNeeded =
+            settings_.showDepth || settings_.showGround || settings_.showGeodata || measuring || (brainActs_ && fleeing_);
         if (depthNeeded && !away && observed_ && !depthFinder_ && depthFinderError_.empty() &&
             pipeline_.depth() != nullptr) {
             startDepth();
@@ -658,17 +668,18 @@ void App::init() {
             stateTree_.load(settings_.brainsFolder, settings_.brainName); // The one last saved or loaded.
         }
     }
-    // The log: what earlier runs logged comes back.
+    // The log and the trace: what earlier runs logged comes back.
     const std::filesystem::path logFolder =
         snapshot_ ? std::filesystem::path(snapshot_->path).parent_path() : appFolder();
     log_ = std::make_unique<LogBook>(logFolder / L"observex.log");
-    // A crash says where it was in the log (with the call chain) and leaves a dump in crashes/ (the user asked,
+    trace_ = std::make_unique<LogBook>(logFolder / L"observex-trace.log");
+    // A crash says where it was in the trace (with the call chain) and leaves a dump in crashes/ (the user asked,
     // 2026-11-15, after a crash in TensorRT that Windows' own report kept from us). Again once observing, as CUDA and
     // TensorRT may put their own handler in.
-    crashLogFile_ = logFolder / L"observex.log";
+    crashLogFile_ = logFolder / L"observex-trace.log";
     crashFolder_ = logFolder / L"crashes";
     installCrashLog(crashLogFile_, crashFolder_);
-    addLog("observex started");
+    addTrace("observex started");
     // Where the character is and the geodata round it (the flag Geodata): models/geodata has the server's .l2j files.
     geodata_ = std::make_unique<GeodataView>(modelFolder("geodata"));
     if (settings_.minimapScale > 0.0f) {
@@ -711,10 +722,11 @@ void App::shutdown() {
     kindUpdater_.reset(); // One still at work writes nothing.
     stopRecording();
     stopObserving();
-    if (log_) { // shutdown() runs twice (the destructor too): once logged.
-        addLog("observex closed");
-        log_.reset();
+    if (trace_) { // shutdown() runs twice (the destructor too): once logged.
+        addTrace("observex closed");
+        trace_.reset();
     }
+    log_.reset();
     picker_.reset();
     thumbnails_.reset();
     if (imguiReady_) {
@@ -738,7 +750,7 @@ void App::observe(const Screen& screen) {
         try {
             brainKey_ = std::make_unique<HotKey>(MOD_WIN, VK_ESCAPE);
         } catch (const std::exception& e) {
-            addLog(std::string("Win+Esc will not start or stop the brain: ") + e.what());
+            addTrace(std::string("Win+Esc will not start or stop the brain: ") + e.what());
         }
     }
     // Shift+Win, the training screenshot, likewise only while observing (it saves the observed screen).
@@ -746,12 +758,12 @@ void App::observe(const Screen& screen) {
         try {
             shotHook_ = std::make_unique<ShotHook>();
         } catch (const std::exception& e) {
-            addLog(std::string("Shift+Win training screenshots will not work: ") + e.what());
+            addTrace(std::string("Shift+Win training screenshots will not work: ") + e.what());
         }
         // Its hook hears nothing typed into a game that runs as administrator unless observex is one (app/ShotHook);
         // Win+Esc, a registered hot key, is heard either way.
         if (!runsAsAdministrator()) {
-            addLog("Not running as administrator: Shift+Win is not heard while Lineage 2 is in front "
+            addTrace("Not running as administrator: Shift+Win is not heard while Lineage 2 is in front "
                    "(start observex again and say Yes when Windows asks)");
         }
     }
@@ -759,7 +771,7 @@ void App::observe(const Screen& screen) {
     pipeline_.setPreviewEnabled(true);
     pipeline_.setRecognitionEnabled(true);
     if (!pipeline_.start(screen)) {
-        addLog("Could not observe " + screen.monitor + ": " + pipeline_.error());
+        addTrace("Could not observe " + screen.monitor + ": " + pipeline_.error());
         return; // The view shows pipeline_.error().
     }
     try {
@@ -797,9 +809,9 @@ void App::observe(const Screen& screen) {
                              input.cursorX, input.cursorY});
             });
     } catch (const std::exception& e) {
-        addLog(std::string("Could not watch the mouse: ") + e.what());
+        addTrace(std::string("Could not watch the mouse: ") + e.what());
     }
-    addLog("Observing " + screen.monitor);
+    addTrace("Observing " + screen.monitor);
 
     // The model tools/train made.
     recognizerError_.clear();
@@ -869,9 +881,12 @@ void App::stopObserving() {
     mouseTest_.stop(); // TEMPORARY (the Mouse debug sweep, 2026-11-15): there are no monsters to sweep now.
     brainKey_.reset(); // Win+Esc only lives during an observing session.
     if (observed_ && pipeline_.state() != Pipeline::State::Stopped) {
-        addLog("Stopped observing " + observed_->monitor);
+        addTrace("Stopped observing " + observed_->monitor);
     }
     xpWatch_ = {}; // Another screen or character next: its XP only starts it.
+    hpWatch_ = {}; // And its HP.
+    hpLostQpc_ = 0;
+    attackerSeenQpc_ = 0;
     liveStats_ = {};    // And nothing is read.
     targetWatch_ = {};  // Nor is a target watched,
     watchLook_ = {};    // nor its plate looked at.
@@ -997,7 +1012,7 @@ void App::startRecording(RecordKind kind) {
             (kind == RecordKind::Unsure ? "only unsure" : "every " + std::to_string(kRecordingInterval) + " s") +
             ", into " + nameOf(recording_->folder);
         noteInClip("recording started: " + what);
-        addLog("Recording started: " + what);
+        addTrace("Recording started: " + what);
     }
 }
 
@@ -1045,7 +1060,7 @@ void App::stopRecording(const char* why) {
         }
         noteInClip(std::string(why) + ": " + nameOf(recording_->folder) + ", " + std::to_string(info.images) +
                    " images");
-        addLog(capitalized(why) + ": " + std::to_string(info.images) + (info.images == 1 ? " image" : " images") +
+        addTrace(capitalized(why) + ": " + std::to_string(info.images) + (info.images == 1 ? " image" : " images") +
                " in " + nameOf(recording_->folder));
     }
     recording_.reset();
@@ -1053,7 +1068,7 @@ void App::stopRecording(const char* why) {
 
 void App::takeShot() {
     if (!observed_ || pipeline_.state() != Pipeline::State::Running || pipeline_.shots() == nullptr) {
-        addLog("Training screenshot not taken: no screen is observed");
+        addTrace("Training screenshot not taken: no screen is observed");
         return;
     }
     // The hour's package: made with its first screenshot, its recorder kept while the hour lasts.
@@ -1076,7 +1091,7 @@ void App::takeShot() {
             std::filesystem::create_directories(folder, error);
             // Without the file the review would not list the package.
             if (!writeRecordingInfo(folder, info)) {
-                addLog("Training screenshot not taken: could not write " + toUtf8((folder / kRecordingFile).c_str()));
+                addTrace("Training screenshot not taken: could not write " + toUtf8((folder / kRecordingFile).c_str()));
                 return;
             }
         }
@@ -1085,7 +1100,7 @@ void App::takeShot() {
             shotRecorder_ = std::make_unique<Recorder>(*observed_, *pipeline_.shots(), folder, package.first, nullptr,
                                                        ImageFormat::Png);
         } catch (const std::exception& e) {
-            addLog(std::string("Training screenshot not taken: ") + e.what());
+            addTrace(std::string("Training screenshot not taken: ") + e.what());
             return;
         }
         shotPackage_ = std::move(package);
@@ -1109,11 +1124,11 @@ void App::logSavedShots() {
         return;
     }
     for (const unsigned saved = shotRecorder_->saved(); shotPackage_->logged < saved; ++shotPackage_->logged) {
-        addLog("Training screenshot " + std::to_string(shotPackage_->first + shotPackage_->logged) +
+        addTrace("Training screenshot " + std::to_string(shotPackage_->first + shotPackage_->logged) +
                " saved in handmade " + shotPackage_->title);
     }
     if (shotRecorder_->failed()) {
-        addLog("Training screenshots stopped: " + shotRecorder_->error());
+        addTrace("Training screenshots stopped: " + shotRecorder_->error());
         shotRecorder_.reset(); // The next Shift+Win tries again.
         shotPackage_.reset();
     }
@@ -1145,7 +1160,7 @@ void App::saveClip() {
     }
     noteInClip("save last 10 s");
     // Before the save, so the clip has it too, and the costs up to now.
-    addLog("Saved last 10 s as clip " + nameOf(folder));
+    addTrace("Saved last 10 s as clip " + nameOf(folder));
     noteCostsInClip();
     clipSaveError_.clear();
     const std::filesystem::path statsFolder = folder;
@@ -1154,7 +1169,7 @@ void App::saveClip() {
         writeClipStats(statsFolder); // The numbers read meanwhile, beside it.
     } else {
         clipSaveError_ = "Could not save the clip: it holds nothing yet.";
-        addLog(clipSaveError_);
+        addTrace(clipSaveError_);
     }
 }
 
@@ -1178,6 +1193,20 @@ void App::addLog(std::string text, std::int64_t qpc) {
     log_->add(std::move(line));
 }
 
+void App::addTrace(std::string text, std::int64_t qpc) {
+    if (!trace_) {
+        return;
+    }
+    if (qpc == 0) {
+        qpc = qpcNow();
+    }
+    LogLine line{logTimeAt(qpc), std::move(text)};
+    if (clipRecorder_) {
+        clipRecorder_->traced(qpc, line);
+    }
+    trace_->add(std::move(line));
+}
+
 void App::keepStats() {
     if (!uiFinder_ || uiFinder_->state() != UiFinder::State::Running) {
         return;
@@ -1188,6 +1217,9 @@ void App::keepStats() {
     } else {
         liveStats_ = newest;
     }
+    // The target first (its death on this reading), so Since Kill among the Nearby gauges is 0 on the very reading
+    // the brain may leave Combat on (the user asked, 2026-11-16: it went to Rest before a kill's drops were seen).
+    watchTarget(liveStats_);
     addLiveNearby(liveStats_);
     const GameStats& stats = liveStats_;
     statsHistory_.push_back(stats);
@@ -1197,14 +1229,65 @@ void App::keepStats() {
     if (const auto change = xpWatch_.read(stats.find("Status", "XP"), shownSeconds)) {
         addLog(change->text, static_cast<std::int64_t>(change->seconds * ticksPerSecond));
     }
-    watchTarget(stats);
+    // Items and adena picked up (the user asked, 2026-11-16): each the stats reader read since the last reading taken
+    // (the newest kMax of them), "Picked up 69 Adena".
+    if (const PickupRead& picked = stats.pickups; picked.run != 0) {
+        if (picked.run != pickupRun_) {
+            pickupRun_ = picked.run;
+            pickupCount_ = 0;
+            pickupAdena_ = 0;
+        }
+        if (brainActs_ && picked.adena > pickupAdena_) {
+            brainTally_.adena += picked.adena - pickupAdena_; // Since the Brain Started's Adena.
+        }
+        pickupAdena_ = picked.adena;
+        const std::uint32_t max = static_cast<std::uint32_t>(PickupRead::kMax);
+        for (std::uint32_t i = std::max(pickupCount_, picked.count > max ? picked.count - max : 0u); i < picked.count;
+             ++i) {
+            addLog("Picked up " + pickupText(picked.items[i % max]), stats.shownQpc);
+        }
+        pickupCount_ = picked.count;
+    }
+    // HP lost (the user asked, 2026-11-16: an event to leave Rest by): a log line, and the brain's next step has it.
+    if (const auto lost = hpWatch_.read(stats.find("Status", "HP"), shownSeconds)) {
+        addTrace(lost->text, static_cast<std::int64_t>(lost->seconds * ticksPerSecond));
+        brainEvents_[static_cast<std::size_t>(statetree::Event::HpLost)] = true;
+        // Something hits the own character: close-up looks round it for a while (engine/Recognizer's lookCloser; the
+        // user's clip 2026-11-16_14-04-25: an Imp beside it was mostly boxed together with it).
+        hpLostQpc_ = qpcNow();
+        if (recognizer_) {
+            if (!recognizer_->lookingCloser()) {
+                addTrace("Being hit: close-up looks round the own character for " +
+                         std::to_string(static_cast<int>(Recognizer::kCloseUpSeconds)) + " s");
+            }
+            recognizer_->lookCloser(hpLostQpc_ +
+                                    static_cast<std::int64_t>(Recognizer::kCloseUpSeconds * qpcFrequency()));
+        }
+    }
+    // The target hit by others (the user asked, 2026-11-16: leave a monster someone nearer started hitting, no kill
+    // steal): its HP bar fell with no MP of the own taken and no own cast ended near it.
+    {
+        const statetree::Variables seen = statetree::variablesOf(stats);
+        const auto targetHp = static_cast<std::size_t>(statetree::Variable::TargetHp);
+        TargetHitWatch::Reading reading;
+        reading.seconds = shownSeconds;
+        reading.hasTarget = stats.hasTarget;
+        reading.target = stats.target.data();
+        reading.targetHp = seen.known[targetHp] ? seen.value[targetHp] / 100.0f : -1.0f;
+        reading.mp = seen.mpPointsKnown ? static_cast<int>(seen.mpPoints) : -1;
+        reading.casting = seen.castShown;
+        if (const auto hit = targetHitWatch_.read(reading)) {
+            addTrace(hit->text, static_cast<std::int64_t>(hit->seconds * ticksPerSecond));
+            brainEvents_[static_cast<std::size_t>(statetree::Event::TargetHitByOthers)] = true;
+        }
+    }
     frameMeter_.lap(FrameStep::Stats);
     // Where the character is (the minimap followed, /loc read from the chat), the Geodata flag on or off.
     if (geodata_) {
         std::vector<std::string> lines;
         geodata_->read(stats, groundMs(stats.shownQpc), lines);
         for (std::string& line : lines) {
-            addLog(std::move(line), stats.shownQpc);
+            addTrace(std::move(line), stats.shownQpc);
         }
         if (const float scale = geodata_->scale(); scale > 0.0f && std::fabs(scale - settings_.minimapScale) > 0.01f) {
             settings_.minimapScale = scale; // Learned (or bettered) from two /loc: kept for the next start.
@@ -1224,6 +1307,7 @@ void App::tickBrain() {
     // The brain only advances while it is active (the user asked, 2026-11-15: an inactive one must not transition on
     // its own). Starting it again starts from Root (toggleActing).
     if (!brainActs_) {
+        brainEvents_ = {}; // None waits for it to start.
         return;
     }
     const GameStats* stats = nullptr;
@@ -1237,7 +1321,13 @@ void App::tickBrain() {
     }
     if (stats->image != brainImage_) { // One step a reading.
         brainImage_ = stats->image;
-        stateTree_.tick(statetree::variablesOf(*stats));
+        statetree::Variables variables = statetree::variablesOf(*stats);
+        // The events seen since the last step, live (a clip has none): for this step only.
+        if (!clipView_) {
+            variables.events = brainEvents_;
+        }
+        brainEvents_ = {};
+        stateTree_.tick(variables);
     }
 }
 
@@ -1398,7 +1488,18 @@ void App::drawGameStats() {
         camera = *shown;
     }
     statsTile_.draw(fonts_, stats, empty.c_str(), problem.c_str(), stateTree_.skills(), skillIcons_, dpiScale_,
-                    camera, cameraProblem.c_str());
+                    camera, cameraProblem.c_str(), clipView_ ? BrainTally{} : brainTallyNow());
+}
+
+BrainTally App::brainTallyNow() const {
+    BrainTally tally = brainTally_;
+    tally.shown = true;
+    tally.acting = brainActs_;
+    if (tally.started) {
+        const auto end = brainActs_ ? std::chrono::steady_clock::now() : brainStoppedAt_;
+        tally.seconds = std::chrono::duration<double>(end - brainStartedAt_).count();
+    }
+    return tally;
 }
 
 void App::drawSkills() {
@@ -1451,7 +1552,7 @@ std::vector<SkillToFind> App::skillsToFind() const {
         }
         SkillToFind& to = skills.emplace_back();
         to.name = skill.name;
-        to.cooldown = skill.cooldown;
+        to.cooldown = skill.active; // A utility skill has no cooldown to read: ready whenever it is seen.
         to.side = skill.side;
         to.grey.resize(pixels);
         for (std::size_t i = 0; i < pixels; ++i) { // The grey observex uses everywhere (GreyMaker).
@@ -1540,7 +1641,7 @@ void App::followSkills() {
             skill->bgr[p * 3 + 1] = picture.bgra[p * 4 + 1];
             skill->bgr[p * 3 + 2] = picture.bgra[p * 4 + 2];
         }
-        addLog(line + ", miniature updated");
+        addTrace(line + ", miniature updated");
         changed = true;
     }
     if (changed) {
@@ -1571,7 +1672,7 @@ void App::keyTyped(const std::string& name, const std::string& key) {
     std::string error;
     const std::filesystem::path file = modelFolder("ui") / kKeysFile;
     if (!font.load(file, &error)) {
-        addLog(name + ": could not learn its shortcut " + key + " (" + error + ")");
+        addTrace(name + ": could not learn its shortcut " + key + " (" + error + ")");
         return;
     }
     if (font.read(picture) == key) {
@@ -1579,11 +1680,11 @@ void App::keyTyped(const std::string& name, const std::string& key) {
     }
     const int learned = font.teach(picture, key);
     if (learned == 0) {
-        addLog(name + ": no letters on its miniature to learn the shortcut " + key + " from");
+        addTrace(name + ": no letters on its miniature to learn the shortcut " + key + " from");
     } else if (!font.save(file, &error)) {
-        addLog(name + ": could not learn its shortcut " + key + " (" + error + ")");
+        addTrace(name + ": could not learn its shortcut " + key + " (" + error + ")");
     } else {
-        addLog(name + ": learned the shortcut " + key + " from its slot (" + std::to_string(learned) +
+        addTrace(name + ": learned the shortcut " + key + " from its slot (" + std::to_string(learned) +
                (learned == 1 ? " glyph)" : " glyphs)"));
     }
 }
@@ -1604,6 +1705,112 @@ void App::addLiveNearby(GameStats& stats) {
         kinds = recognizer_->kinds();
     }
     addNearby(stats, looking, things, kinds);
+    // And what the monster memory keeps round the own character (Monsters Around, Monster Distance in game units).
+    const MonsterMemory::Monster* nearest = monsterMemory_.nearest();
+    addRemembered(stats, looking, monsterMemory_.count(), nearest != nullptr ? nearest->distance() * kGameUnits : -1.0f);
+    // And the drops looting counts (Drops, held a moment after they vanish; Drop Distance in game units), by the last
+    // watchLoot.
+    addDrops(stats, dropFinder_ && dropFinder_->state() == DropFinder::State::Running, dropsCounted_.count,
+             dropsCounted_.nearest);
+    // And how long ago the target last died (by the screen images; before the first kill, as long ago as can be).
+    addSinceKill(stats, killQpc_ != 0
+                            ? std::max(0.0, static_cast<double>(stats.shownQpc - killQpc_) / qpcFrequency())
+                            : -1.0);
+    // And how far the target is: its box as the target watch knows it, seen now, its feet on the flat ground by the
+    // camera shown (as Select Target's distances; game units).
+    float targetUnits = -1.0f;
+    if (targetBox_ != 0) {
+        const GroundCamera camera = cameraShown();
+        for (const Tracked& thing : things) {
+            if (thing.id != targetBox_ || thing.held || !camera.known) {
+                continue;
+            }
+            if (const std::optional<GroundSpot> spot =
+                    groundUnder(camera, nullptr, thing.x + thing.width * 0.5f, thing.y + thing.height);
+                spot && alongGround(*spot) <= kFarthestDistance) {
+                targetUnits = alongGround(*spot) * kGameUnits;
+            }
+        }
+    }
+    addTargetDistance(stats, targetUnits);
+}
+
+std::vector<SelectableMonster> App::attackerMonsters(StatsArea* ownBox) {
+    std::vector<SelectableMonster> monsters;
+    if (ownBox != nullptr) {
+        *ownBox = {};
+    }
+    if (!observed_ || !recognizer_ || recognizer_->state() != Recognizer::State::Running) {
+        return monsters;
+    }
+    const Found* found = &recognizer_->found();
+    if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+        if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+            found = &snapped;
+        }
+    }
+    const std::vector<std::string>& kinds = recognizer_->kinds();
+    const auto monsterAt = std::find(kinds.begin(), kinds.end(), "monster");
+    if (monsterAt == kinds.end()) {
+        return monsters;
+    }
+    const auto monsterKind = static_cast<std::uint8_t>(monsterAt - kinds.begin());
+    const auto ownAt = std::find(kinds.begin(), kinds.end(), "own");
+    const int ownKind = ownAt != kinds.end() ? static_cast<int>(ownAt - kinds.begin()) : -1;
+    const std::span<const Tracked> things(found->things.data(), static_cast<std::size_t>(found->count));
+    const Tracked* own = ownCharacter(things, ownKind, static_cast<float>(pipeline_.width()));
+    const auto areaOf = [](const Tracked& thing) {
+        return StatsArea{static_cast<int>(std::lround(thing.x)), static_cast<int>(std::lround(thing.y)),
+                         static_cast<int>(std::lround(thing.x + thing.width)),
+                         static_cast<int>(std::lround(thing.y + thing.height))};
+    };
+    StatsArea ownArea{};
+    if (own != nullptr) {
+        ownArea = areaOf(*own);
+        if (ownBox != nullptr) {
+            *ownBox = ownArea;
+        }
+    }
+    // Each monster seen now with its distance: along the ground while the camera is known, else on the screen from the
+    // own box (none without it).
+    const GroundCamera camera = cameraShown();
+    std::vector<AttackerCandidate> candidates;
+    std::vector<const Tracked*> of;
+    for (const Tracked& thing : things) {
+        if (thing.kind != monsterKind || thing.held || kindSureOf(thing) < kAttackerKindSure) {
+            continue;
+        }
+        AttackerCandidate candidate{thing.id, areaOf(thing), -1.0f};
+        if (camera.known) {
+            if (const std::optional<GroundSpot> spot =
+                    groundUnder(camera, nullptr, thing.x + thing.width * 0.5f, thing.y + thing.height);
+                spot && alongGround(*spot) <= kFarthestDistance) {
+                candidate.distance = alongGround(*spot);
+            }
+        } else if (own != nullptr) {
+            candidate.distance = screenDistance(candidate.box, ownArea);
+        }
+        candidates.push_back(candidate);
+        of.push_back(&thing);
+    }
+    // Within reach, nearest first; each pointed at beside the own box (a click on the own character targets it).
+    const RECT& bounds = observed_->bounds; // The monitor's desktop rectangle (GetCursorPos' pixels).
+    const double sx = static_cast<double>(bounds.right - bounds.left) / std::max(1u, pipeline_.width());
+    const double sy = static_cast<double>(bounds.bottom - bounds.top) / std::max(1u, pipeline_.height());
+    for (int best = nearestAttacker(candidates); best >= 0; best = nearestAttacker(candidates)) {
+        const AttackerCandidate chosen = candidates[static_cast<std::size_t>(best)];
+        const Tracked& thing = *of[static_cast<std::size_t>(best)];
+        float aimX = 0.0f;
+        float aimY = 0.0f;
+        aimBeside(chosen.box, own != nullptr ? &ownArea : nullptr, aimX, aimY);
+        monsters.push_back({chosen.id, chosen.box, static_cast<int>(std::lround(bounds.left + aimX * sx)),
+                            static_cast<int>(std::lround(bounds.top + aimY * sy)),
+                            static_cast<int>(std::lround(thing.width * sx)),
+                            static_cast<int>(std::lround(thing.height * sy)), chosen.distance, 0});
+        candidates.erase(candidates.begin() + best);
+        of.erase(of.begin() + best);
+    }
+    return monsters;
 }
 
 std::vector<MouseTarget> App::visibleMonsters() {
@@ -1733,25 +1940,28 @@ void App::toggleActing() {
     }
     // Why it cannot start goes into the Log (the Brain button has no tooltip: the user asked, 2026-11-15).
     if (!observed_ || review_ || clipView_) {
-        addLog("Brain not started: observe a game screen first");
+        addTrace("Brain not started: observe a game screen first");
         return;
     }
     stopRefresh("Refresh stopped: the brain started"); // Both drive the controller: one at a time.
     mouseTest_.stop(); // The Mouse debug sweep and acting both drive the controller: one at a time.
     if (!controller_.open()) {
-        addLog("Brain not started: controller: " + controller_.error());
+        addTrace("Brain not started: controller: " + controller_.error());
         return;
     }
     if (controller_.ping() < 0.0) {
-        addLog("Brain not started: the controller did not answer; is the firmware running?");
+        addTrace("Brain not started: the controller did not answer; is the firmware running?");
         return;
     }
     brainActs_ = true;
+    brainTally_ = {};     // Kills and adena counted afresh (the Stats tile's Since the Brain Started).
+    brainTally_.started = true;
+    brainStartedAt_ = std::chrono::steady_clock::now();
     stateTree_.restart(); // The whole tree afresh, from Root (the user asked, 2026-11-15).
     brainImage_ = 0;      // Its first step on the reading there is now.
     actingTaskStart_ = ~std::uint64_t{0}; // The task that runs starts afresh,
     parallelRuns_.clear();                // and the Parallel ones.
-    addLog("Brain active: from Root, it drives the mouse and keyboard through the controller");
+    addTrace("Brain active: from Root, it drives the mouse and keyboard through the controller");
 }
 
 void App::stopActing() {
@@ -1759,15 +1969,23 @@ void App::stopActing() {
         return;
     }
     brainActs_ = false;
+    brainStoppedAt_ = std::chrono::steady_clock::now(); // What it got stays shown, its time stopped here.
     lookAt({});
     parallelRuns_.clear();
     heldButtons_ = 0;
+    focusRight_ = false; // Let go below with the rest.
+    focusRan_ = false;
+    focuser_.start();
+    taskRight_ = false;
+    looker_.start();
+    fleeing_ = false;
+    flee_.start();
     keyHeld_ = false;
     if (controller_.isOpen()) {
         controller_.moveMouse(0, 0, 0, 0);    // Release any held mouse button,
         controller_.pressKeys(0, nullptr, 0); // and any held key.
     }
-    addLog("Brain inactive");
+    addTrace("Brain inactive");
 }
 
 void App::actuateBrain() {
@@ -1788,24 +2006,55 @@ void App::actuateBrain() {
         keyHeld_ = false;
     }
     if (heldButtons_ != 0 && now >= buttonReleaseAt_) {
-        controller_.moveMouse(0, 0, 0, 0);
         heldButtons_ = 0;
+        controller_.moveMouse(0, 0, buttonsHeld(), 0); // A turn's right button stays down.
     }
-    runParallelTasks(now); // Alongside the one below, the whole time their states are active.
     // The task that runs: one at a time, in order, each until it is done (the user asked, 2026-11-15; core/StateTree's
     // TaskKind says when each is). After the last nothing runs until the state is entered again.
     const statetree::State* state = stateTree_.currentState();
     const int index = stateTree_.currentTask();
-    if (state == nullptr || index < 0 || index >= static_cast<int>(state->tasks.size())) {
+    const statetree::Task* running = state != nullptr && index >= 0 && index < static_cast<int>(state->tasks.size())
+                                         ? &state->tasks[static_cast<std::size_t>(index)]
+                                         : nullptr;
+    // Focus Camera lets go of the mouse while that task wants it (the user asked, 2026-11-16: "whenever lmb mouse is
+    // free").
+    const bool mouseTask = running != nullptr && (running->kind == statetree::TaskKind::SelectTarget ||
+                                                  running->kind == statetree::TaskKind::ClickMouse ||
+                                                  running->kind == statetree::TaskKind::LookAround ||
+                                                  running->kind == statetree::TaskKind::MoveToDrop ||
+                                                  running->kind == statetree::TaskKind::Flee);
+    // Flee goes over the depth's terrain: the depth finder runs while it does (App::frame's depthNeeded).
+    fleeing_ = running != nullptr && running->kind == statetree::TaskKind::Flee;
+    focusRan_ = false;
+    runParallelTasks(now, mouseTask); // Alongside the one below, the whole time their states are active.
+    if (focusRight_ && !focusRan_ && (running == nullptr || running->kind != statetree::TaskKind::FocusCamera)) {
+        releaseFocus(); // Its task stopped (its state left) while it held the right button.
+    }
+    // Look Around or Select Target turning, stopped mid-turn (its state left, e.g. by an Any time transition): the
+    // right button let go at once.
+    if (taskRight_ && (running == nullptr || stateTree_.taskStarts() != actingTaskStart_ ||
+                       (running->kind != statetree::TaskKind::LookAround &&
+                        running->kind != statetree::TaskKind::SelectTarget))) {
+        releaseTaskRight();
+        addTrace("Let go of the right button: the task turning the camera stopped");
+    }
+    if (running == nullptr) {
         lookAt({});
         return;
     }
-    const statetree::Task& task = state->tasks[static_cast<std::size_t>(index)];
+    const statetree::Task& task = *running;
     if (stateTree_.taskStarts() != actingTaskStart_) { // A task starts (or starts again): afresh.
         actingTaskStart_ = stateTree_.taskStarts();
         taskPressed_ = false;
         selector_.start();
         skillUser_.start();
+        looker_.start();
+        dropPicker_.start();
+        flee_.start();
+        if (task.kind == statetree::TaskKind::FocusCamera && !focusRan_) {
+            releaseFocus();
+            focuser_.start();
+        }
     }
     if (task.kind != statetree::TaskKind::SelectTarget) {
         lookAt({});
@@ -1822,13 +2071,66 @@ void App::actuateBrain() {
         const double ticks = static_cast<double>(frequency.QuadPart);
         POINT cursor{};
         GetCursorPos(&cursor);
-        const std::vector<SelectableMonster> monsters = selectableMonsters();
+        // The monsters on the screen with their distances (the nearest is chosen: the user asked, 2026-11-16), and
+        // those the monster memory keeps off it, by their bearing from where the camera looks now.
+        // Attacker: only those beside the own character on the screen now (core/Attacker), never turned to.
+        const bool attacker = task.target == statetree::Target::Attacker;
+        std::vector<SelectableMonster> monsters = attacker ? attackerMonsters() : selectableMonsters();
+        if (!attacker) {
+            measureMonsters(monsters);
+        }
+        std::vector<RememberedMonster> offScreen;
+        const MouseCamera::View view =
+            mouseCamera_ ? mouseCamera_->at(groundMs(counter.QuadPart)) : MouseCamera::View{};
+        for (const MonsterMemory::Monster& m : monsterMemory_.monsters()) {
+            const bool shown = std::ranges::any_of(monsters, [&](const SelectableMonster& s) { return s.key == m.key; });
+            if (!attacker && !m.givenUp && !shown && view.known) {
+                offScreen.push_back({m.key, m.id, m.distance(), MonsterMemory::bearing(m, view.turned)});
+            }
+        }
+        // The game's interface on the desktop (the UI finder's pieces): a click or a right-button press there goes to
+        // it, not the world behind (the user's clip 2026-11-16_14-25-14: an imp seen through the see-through minimap
+        // got the cursor; the game hovered nothing, and the turn pressed there turned nothing). Each monster's click
+        // point moves to a part of its box clear of it, or the monster is left out (after the memory above: one under
+        // it is on the screen, never turned to).
+        const RECT& bounds = observed_->bounds;
+        std::vector<StatsArea> ui;
+        if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+            const double sx = static_cast<double>(bounds.right - bounds.left) / std::max(1u, pipeline_.width());
+            const double sy = static_cast<double>(bounds.bottom - bounds.top) / std::max(1u, pipeline_.height());
+            const UiPieces& pieces = uiFinder_->found();
+            for (int i = 0; i < pieces.count; ++i) {
+                const UiPiece& p = pieces.pieces[static_cast<std::size_t>(i)];
+                ui.push_back({static_cast<int>(std::lround(bounds.left + p.x0 * sx)),
+                              static_cast<int>(std::lround(bounds.top + p.y0 * sy)),
+                              static_cast<int>(std::lround(bounds.left + p.x1 * sx)),
+                              static_cast<int>(std::lround(bounds.top + p.y1 * sy))});
+            }
+        }
+        std::vector<SelectableMonster> clickable;
+        clickable.reserve(monsters.size());
+        for (SelectableMonster& m : monsters) {
+            if (clearOfInterface(m, ui)) {
+                clickable.push_back(m);
+            }
+        }
         TargetSelector::Input in;
+        in.ui = ui;
+        in.screen = {bounds.left, bounds.top, bounds.right, bounds.bottom};
+        in.underInterface = static_cast<int>(monsters.size() - clickable.size());
+        monsters = std::move(clickable);
         in.now = static_cast<double>(counter.QuadPart) / ticks;
         in.dt = dt;
         in.cursorX = cursor.x;
         in.cursorY = cursor.y;
         in.monsters = monsters;
+        in.offScreen = offScreen;
+        // Turned to only while the ground camera is known too: the memory knows the one turned to again by where it
+        // sees it on the ground (without it, every turn ended "not there" and the next began: 2026-11-16).
+        in.canTurn = !attacker && view.known && cameraShown().known;
+        in.cursorAtMiddle = cursorAtGameMiddle();
+        in.mouseFree = (taskRight_ || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0) &&
+                       (heldButtons_ != 0 || (GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0);
         if (liveStats_.image > 0) {
             in.seen.image = liveStats_.image;
             in.seen.shown = static_cast<double>(liveStats_.shownQpc) / ticks;
@@ -1840,8 +2142,20 @@ void App::actuateBrain() {
         }
         const TargetSelector::Output out = selector_.step(in);
         lookAt(out.look);
-        if ((out.dx != 0 || out.dy != 0) && heldButtons_ == 0) { // A click is pressed and let go where it was pressed.
+        if (out.right || taskRight_) {
+            // Turning the camera to a monster off the screen: the counts with the right button held (or its letting go).
+            if (out.dx != 0 || out.dy != 0 || out.right != taskRight_) {
+                taskRight_ = out.right;
+                controller_.moveMouse(out.dx, out.dy, buttonsHeld(), 0);
+            }
+        } else if ((out.dx != 0 || out.dy != 0) && heldButtons_ == 0) { // A click is pressed and let go where it was.
             controller_.moveMouse(out.dx, out.dy, 0);
+        }
+        if (out.gaveUpKey != 0) {
+            monsterMemory_.giveUp(out.gaveUpKey);
+        }
+        if (out.forgetKey != 0) {
+            monsterMemory_.forget(out.forgetKey);
         }
         if (out.click) {
             heldButtons_ = 0x01;
@@ -1849,14 +2163,142 @@ void App::actuateBrain() {
             buttonReleaseAt_ = now + kHoldMs;
         }
         if (!out.log.empty()) {
-            addLog(out.log);
+            addTrace(attacker ? "Attacker: " + out.log : out.log);
         }
         if (out.done) {
             lookAt({});
+            // The box it clicked is the target's at once (Flee and Focus Camera go by it), until the target watch
+            // finds it by its name plate (watchTarget), which takes a reading a box.
+            if (targetBox_ == 0 && selector_.chosen() != 0 && liveStats_.hasTarget) {
+                targetBox_ = selector_.chosen();
+                targetBoxName_ = liveStats_.targetName.data();
+            }
             stateTree_.finishTask();
         }
         break;
     }
+    case statetree::TaskKind::LookAround: {
+        // The camera turned once round by the right button (core/LookAround), the monster memory forgotten first and
+        // filled by every look on the way (rememberMonsters); done once round.
+        LARGE_INTEGER frequency;
+        LARGE_INTEGER counter;
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&counter);
+        LookAround::Input in;
+        in.now = static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart);
+        // The mouse is free: no click held, none of the user's own buttons down (the right one aside while it holds it).
+        in.mouseFree = heldButtons_ == 0 && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0 &&
+                       (taskRight_ || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0);
+        in.cursorAtMiddle = cursorAtGameMiddle();
+        if (mouseCamera_) {
+            const MouseCamera::View view = mouseCamera_->at(groundMs(counter.QuadPart));
+            in.pitchKnown = view.pitchKnown;
+            in.pitchPinned = view.pitchPinned;
+            in.pitch = view.pitch;
+        }
+        in.degrees = task.degrees;
+        const LookAround::Output out = looker_.step(in);
+        if (out.clearMemory) {
+            monsterMemory_.clear();
+            rememberedLook_ = 0;
+        }
+        if (out.dx != 0 || out.dy != 0 || out.right != taskRight_) {
+            taskRight_ = out.right;
+            controller_.moveMouse(out.dx, out.dy, buttonsHeld(), 0);
+        }
+        if (!out.log.empty()) {
+            std::string line = out.log;
+            if (out.done) { // What it remembers now.
+                char said[200];
+                const MonsterMemory::Monster* nearest = monsterMemory_.nearest();
+                if (nearest == nullptr) {
+                    std::snprintf(said, sizeof(said), ": no monster remembered");
+                } else {
+                    const float bearing =
+                        mouseCamera_ ? MonsterMemory::bearing(*nearest, mouseCamera_->at(groundMs(counter.QuadPart)).turned)
+                                     : 0.0f;
+                    std::snprintf(said, sizeof(said), ": %d monster%s remembered, the nearest %.0f away, %.0f degrees %s",
+                                  monsterMemory_.count(), monsterMemory_.count() == 1 ? "" : "s",
+                                  std::round(nearest->distance() * kGameUnits / 10.0f) * 10.0f,
+                                  std::fabs(bearing) * 57.29578f, bearing >= 0.0f ? "right" : "left");
+                }
+                line += said;
+            }
+            addTrace(line);
+        }
+        if (out.done && !taskRight_) {
+            stateTree_.finishTask();
+        }
+        break;
+    }
+    case statetree::TaskKind::MoveToDrop: {
+        // The nearest drop looting counts: done at once within reach (or none), else the cursor onto it and a left
+        // click, done once there or gone; one it gives up on is left out of Drops (core/DropPick).
+        if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 && heldButtons_ == 0) {
+            break; // The user's own left button: wait.
+        }
+        LARGE_INTEGER frequency;
+        LARGE_INTEGER counter;
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&counter);
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        const RECT& bounds = observed_->bounds; // The monitor on the desktop (GetCursorPos' pixels).
+        const double sx = static_cast<double>(bounds.right - bounds.left) / std::max(1u, pipeline_.width());
+        const double sy = static_cast<double>(bounds.bottom - bounds.top) / std::max(1u, pipeline_.height());
+        const auto deskX = [&](double x) { return static_cast<int>(std::lround(bounds.left + x * sx)); };
+        const auto deskY = [&](double y) { return static_cast<int>(std::lround(bounds.top + y * sy)); };
+        DropPicker::Input in;
+        in.now = static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart);
+        in.dt = dt;
+        in.cursorX = cursor.x;
+        in.cursorY = cursor.y;
+        in.drops = dropsCounted_.counted;
+        in.reach = task.reach;
+        StatsArea own{};
+        std::vector<StatsArea> others;
+        if (ownShown(own, &others)) {
+            in.own = true;
+            in.ownX = deskX((own.x0 + own.x1) * 0.5);
+            in.ownY = deskY(own.y1);
+            in.ownHeight = static_cast<float>((own.y1 - own.y0) * sy);
+        }
+        std::vector<DropPicker::Box> characters;
+        characters.reserve(others.size());
+        for (const StatsArea& box : others) {
+            characters.push_back({deskX(box.x0), deskY(box.y0), deskX(box.x1), deskY(box.y1)});
+        }
+        in.characters = characters;
+        const DropPicker::Output out = dropPicker_.step(in);
+        if ((out.dx != 0 || out.dy != 0) && heldButtons_ == 0) { // A click is pressed and let go where it was.
+            controller_.moveMouse(out.dx, out.dy, buttonsHeld(), 0);
+        }
+        if (out.click && !pressing && !taskRight_ && !focusRight_) {
+            heldButtons_ = 0x01;
+            controller_.moveMouse(0, 0, heldButtons_, 0); // Press; held kHoldMs, then released at the top.
+            buttonReleaseAt_ = now + kHoldMs;
+        }
+        if (out.gaveUp) {
+            dropBook_.giveUp(out.givenUp, in.now); // Counted without it from the next watchLoot on.
+        }
+        if (!out.log.empty()) {
+            addTrace(out.log);
+        }
+        if (out.done && heldButtons_ == 0) {
+            stateTree_.finishTask();
+        }
+        break;
+    }
+    case statetree::TaskKind::Flee:
+        // Away from the target: the ground clicked again and again on the way the depth's terrain allows
+        // (core/Flee); done once there is nothing to flee from.
+        if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 && heldButtons_ == 0) {
+            break; // The user's own left button: wait.
+        }
+        if (driveFlee(dt, !pressing && !taskRight_ && !focusRight_, task.from) && heldButtons_ == 0) {
+            stateTree_.finishTask();
+        }
+        break;
     case statetree::TaskKind::ClickMouse:
         // Done once clicked: pressed, held kHoldMs and let go.
         if (!taskPressed_ && !pressing) {
@@ -1865,13 +2307,13 @@ void App::actuateBrain() {
             buttonReleaseAt_ = now + kHoldMs;
             taskPressed_ = true;
         } else if (taskPressed_ && heldButtons_ == 0) {
-            addLog(std::string("Click Mouse: ") + statetree::nameOf(task.button) + " button clicked");
+            addTrace(std::string("Click Mouse: ") + statetree::nameOf(task.button) + " button clicked");
             stateTree_.finishTask();
         }
         break;
     case statetree::TaskKind::UseSkill: {
-        // Of its skills, top to bottom, the first ready one is pressed; done once its cast ended or its MP cost was
-        // taken, with fallbacks (core/SkillUse). On the newest live reading.
+        // Of its skills, top to bottom, the first ready one is pressed; an active one is done once its MP was taken, a
+        // utility one once its key was let go, with fallbacks (core/SkillUse). On the newest live reading.
         std::vector<UsableSkill> usable;
         usable.reserve(task.skills.size());
         for (const std::string& name : task.skills) {
@@ -1880,7 +2322,7 @@ void App::actuateBrain() {
             std::uint8_t code = 0;
             usable.push_back({name, skill != nullptr ? skill->key : std::string(),
                               skill != nullptr && hidForKey(skill->key, mod, code),
-                              skill == nullptr || skill->cooldown, skill != nullptr ? skill->mp : 0});
+                              skill == nullptr || skill->active, skill != nullptr ? skill->mp : 0});
         }
         LARGE_INTEGER frequency;
         LARGE_INTEGER counter;
@@ -1911,7 +2353,7 @@ void App::actuateBrain() {
             keyReleaseAt_ = now + kHoldMs;
         }
         if (!out.log.empty()) {
-            addLog(out.log);
+            addTrace(out.log);
         }
         if (out.done && !keyHeld_) { // Done once its key was let go too.
             stateTree_.finishTask();
@@ -1923,10 +2365,324 @@ void App::actuateBrain() {
         addLog("Debug Print: " + statetree::whereText(stateTree_.tree(), state->id, index));
         stateTree_.finishTask();
         break;
+    case statetree::TaskKind::FocusCamera: {
+        // Done once the target is in place (or there is none), its right button let go (a Parallel one may have
+        // stepped it this frame already: its step then says).
+        const CameraFocuser::Output out = focusRan_ ? focusOut_ : driveFocus(false);
+        if (out.inPlace && !focusRight_) {
+            stateTree_.finishTask();
+        }
+        break;
+    }
     }
 }
 
-void App::runParallelTasks(std::chrono::steady_clock::time_point now) {
+void App::releaseFocus() {
+    if (focusRight_) {
+        focusRight_ = false;
+        controller_.moveMouse(0, 0, buttonsHeld(), 0);
+    }
+}
+
+void App::releaseTaskRight() {
+    if (taskRight_) {
+        taskRight_ = false;
+        controller_.moveMouse(0, 0, buttonsHeld(), 0);
+    }
+}
+
+bool App::cursorAtGameMiddle() const {
+    if (!observed_) {
+        return false;
+    }
+    // Where the game puts the cursor when it turns the camera: its window's middle (as App::mouseCamera_'s).
+    const RECT& bounds = observed_->bounds;
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    return std::abs(cursor.x - (bounds.left + bounds.right) / 2) <= 3 &&
+           std::abs(cursor.y - (bounds.top + bounds.bottom) / 2) <= 3;
+}
+
+GroundCamera App::cameraShown() const {
+    GroundCamera shown; // Unknown until the ground finder has followed an image.
+    if (!groundFollowing_ || !groundFinder_ || groundFinder_->state() != GroundFinder::State::Running) {
+        return shown;
+    }
+    const GroundSeen& seen = groundFinder_->seen();
+    if (seen.image == 0) {
+        return shown;
+    }
+    shown = groundAt(seen.camera, previewMs_);
+    // Turned on and tilted as the mouse's counts say from the image followed to the one shown: exact on every frame,
+    // not along the follow's speeds.
+    if (mouseCamera_ && shown.known) {
+        if (const MouseCamera::View now = mouseCamera_->at(previewMs_); now.known) {
+            const MouseCamera::View then = mouseCamera_->at(seen.camera.timeMs);
+            shown.yaw = static_cast<float>(std::remainder(static_cast<double>(seen.camera.yaw) + now.turned - then.turned,
+                                                          2.0 * 3.14159265358979323846));
+            if (now.pitchKnown) {
+                shown.pitch = now.pitch;
+            }
+        }
+    }
+    return shown;
+}
+
+void App::rememberMonsters() {
+    // The newest look (the snapper's while it runs, else the recogniser's), once, while the camera on the image shown
+    // and its turn (the mouse's counts) are known: each monster sure of its kind and seen now, its feet on the ground.
+    if (!observed_ || review_ || clipView_ || !recognizer_ || recognizer_->state() != Recognizer::State::Running ||
+        !mouseCamera_) {
+        return;
+    }
+    const Found* found = &recognizer_->found();
+    if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+        if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+            found = &snapped;
+        }
+    }
+    if (found->image == 0 || found->image == rememberedLook_) {
+        return;
+    }
+    const GroundCamera camera = cameraShown();
+    const MouseCamera::View view = mouseCamera_->at(previewMs_);
+    if (!camera.known || !view.known) {
+        return;
+    }
+    rememberedLook_ = found->image;
+    std::vector<MonsterSighting> seen;
+    for (const SelectableMonster& m : selectableMonsters()) {
+        const float footX = (m.box.x0 + m.box.x1) * 0.5f;
+        const auto footY = static_cast<float>(m.box.y1);
+        if (const std::optional<GroundSpot> spot = groundUnder(camera, nullptr, footX, footY);
+            spot && alongGround(*spot) <= kFarthestDistance) {
+            seen.push_back({m.id, spot->right, spot->away});
+        }
+    }
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    monsterMemory_.look(static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart), view.turned,
+                        camera, static_cast<float>(pipeline_.width()), static_cast<float>(pipeline_.height()), seen);
+}
+
+void App::measureMonsters(std::vector<SelectableMonster>& monsters) const {
+    const GroundCamera camera = cameraShown();
+    for (SelectableMonster& m : monsters) {
+        if (camera.known) {
+            const float footX = (m.box.x0 + m.box.x1) * 0.5f;
+            const auto footY = static_cast<float>(m.box.y1);
+            if (const std::optional<GroundSpot> spot = groundUnder(camera, nullptr, footX, footY);
+                spot && alongGround(*spot) <= kFarthestDistance) {
+                m.distance = alongGround(*spot);
+            }
+        }
+        if (const MonsterMemory::Monster* remembered = monsterMemory_.withId(m.id)) {
+            m.key = remembered->key;
+        }
+    }
+}
+
+bool App::driveFlee(double dt, bool canClick, statetree::FleeFrom fleeFrom) {
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    FleeWalker::Input in;
+    in.now = static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart);
+    in.dt = dt;
+    in.width = static_cast<float>(pipeline_.width());
+    in.height = static_cast<float>(pipeline_.height());
+    const RECT& bounds = observed_->bounds; // The monitor on the desktop (GetCursorPos' pixels).
+    in.left = bounds.left;
+    in.top = bounds.top;
+    in.scaleX = static_cast<double>(bounds.right - bounds.left) / std::max(1.0f, in.width);
+    in.scaleY = static_cast<double>(bounds.bottom - bounds.top) / std::max(1.0f, in.height);
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    in.cursorX = cursor.x;
+    in.cursorY = cursor.y;
+    in.canClick = canClick;
+    // The target as the stats reader reads it (nothing read yet: none).
+    if (liveStats_.image > 0) {
+        in.hasTarget = liveStats_.hasTarget;
+        const GameGauge* hp = liveStats_.find(kTargetPiece, "HP");
+        in.targetHp = hp != nullptr ? hp->full : -1.0f;
+        in.targetName = liveStats_.targetName.data();
+    }
+    // What is shown now (the snapper's boxes while it runs, else the recogniser's): the own character, the target's
+    // box (the target watch's, or the one Select Target clicked) and every character's box, never clicked on.
+    std::vector<FleeWalker::Box> characters;
+    if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+        const Found* found = &recognizer_->found();
+        if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+            if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+                found = &snapped;
+            }
+        }
+        const std::span<const Tracked> things(found->things.data(), static_cast<std::size_t>(found->count));
+        const std::vector<std::string>& kinds = recognizer_->kinds();
+        const auto ownAt = std::find(kinds.begin(), kinds.end(), "own");
+        const int ownKind = ownAt != kinds.end() ? static_cast<int>(ownAt - kinds.begin()) : -1;
+        const Tracked* own = ownCharacter(things, ownKind, in.width);
+        if (own != nullptr) {
+            in.own = true;
+            in.ownBox = {own->x, own->y, own->x + own->width, own->y + own->height};
+        }
+        characters.reserve(things.size());
+        for (const Tracked& thing : things) {
+            const FleeWalker::Box box{thing.x, thing.y, thing.x + thing.width, thing.y + thing.height};
+            characters.push_back(box);
+            if (targetBox_ != 0 && thing.id == targetBox_ && !thing.held && (own == nullptr || thing.id != own->id)) {
+                in.targetSeen = true;
+                in.targetBox = box;
+            }
+        }
+    }
+    in.characters = characters;
+    // From the Attacker (core/Attacker): its box instead of the target's, and something to flee from while one was
+    // seen or HP was lost a moment ago (it may be hidden in the own box a moment).
+    if (fleeFrom == statetree::FleeFrom::Attacker) {
+        const std::vector<SelectableMonster> attackers = attackerMonsters();
+        in.targetSeen = !attackers.empty();
+        if (in.targetSeen) {
+            const StatsArea& box = attackers.front().box;
+            in.targetBox = {static_cast<float>(box.x0), static_cast<float>(box.y0), static_cast<float>(box.x1),
+                            static_cast<float>(box.y1)};
+            attackerSeenQpc_ = counter.QuadPart;
+        }
+        const auto lately = [&](std::int64_t at) {
+            return at != 0 && static_cast<double>(counter.QuadPart - at) <=
+                                  statetree::kAttackerHoldSeconds * static_cast<double>(frequency.QuadPart);
+        };
+        in.hasTarget = in.targetSeen || lately(attackerSeenQpc_) || lately(hpLostQpc_);
+        in.targetHp = -1.0f;
+        in.targetName = "the attacker";
+    }
+    // The drops shown (a click on one walks there to pick it up) and the interface's pieces.
+    std::vector<FleeWalker::Box> avoid;
+    avoid.reserve(lootShown_.size() + UiPieces::kMax);
+    for (const Detection& drop : lootShown_) {
+        avoid.push_back({drop.x, drop.y, drop.x + drop.width, drop.y + drop.height});
+    }
+    if (uiFinder_ && uiFinder_->state() == UiFinder::State::Running) {
+        const UiPieces& pieces = uiFinder_->found();
+        for (int i = 0; i < pieces.count; ++i) {
+            const UiPiece& piece = pieces.pieces[static_cast<std::size_t>(i)];
+            avoid.push_back({static_cast<float>(piece.x0), static_cast<float>(piece.y0), static_cast<float>(piece.x1),
+                             static_cast<float>(piece.y1)});
+        }
+    }
+    in.avoid = avoid;
+    // The camera on the image shown and the terrain the depth maps made (kept alive through the step).
+    in.camera = cameraShown();
+    in.cameraFollowed = in.camera.known;
+    std::shared_ptr<const GroundHeights> heights;
+    if (in.cameraFollowed) {
+        heights = groundFinder_->seen().heights;
+    }
+    in.heights = heights.get();
+    if (mouseCamera_) {
+        const MouseCamera::View view = mouseCamera_->at(groundMs(counter.QuadPart));
+        in.pitchKnown = view.pitchKnown;
+        in.pitch = view.pitch;
+    }
+    const FleeWalker::Output out = flee_.step(in);
+    if ((out.dx != 0 || out.dy != 0) && heldButtons_ == 0) { // A click is pressed and let go where it was.
+        controller_.moveMouse(out.dx, out.dy, buttonsHeld(), 0);
+    }
+    if (out.click && canClick) {
+        heldButtons_ = 0x01;
+        controller_.moveMouse(0, 0, buttonsHeld(), 0); // Press; held kHoldMs, then released at actuateBrain's top.
+        buttonReleaseAt_ = std::chrono::steady_clock::now() + kHoldMs;
+    }
+    std::size_t from = 0;
+    while (from < out.log.size()) { // One Log line each.
+        const std::size_t end = std::min(out.log.find('\n', from), out.log.size());
+        addTrace(out.log.substr(from, end - from));
+        from = end + 1;
+    }
+    return out.done;
+}
+
+CameraFocuser::Output App::driveFocus(bool mouseTask) {
+    // What is shown now, as Select Target and the target watch see it: the snapper's boxes while it runs, else the
+    // recogniser's.
+    CameraFocuser::Input in;
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    in.now = static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart);
+    in.width = static_cast<float>(pipeline_.width());
+    in.height = static_cast<float>(pipeline_.height());
+    // The mouse is free: no task one after another wants it, no button held by one, and none held by the user (the
+    // left, or the right while Focus Camera does not hold it).
+    const bool userLeft = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    const bool userRight = !focusRight_ && !taskRight_ && (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    in.mouseFree = !mouseTask && heldButtons_ == 0 && !taskRight_ && !userLeft && !userRight;
+    in.cursorAtMiddle = cursorAtGameMiddle();
+    if (recognizer_ && recognizer_->state() == Recognizer::State::Running) {
+        const Found* found = &recognizer_->found();
+        if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+            if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+                found = &snapped;
+            }
+        }
+        const std::span<const Tracked> things(found->things.data(), static_cast<std::size_t>(found->count));
+        const std::vector<std::string>& kinds = recognizer_->kinds();
+        const auto ownAt = std::find(kinds.begin(), kinds.end(), "own");
+        const int ownKind = ownAt != kinds.end() ? static_cast<int>(ownAt - kinds.begin()) : -1;
+        const Tracked* own = ownCharacter(things, ownKind, in.width);
+        if (own != nullptr) {
+            in.own = true;
+            in.ownBox = {own->x, own->y, own->x + own->width, own->y + own->height};
+        }
+        for (const Tracked& thing : things) {
+            if (targetBox_ != 0 && thing.id == targetBox_ && !thing.held && (own == nullptr || thing.id != own->id)) {
+                in.target = true;
+                in.targetId = thing.id;
+                in.targetBox = {thing.x, thing.y, thing.x + thing.width, thing.y + thing.height};
+                break;
+            }
+        }
+    }
+    in.targetName = targetBoxName_;
+    if (mouseCamera_) {
+        const MouseCamera::View view = mouseCamera_->at(groundMs(counter.QuadPart));
+        in.pitchKnown = view.pitchKnown;
+        in.pitch = view.pitch;
+    }
+    if (groundFollowing_ && groundFinder_ && groundFinder_->state() == GroundFinder::State::Running) {
+        if (const GroundSeen& seen = groundFinder_->seen(); seen.image > 0 && seen.camera.known) {
+            in.distanceKnown = true;
+            in.distance = seen.camera.distance;
+        }
+    }
+    CameraFocuser::Output out = focuser_.step(in);
+    if (out.dx != 0 || out.dy != 0 || out.right != focusRight_) {
+        // With the right button held the game turns the camera by the counts (core/MouseCamera).
+        controller_.moveMouse(out.dx, out.dy, static_cast<std::uint8_t>(heldButtons_ | (out.right ? 0x02 : 0)), 0);
+        focusRight_ = out.right;
+    }
+    if (!out.log.empty()) {
+        std::size_t from = 0;
+        for (;;) { // One Log line each.
+            const std::size_t end = out.log.find('\n', from);
+            addTrace(out.log.substr(from, end == std::string::npos ? std::string::npos : end - from));
+            if (end == std::string::npos) {
+                break;
+            }
+            from = end + 1;
+        }
+    }
+    focusRan_ = true;
+    focusOut_ = out;
+    return out;
+}
+
+void App::runParallelTasks(std::chrono::steady_clock::time_point now, bool mouseTask) {
     const std::vector<statetree::TaskAt> running = stateTree_.parallelTasks();
     const statetree::Tree& tree = stateTree_.tree();
     const auto taskAt = [&tree](const statetree::TaskAt& at) -> const statetree::Task& {
@@ -1944,6 +2700,10 @@ void App::runParallelTasks(std::chrono::steady_clock::time_point now) {
         if (run == parallelRuns_.end()) { // Its state became active: it starts, due at once.
             parallelRuns_.push_back({at, task.kind, now});
             run = parallelRuns_.end() - 1;
+            if (task.kind == statetree::TaskKind::FocusCamera && !focusRan_) {
+                releaseFocus();
+                focuser_.start();
+            }
         }
         switch (task.kind) {
         case statetree::TaskKind::DebugPrint:
@@ -1955,9 +2715,19 @@ void App::runParallelTasks(std::chrono::steady_clock::time_point now) {
                 run->next = std::max(run->next + period, now);
             }
             break;
+        case statetree::TaskKind::FocusCamera:
+            // The target held at 1/4 or 3/4 of the width by short right-button turns, the whole time, waiting while
+            // the task one after another wants the mouse (one Focus Camera a frame: the first, from the top state).
+            if (!focusRan_) {
+                driveFocus(mouseTask);
+            }
+            break;
         case statetree::TaskKind::UseSkill:
         case statetree::TaskKind::SelectTarget:
         case statetree::TaskKind::ClickMouse:
+        case statetree::TaskKind::LookAround:
+        case statetree::TaskKind::MoveToDrop:
+        case statetree::TaskKind::Flee:
             break; // Never Parallel (statetree::canRunParallel): they share the keyboard and mouse.
         }
     }
@@ -1969,6 +2739,9 @@ std::vector<RefreshSkill> App::refreshSkills() const {
     skills.reserve(profile.size());
     const bool live = observed_ && liveStats_.image > 0 && pipeline_.width() > 0 && pipeline_.height() > 0;
     for (const statetree::Skill& skill : profile) {
+        if (!skill.active) {
+            continue; // A utility skill's MP cost is never looked at (Use Skill is done once it is pressed).
+        }
         RefreshSkill one;
         one.name = skill.name;
         const GameGauge* gauge = live ? liveStats_.find(kSkillsPiece, skill.name) : nullptr;
@@ -1995,46 +2768,46 @@ void App::toggleRefresh() {
     }
     // Why it cannot start goes into the Log, as the Brain's.
     if (!observed_ || review_ || clipView_) {
-        addLog("Refresh not started: observe a game screen first");
+        addTrace("Refresh not started: observe a game screen first");
         return;
     }
     if (brainActs_) {
-        addLog("Refresh not started: stop the brain first (both drive the mouse)");
+        addTrace("Refresh not started: stop the brain first (both drive the mouse)");
         return;
     }
     if (!uiFinder_ || uiFinder_->state() != UiFinder::State::Running || liveStats_.image == 0) {
-        addLog("Refresh not started: nothing is read from the screen yet");
+        addTrace("Refresh not started: nothing is read from the screen yet");
         return;
     }
     const std::vector<RefreshSkill> skills = refreshSkills();
     if (skills.empty()) {
-        addLog("Refresh not started: the profile has no skills (Add Skill adds them)");
+        addTrace("Refresh not started: the profile has no active skills (their MP costs are what it reads)");
         return;
     }
     const auto first = std::find_if(skills.begin(), skills.end(), [](const RefreshSkill& skill) { return skill.seen; });
     if (first == skills.end()) {
-        addLog("Refresh not started: none of the profile's skills is seen on the hotbar");
+        addTrace("Refresh not started: none of the profile's skills is seen on the hotbar");
         return;
     }
     mouseTest_.stop(); // The Mouse debug sweep drives the controller too: one at a time.
     if (!controller_.open()) {
-        addLog("Refresh not started: controller: " + controller_.error());
+        addTrace("Refresh not started: controller: " + controller_.error());
         return;
     }
     if (controller_.ping() < 0.0) {
-        addLog("Refresh not started: the controller did not answer; is the firmware running?");
+        addTrace("Refresh not started: the controller did not answer; is the firmware running?");
         return;
     }
     // The game in front, so it shows its tooltips (observex is in front: its button was just clicked).
     if (HWND game = GetAncestor(WindowFromPoint(POINT{first->x, first->y}), GA_ROOT);
         game != nullptr && (!window_ || game != window_->handle()) && !SetForegroundWindow(game)) {
-        addLog("Refresh: could not bring the game to the front; its tooltips may not show");
+        addTrace("Refresh: could not bring the game to the front; its tooltips may not show");
     }
     POINT cursor{};
     GetCursorPos(&cursor);
     skillRefresher_.start(cursor.x, cursor.y);
     refreshAsked_ = 0;
-    addLog("Refresh: the mouse goes over each of " + std::to_string(skills.size()) +
+    addTrace("Refresh: the mouse goes over each of " + std::to_string(skills.size()) +
            " skills to read its MP cost off its tooltip (Win+Esc stops it)");
 }
 
@@ -2044,7 +2817,7 @@ void App::stopRefresh(const std::string& why) {
     }
     skillRefresher_ = SkillRefresher(); // Not running; it only moves the cursor, so nothing is held to let go.
     refreshAsked_ = 0;
-    addLog(why);
+    addTrace(why);
 }
 
 void App::driveRefresh() {
@@ -2106,11 +2879,11 @@ void App::driveRefresh() {
                 skill->mp = out.mp;
                 stateTree_.saveSkills(); // Into the profile at once (Ctrl+Z in the State tile undoes it).
             }
-            addLog(line);
+            addTrace(line);
         }
     }
     if (!out.log.empty()) {
-        addLog(out.log);
+        addTrace(out.log);
     }
 }
 
@@ -2139,12 +2912,19 @@ std::vector<WatchedThing> App::thingsShown() {
                 found = &snapped;
             }
         }
-        things.reserve(static_cast<std::size_t>(found->count));
-        for (int i = 0; i < found->count; ++i) {
-            const Tracked& thing = found->things[static_cast<std::size_t>(i)];
-            things.push_back({thing.id, {static_cast<int>(std::lround(thing.x)), static_cast<int>(std::lround(thing.y)),
-                                         static_cast<int>(std::lround(thing.x + thing.width)),
-                                         static_cast<int>(std::lround(thing.y + thing.height))}});
+        // Which is the own character (TargetWatch never takes it for a dead target).
+        const std::span<const Tracked> all(found->things.data(), static_cast<std::size_t>(found->count));
+        const std::vector<std::string>& kinds = recognizer_->kinds();
+        const auto ownAt = std::find(kinds.begin(), kinds.end(), "own");
+        const int ownKind = ownAt != kinds.end() ? static_cast<int>(ownAt - kinds.begin()) : -1;
+        const Tracked* self = ownCharacter(all, ownKind, static_cast<float>(pipeline_.width()));
+        things.reserve(all.size());
+        for (const Tracked& thing : all) {
+            things.push_back({thing.id,
+                              {static_cast<int>(std::lround(thing.x)), static_cast<int>(std::lround(thing.y)),
+                               static_cast<int>(std::lround(thing.x + thing.width)),
+                               static_cast<int>(std::lround(thing.y + thing.height))},
+                              &thing == self});
         }
     }
     return things;
@@ -2161,18 +2941,105 @@ void App::watchTarget(const GameStats& stats) {
     in.plate = stats.plate;
     in.things = things;
     const TargetWatch::Output out = targetWatch_.step(in);
+    // The target's box for Focus Camera: the watch's, kept while it looks for it again (it asks for a plate over
+    // each box in turn); none with no target, or once another (by name) is.
+    const std::string name = stats.target.data();
+    if (!stats.hasTarget) {
+        targetBox_ = 0;
+        targetBoxName_.clear();
+    } else if (out.target != 0) {
+        targetBox_ = out.target;
+        targetBoxName_ = name;
+    } else if (!name.empty() && !targetBoxName_.empty() && name != targetBoxName_) {
+        targetBox_ = 0;
+        targetBoxName_.clear();
+    }
     if (out.dead != 0 && recognizer_) {
         recognizer_->markDead(out.dead); // Shown dead from its next look on.
+    }
+    if (out.alive != 0 && recognizer_) {
+        recognizer_->unmarkDead(out.alive); // Not the corpse after all (its id went to a live one): as the model says.
     }
     if (out.dead != 0) {
         deadNow_ = out.dead; // Its drops are looked for round it (watchLoot).
         deadName_ = stats.target.data();
     }
+    if (out.died && brainActs_) {
+        ++brainTally_.kills; // A kill since the brain started (once per target: its HP bar read empty).
+    }
+    if (out.died) {
+        killQpc_ = stats.shownQpc; // Since Kill counts from this reading (brain acting or not).
+    }
     if (!out.log.empty()) {
-        addLog(out.log, stats.shownQpc);
+        addTrace(out.log, stats.shownQpc);
     }
     watchLook_ = out.look;
     sendLook();
+}
+
+bool App::ownShown(StatsArea& own, std::vector<StatsArea>* others) const {
+    if (!recognizer_ || recognizer_->state() != Recognizer::State::Running) {
+        return false;
+    }
+    const Found* found = &recognizer_->found();
+    if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
+        if (const Found& snapped = snapper_->found(); snapped.image > 0) {
+            found = &snapped;
+        }
+    }
+    const std::span<const Tracked> things(found->things.data(), static_cast<std::size_t>(found->count));
+    const std::vector<std::string>& kinds = recognizer_->kinds();
+    const auto ownAt = std::find(kinds.begin(), kinds.end(), "own");
+    const int ownKind = ownAt != kinds.end() ? static_cast<int>(ownAt - kinds.begin()) : -1;
+    const Tracked* self = ownCharacter(things, ownKind, static_cast<float>(pipeline_.width()));
+    const auto boxOf = [](const Tracked& thing) {
+        return StatsArea{static_cast<int>(std::lround(thing.x)), static_cast<int>(std::lround(thing.y)),
+                         static_cast<int>(std::lround(thing.x + thing.width)),
+                         static_cast<int>(std::lround(thing.y + thing.height))};
+    };
+    if (others != nullptr) {
+        for (const Tracked& thing : things) {
+            if (!thing.held && (self == nullptr || thing.id != self->id)) {
+                others->push_back(boxOf(thing));
+            }
+        }
+    }
+    if (self == nullptr) {
+        return false;
+    }
+    own = boxOf(*self);
+    return true;
+}
+
+const statetree::Task* App::lootTask() const {
+    // The branch of Root the current state is in: that child of Root and everything under it.
+    const statetree::State* state = brainActs_ ? stateTree_.currentState() : nullptr;
+    const statetree::Tree& tree = stateTree_.tree();
+    if (state == nullptr || state->id == tree.root()) {
+        return nullptr;
+    }
+    while (state->parent != tree.root()) {
+        const statetree::State* parent = tree.find(state->parent);
+        if (parent == nullptr) {
+            return nullptr;
+        }
+        state = parent;
+    }
+    std::vector<int> pending = {state->id};
+    while (!pending.empty()) {
+        const statetree::State* s = tree.find(pending.back());
+        pending.pop_back();
+        if (s == nullptr) {
+            continue;
+        }
+        for (const statetree::Task& task : s->tasks) {
+            if (task.kind == statetree::TaskKind::MoveToDrop) {
+                return &task;
+            }
+        }
+        pending.insert(pending.end(), s->children.rbegin(), s->children.rend());
+    }
+    return nullptr;
 }
 
 void App::watchLoot() {
@@ -2180,9 +3047,13 @@ void App::watchLoot() {
     if (!dropFinder_ || dropFinder_->state() == DropFinder::State::Failed || review_ || clipView_) {
         loot_ = {}; // Nothing looks meanwhile; the watch goes on when it can again.
         lootShown_.clear();
+        lootDrops_.clear();
+        dropsCounted_ = {};
         noteDropsInClip();
         return;
     }
+    // While the brain loots, the loot watch looks round the own feet too (the own character hides what lies there).
+    const statetree::Task* looting = lootTask();
     const std::vector<WatchedThing> things = thingsShown();
     // The game's interface (the UI finder's pieces): the cast bar and the minimap's arrow looked like drops to the
     // first drop model, and nothing on it lies on the ground.
@@ -2231,15 +3102,62 @@ void App::watchLoot() {
     in.things = things;
     in.close.drops = close;
     in.sweep.drops = sweep;
+    in.looting = looting != nullptr;
+    in.own = ownShown(in.ownBox, nullptr);
     loot_ = lootWatch_.step(in);
     dropFinder_->lookAt(loot_.square);
     if (loot_.drops == 0) {
         lootShown_.clear(); // The newest close look may be of an earlier spot until this one's first.
     }
     if (!loot_.log.empty()) {
-        addLog(loot_.log);
+        addTrace(loot_.log);
     }
     noteDropsInClip();
+
+    // Each drop shown measured by the camera on the image shown: how far it is from the own feet, and where it lies
+    // round them in the frame that does not turn with the camera (the mouse's counts, as the monster memory's); then
+    // counted for the brain (core/DropPick: the Drops and Drop Distance numbers, Move To Drop's drops).
+    lootDrops_.clear();
+    const GroundCamera camera = cameraShown();
+    const MouseCamera::View view = mouseCamera_ ? mouseCamera_->at(previewMs_) : MouseCamera::View{};
+    const double c = std::cos(view.turned);
+    const double s = std::sin(view.turned);
+    const RECT bounds = observed_ ? observed_->bounds : RECT{};
+    const double sx = static_cast<double>(bounds.right - bounds.left) / std::max(1u, pipeline_.width());
+    const double sy = static_cast<double>(bounds.bottom - bounds.top) / std::max(1u, pipeline_.height());
+    for (const Detection& drop : lootShown_) {
+        LootDrop seen;
+        seen.x = drop.x + drop.width * 0.5f;
+        seen.y = drop.y + drop.height * 0.5f;
+        seen.size = std::max(drop.width, drop.height);
+        seen.deskX = static_cast<int>(std::lround(bounds.left + seen.x * sx));
+        seen.deskY = static_cast<int>(std::lround(bounds.top + seen.y * sy));
+        if (camera.known) {
+            float footX = 0.0f;
+            float footY = 0.0f;
+            dropFoot(drop, footX, footY);
+            if (const std::optional<GroundSpot> spot = groundUnder(camera, nullptr, footX, footY);
+                spot && alongGround(*spot) <= kFarthestDistance) {
+                seen.distance = alongGround(*spot) * kGameUnits;
+                if (view.known) {
+                    seen.placed = true;
+                    seen.fixedX = static_cast<float>((spot->right * c + spot->away * s) * kGameUnits);
+                    seen.fixedY = static_cast<float>((-spot->right * s + spot->away * c) * kGameUnits);
+                }
+            }
+        }
+        lootDrops_.push_back(seen);
+    }
+    DropBook::Input book;
+    book.now = static_cast<double>(qpcNow()) / qpcFrequency();
+    book.look = lootImage_;
+    book.drops = lootDrops_;
+    book.looting = looting != nullptr;
+    book.reach = looting != nullptr ? looting->reach : 0;
+    dropsCounted_ = dropBook_.step(book);
+    if (!dropsCounted_.log.empty()) {
+        addTrace(dropsCounted_.log);
+    }
 }
 
 void App::noteDropsInClip() {
@@ -2263,12 +3181,22 @@ void App::noteDropsInClip() {
                               drawn ? std::span<const Detection>(lootShown_) : std::span<const Detection>());
 }
 
-void App::drawDrops(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
+void App::drawDrops(ImDrawList* drawList, ImVec2 min, ImVec2 max, const GroundCamera& camera,
+                    const GroundHeights* heights) {
     // Drops a close look found (one sweep look alone may be a look-alike: not drawn).
+    dropDistances_.clear();
     if (!dropFinder_ || dropFinder_->state() != DropFinder::State::Running || lootShown_.empty()) {
         return;
     }
-    drawLoot(drawList, fonts_.medium, min, max, static_cast<float>(pipeline_.width()), lootShown_, dpiScale_);
+    // How far each is from the own character.
+    dropDistances_.assign(lootShown_.size(), -1.0f);
+    for (std::size_t i = 0; i < lootShown_.size(); ++i) {
+        if (const std::optional<float> distance = dropDistance(camera, heights, lootShown_[i])) {
+            dropDistances_[i] = *distance * kGameUnits;
+        }
+    }
+    drawLoot(drawList, fonts_.medium, min, max, static_cast<float>(pipeline_.width()), lootShown_, dpiScale_,
+             dropDistances_, camera.pitchMeasured);
 }
 
 const GameStats* App::clipStatsShown(bool today) {
@@ -2285,15 +3213,16 @@ void App::noteGroundInClip() {
     if (!clipRecorder_ || previewQpc_ == 0) {
         return;
     }
-    // A line whenever it changes: drawn over a new image or from a new camera, or no longer drawn.
+    // A line whenever it changes: drawn over a new image, from a new camera or on a new terrain, or no longer drawn.
     const GroundDrawn& now = groundDrawn_;
     if (now.drawn == groundNoted_.drawn &&
-        (!now.drawn || (now.image == groundNoted_.image && now.followed == groundNoted_.followed))) {
+        (!now.drawn || (now.image == groundNoted_.image && now.followed == groundNoted_.followed &&
+                        now.heights == groundNoted_.heights))) {
         return;
     }
     groundNoted_ = now;
     clipRecorder_->grounded(previewQpc_, previewImage_, now.drawn ? now.followed : 0,
-                            now.drawn ? now.camera : GroundCamera{});
+                            now.drawn ? now.camera : GroundCamera{}, now.drawn ? now.heights : nullptr);
 }
 
 void App::noteDepthInClip() {
@@ -2620,7 +3549,8 @@ void App::drawFrame() {
         front->AddText(fonts_.medium, big, at, theme::kAccent, buf);
     }
     frameMeter_.lap(FrameStep::NewFrame);
-    actuateBrain(); // While acting: run the current state's tasks (drive the controller).
+    rememberMonsters(); // The newest look's monsters into the monster memory (the brain's Look Around, Select Target).
+    actuateBrain();     // While acting: run the current state's tasks (drive the controller).
     driveRefresh(); // While the Skills tab's Refresh runs: the cursor over the skills, their MP costs read.
     frameMeter_.lap(FrameStep::Acting);
     if (observed_) {
@@ -4163,26 +5093,13 @@ void App::drawObservedScreen() {
         }
     }
     // The ground under them too, as the camera is on the image shown (it follows fewer images: moved on to it).
-    GroundCamera shownCamera; // Unknown until the ground finder has followed an image.
+    const GroundCamera shownCamera = cameraShown(); // Unknown until the ground finder has followed an image.
     if (groundFollowing_ && groundFinder_->state() == GroundFinder::State::Running) {
         if (const GroundSeen& seen = groundFinder_->seen(); seen.image > 0) {
-            shownCamera = groundAt(seen.camera, previewMs_);
-            // Turned on and tilted as the mouse's counts say from the image followed to the one shown: exact on every
-            // frame, not along the follow's speeds.
-            if (mouseCamera_ && shownCamera.known) {
-                if (const MouseCamera::View now = mouseCamera_->at(previewMs_); now.known) {
-                    const MouseCamera::View then = mouseCamera_->at(seen.camera.timeMs);
-                    shownCamera.yaw = static_cast<float>(
-                        std::remainder(static_cast<double>(seen.camera.yaw) + now.turned - then.turned,
-                                       2.0 * 3.14159265358979323846));
-                    if (now.pitchKnown) {
-                        shownCamera.pitch = now.pitch;
-                    }
-                }
-            }
             if (settings_.showGround) {
-                groundDrawn_ = {true, previewImage_, seen.followed, shownCamera};
-                drawGround(drawList, min, max, static_cast<float>(pipeline_.width()), shownCamera, dpiScale_);
+                groundDrawn_ = {true, previewImage_, seen.followed, shownCamera, seen.heights};
+                drawGround(drawList, min, max, static_cast<float>(pipeline_.width()), shownCamera, seen.heights.get(),
+                           dpiScale_);
             }
         }
     }
@@ -4197,11 +5114,14 @@ void App::drawObservedScreen() {
         geodata_->draw(drawList, fonts_, min, max, static_cast<float>(pipeline_.width()),
                        static_cast<float>(pipeline_.height()), shownCamera, pieces, previewMs_, dpiScale_);
     }
+    // Their distances on the flat ground through the feet, not on the terrain (seen.heights): on the clip with the
+    // geodata's distances (2026-11-15_14-24-16) the flat ground was 19% off them (median), the terrain 28%
+    // (bench --distances, 2026-11-16).
     if (settings_.showCharacters && recognizer_ && recognizer_->state() == Recognizer::State::Running) {
-        drawFound(drawList, min, max);
+        drawFound(drawList, min, max, shownCamera, nullptr);
     }
     if (settings_.showDrops) {
-        drawDrops(drawList, min, max);
+        drawDrops(drawList, min, max, shownCamera, nullptr);
     }
 
     const float inset = 12.0f * dpiScale_;
@@ -4284,7 +5204,8 @@ void App::drawObservedScreen() {
     }
 }
 
-void App::drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
+void App::drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max, const GroundCamera& camera,
+                    const GroundHeights* heights) {
     // The snapper's boxes while it runs (on the newest image), else the recogniser's.
     const Found* found = &recognizer_->found();
     if (snapper_ && snapper_->state() == BoxSnapper::State::Running) {
@@ -4292,9 +5213,21 @@ void App::drawFound(ImDrawList* drawList, ImVec2 min, ImVec2 max) {
             found = &snapped;
         }
     }
-    drawThings(drawList, fonts_.medium, min, max, static_cast<float>(pipeline_.width()),
-               {found->things.data(), static_cast<std::size_t>(found->count)}, recognizer_->kinds(),
-               settings_.showKinds, dpiScale_);
+    const std::span<const Tracked> things(found->things.data(), static_cast<std::size_t>(found->count));
+    // How far each is from the own character (none for the own character itself).
+    const std::vector<std::string>& kinds = recognizer_->kinds();
+    const auto own = std::find(kinds.begin(), kinds.end(), "own");
+    const int ownKind = own != kinds.end() ? static_cast<int>(own - kinds.begin()) : -1;
+    thingDistances_.assign(things.size(), -1.0f);
+    for (std::size_t i = 0; i < things.size(); ++i) {
+        if (static_cast<int>(things[i].kind) != ownKind || ownKind < 0) {
+            if (const std::optional<float> distance = characterDistance(camera, heights, things[i])) {
+                thingDistances_[i] = *distance * kGameUnits;
+            }
+        }
+    }
+    drawThings(drawList, fonts_.medium, min, max, static_cast<float>(pipeline_.width()), things, kinds,
+               settings_.showKinds, dpiScale_, thingDistances_, camera.pitchMeasured);
 }
 
 void App::hintGround() {

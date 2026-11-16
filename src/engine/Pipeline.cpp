@@ -35,6 +35,7 @@ bool Pipeline::start(const Screen& screen) {
     try {
         const Screen own = findOnOwnAdapter(screen); // So the UI's device cannot hold up capture.
         gpu_ = createGpuDevice(own.adapter.Get());
+        setGpuPriority(gpu_.device.Get(), GpuPriority::Reaction);
         capture_ = std::make_unique<ScreenCapture>(gpu_.device.Get(), own.output.Get());
         preview_ = std::make_unique<ImageChannel>(gpu_.device.Get(), capture_->width(), capture_->height(),
                                                   ScreenCapture::kImageFormat);

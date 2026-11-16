@@ -40,6 +40,7 @@ DropFinder::DropFinder(IDXGIAdapter1* gpu, ImageChannel& channel, std::filesyste
       sweep_(lootTiles(static_cast<int>(width_), static_cast<int>(height_))) {
     adapter_ = findOwnAdapter(gpu); // An adapter object of its own: cannot hold up the others.
     gpu_ = createGpuDevice(adapter_.Get());
+    setGpuPriority(gpu_.device.Get(), GpuPriority::Background);
     reader_ = std::make_unique<ImageReader>(gpu_.device.Get(), channel);
     thread_ = std::jthread([this](std::stop_token stop) { run(stop); });
 }
@@ -72,8 +73,8 @@ void DropFinder::run(std::stop_token stop) {
 
     std::unique_ptr<Detector> detector;
     try {
-        detector = std::make_unique<Detector>(gpu_.device.Get(), adapter_.Get(), modelFolder_, width_, height_, stop,
-                                              progress_);
+        detector = std::make_unique<Detector>(gpu_.device.Get(), adapter_.Get(), modelFolder_, width_, height_,
+                                              GpuPriority::Background, stop, progress_);
     } catch (const std::exception& e) {
         if (!stop.stop_requested()) {
             fail(e.what());

@@ -1,0 +1,77 @@
+# observex: where the game's numbers sit in its interface (core/GameStats reads this; tools/ui/make_digits.py cuts the
+# glyphs). Screen pixels of the screen it was measured on (2560 x 1440, Lineage 2 Reborn, the user's UI scale), on the
+# pieces ui.txt finds (the status window, the target window, the cast bar, the hotbar). The lines read are shown in
+# their order (the gauges of core/GameStats).
+#
+# glyphs NAME CHARS PITCH W H [yellow]
+#   A font of fixed width: one W x H picture per character of CHARS, in that order, in NAME.pgm (their grey pixels,
+#   side by side) and NAME-mask.pgm (255 on the letter and the dark line round it, 0 where the bar shows through, so
+#   the bar's colour never counts). Each next character starts PITCH pixels on. "yellow": yellow letters over any
+#   picture (a cooldown's seconds), found by colour: NAME.pgm is the share of samples each pixel was yellow on.
+#   Indented "from IMAGE X Y TEXT" lines are for make_digits.py: TEXT is written on IMAGE (a recorded image, from the
+#   project folder, or a clip's frame: clip.mp4@FRAME) with its first character's picture at X Y; the pictures are the
+#   mean over all of them.
+# bar NAME PIECE FILL TOP BOTTOM LEFT RIGHT [text GLYPHS ROW FROM] [empty COLOUR]
+#   A bar in piece PIECE: rows TOP to just before BOTTOM, columns LEFT to just before RIGHT, from the piece's top left
+#   (a RIGHT below 1 from its right side, as the window may be resized). FILL is the colour of its filled part (red,
+#   blue or lilac); how full it is = where the first run of that colour from LEFT ends. "text" if a number is written
+#   on it in GLYPHS: the pictures' top row is ROW (a pixel up or down is looked at too), anywhere from column FROM on.
+#   "empty": the colour of its empty part past the fill's end (red, blue or grey: dark red, dark blue, grey; else
+#   dark). Where it is not that colour a window is over the bar, and how full it is is not said.
+# cast PIECE TOP BOTTOM LEFT RIGHT
+#   The cast bar (gauge "Casting"): how far its light blue fill's white head is, from column LEFT (0) to RIGHT (1), on
+#   rows TOP to just before BOTTOM; what is cast is the added skill whose cooldown began last.
+# skills PIECE GLYPHS
+#   The skills the user added (models/ui/skills/NAME.pgm, from the Stats tile's Add Skill), one gauge each, looked for
+#   among the miniatures in every piece PIECE: how much of the cooldown is left, and its seconds in GLYPHS (yellow).
+# words NAME PIECE TOP BOTTOM LEFT RIGHT
+#   White words on piece PIECE (gauge NAME), read by Windows' OCR once per new picture of them: the widest run of
+#   white in rows TOP to just before BOTTOM, columns LEFT to just before RIGHT (below 1: from the piece's right).
+# close PIECE TOP BOTTOM LEFT RIGHT
+#   The window's close button (a light X) on piece PIECE, rows TOP to just before BOTTOM, columns LEFT to just before
+#   RIGHT from the piece's right side (a few pixels either way are looked at). While it is not there, another window
+#   covers the piece's right end (the side found is that window's): its bars and words are not read.
+
+glyphs digits 0123456789/.% 10 14 15
+  from recordings/2026-11-10_00-31-08/000001.jpg 195 51 199/256
+  from recordings/2026-11-10_00-31-08/000001.jpg 195 67 105/105
+  from recordings/2026-11-10_00-31-08/000003.jpg 195 51 201/256
+  from recordings/2026-11-10_00-31-08/000004.jpg 195 51 203/256
+  from recordings/2026-11-10_00-31-08/000005.jpg 195 51 206/256
+  from recordings/2026-11-10_00-31-08/000006.jpg 195 51 208/256
+  from recordings/2026-11-10_00-31-08/000020.jpg 195 51 238/256
+  from recordings/2026-11-10_00-31-08/000020.jpg 192 84 26.64%
+  from recordings/2026-11-07_13-09-21/000040.jpg 195 51 238/238
+  from recordings/2026-11-07_13-09-21/000040.jpg 205 67 97/97
+  from recordings/clips/2026-11-12_17-43-14/picture.jpg 195 51 256/256
+  from recordings/clips/2026-11-12_17-43-14/picture.jpg 192 84 30.34%
+
+# The seconds on a skill cooling down (clip 2026-11-12_23-25-45: Wind Strike's 6 to 1).
+glyphs cooldown 123456 10 11 16 yellow
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@580 1035 1377 6
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@590 1035 1377 6
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@600 1035 1377 6
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@620 1035 1377 5
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@660 1035 1377 5
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@700 1035 1377 5
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@740 1035 1377 4
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@780 1035 1377 4
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@820 1035 1377 4
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@860 1035 1377 3
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@900 1035 1377 3
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@940 1035 1377 3
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@980 1035 1377 2
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@1010 1035 1377 2
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@1045 1035 1377 2
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@1100 1035 1377 1
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@1140 1035 1377 1
+  from recordings/clips/2026-11-12_23-25-45/clip.mp4@1180 1035 1377 1
+
+bar HP Status red 53 65 26 -12 text digits 51 66 empty red
+bar MP Status blue 69 81 26 -12 text digits 67 66 empty blue
+bar XP Status lilac 85 98 26 -12 text digits 84 56 empty grey
+cast Casting 9 26 14 283
+skills Hotbar cooldown
+bar HP Target red 32 40 24 -7
+words Name Target 5 22 44 -16
+close Target 13 23 -20 -9

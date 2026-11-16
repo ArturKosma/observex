@@ -4,6 +4,8 @@
 
 #include <compressapi.h>
 
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
@@ -225,6 +227,109 @@ std::vector<DepthRecord> readDepthFile(const std::filesystem::path& file, std::s
         records.push_back(std::move(record));
     }
     return records;
+}
+
+namespace {
+
+constexpr char kHeightsMagic[8] = {'o', 'x', 'h', 'e', 'i', 'g', 'h', '2'};
+// Until 2026-11-16 late morning: without the front.
+constexpr char kHeightsMagicFirst[8] = {'o', 'x', 'h', 'e', 'i', 'g', 'h', '1'};
+
+// GroundHeights' front camera's and cells' numbers, in the order heights.bin keeps them.
+template <typename Heights>
+auto frontFloats(Heights& heights) {
+    auto& camera = heights.frontCamera;
+    return std::array{&camera.pitch,   &camera.distance, &camera.focal, &camera.middleX,
+                      &camera.middleY, &camera.yaw,      &camera.feetX, &camera.feetY,
+                      &heights.frontFeetLevel, &heights.frontPerPixelX, &heights.frontPerPixelY};
+}
+
+} // namespace
+
+void writeHeightsFile(const std::filesystem::path& file, std::span<const GroundHeights* const> heights) {
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    out.write(kHeightsMagic, sizeof(kHeightsMagic));
+    const auto count = static_cast<std::uint32_t>(heights.size());
+    const auto cells = static_cast<std::uint32_t>(GroundHeights::kCells);
+    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    out.write(reinterpret_cast<const char*>(&cells), sizeof(cells));
+    for (const GroundHeights* one : heights) {
+        const std::uint8_t known = one->known ? 1 : 0;
+        out.write(reinterpret_cast<const char*>(&one->version), sizeof(one->version));
+        out.write(reinterpret_cast<const char*>(&known), sizeof(known));
+        out.write(reinterpret_cast<const char*>(&one->timeMs), sizeof(one->timeMs));
+        out.write(reinterpret_cast<const char*>(&one->firstX), sizeof(one->firstX));
+        out.write(reinterpret_cast<const char*>(&one->firstY), sizeof(one->firstY));
+        out.write(reinterpret_cast<const char*>(one->height.data()),
+                  static_cast<std::streamsize>(sizeof(float) * one->height.size()));
+        out.write(reinterpret_cast<const char*>(one->seen.data()), static_cast<std::streamsize>(one->seen.size()));
+        // What its newest map saw in front: the camera then (known or not), the cells' place, the cells.
+        const std::uint8_t frontKnown = one->frontCamera.known ? 1 : 0;
+        out.write(reinterpret_cast<const char*>(&frontKnown), sizeof(frontKnown));
+        for (const float* number : frontFloats(*one)) {
+            out.write(reinterpret_cast<const char*>(number), sizeof(float));
+        }
+        const std::int32_t size[2] = {one->frontColumns, one->frontRows};
+        out.write(reinterpret_cast<const char*>(size), sizeof(size));
+        out.write(reinterpret_cast<const char*>(one->front.data()),
+                  static_cast<std::streamsize>(static_cast<std::size_t>(std::max(size[0], 0)) *
+                                               static_cast<std::size_t>(std::max(size[1], 0))));
+    }
+    if (!out) {
+        throw std::runtime_error("cannot write " + file.filename().string());
+    }
+}
+
+std::vector<std::shared_ptr<const GroundHeights>> readHeightsFile(const std::filesystem::path& file) {
+    std::vector<std::shared_ptr<const GroundHeights>> heights;
+    std::ifstream in(file, std::ios::binary);
+    char magic[sizeof(kHeightsMagic)] = {};
+    std::uint32_t count = 0;
+    std::uint32_t cells = 0;
+    if (!in.read(magic, sizeof(magic)) ||
+        (std::memcmp(magic, kHeightsMagic, sizeof(kHeightsMagic)) != 0 &&
+         std::memcmp(magic, kHeightsMagicFirst, sizeof(kHeightsMagicFirst)) != 0) ||
+        !in.read(reinterpret_cast<char*>(&count), sizeof(count)) ||
+        !in.read(reinterpret_cast<char*>(&cells), sizeof(cells)) || cells != GroundHeights::kCells) {
+        return heights;
+    }
+    for (std::uint32_t i = 0; i < count; ++i) {
+        auto one = std::make_shared<GroundHeights>();
+        std::uint8_t known = 0;
+        if (!in.read(reinterpret_cast<char*>(&one->version), sizeof(one->version)) ||
+            !in.read(reinterpret_cast<char*>(&known), sizeof(known)) ||
+            !in.read(reinterpret_cast<char*>(&one->timeMs), sizeof(one->timeMs)) ||
+            !in.read(reinterpret_cast<char*>(&one->firstX), sizeof(one->firstX)) ||
+            !in.read(reinterpret_cast<char*>(&one->firstY), sizeof(one->firstY)) ||
+            !in.read(reinterpret_cast<char*>(one->height.data()),
+                     static_cast<std::streamsize>(sizeof(float) * one->height.size())) ||
+            !in.read(reinterpret_cast<char*>(one->seen.data()), static_cast<std::streamsize>(one->seen.size()))) {
+            break;
+        }
+        one->known = known != 0;
+        if (std::memcmp(magic, kHeightsMagic, sizeof(kHeightsMagic)) == 0) {
+            std::uint8_t frontKnown = 0;
+            std::int32_t size[2] = {};
+            bool read = static_cast<bool>(in.read(reinterpret_cast<char*>(&frontKnown), sizeof(frontKnown)));
+            for (float* number : frontFloats(*one)) {
+                read = read && in.read(reinterpret_cast<char*>(number), sizeof(float));
+            }
+            read = read && in.read(reinterpret_cast<char*>(size), sizeof(size)) && size[0] >= 0 && size[1] >= 0 &&
+                   size[0] <= GroundHeights::kFrontColumns && size[1] <= GroundHeights::kFrontRows &&
+                   in.read(reinterpret_cast<char*>(one->front.data()),
+                           static_cast<std::streamsize>(static_cast<std::size_t>(size[0]) *
+                                                        static_cast<std::size_t>(size[1])));
+            if (!read) {
+                break;
+            }
+            one->frontCamera.known = frontKnown != 0;
+            one->frontCamera.pitchMeasured = one->frontCamera.known;
+            one->frontColumns = size[0];
+            one->frontRows = size[1];
+        }
+        heights.push_back(std::move(one));
+    }
+    return heights;
 }
 
 } // namespace observex

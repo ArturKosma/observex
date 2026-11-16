@@ -47,6 +47,11 @@ namespace observex {
 //                            seen live): the camera drawn (core/Ground's GroundCamera, already moved on to the image:
 //                            groundAt), from the ground finder's camera on image FOLLOWED. KNOWN 0: nothing drawn from
 //                            then on (the flag off, the camera not known, or the live view not shown).
+//   heights IMAGE TIME TERRAIN
+//                            the terrain the Show flag Ground's grid lay on from screen image IMAGE on, which the
+//                            screen showed at TIME (since 2026-11-16, when the grid began to wrap onto the depth maps'
+//                            terrain: core/Ground's GroundHeights): the clip's heights.bin's TERRAIN-th (from 1,
+//                            engine/DepthStore). TERRAIN 0: flat from then on.
 //   depth IMAGE TIME MAP     the depth map the Show flag Depth drew over screen image IMAGE, which the screen showed at
 //                            TIME (since 2026-11-12, the user asked: a clip's Recorded shows the depth exactly as it
 //                            was seen live): the depth finder's map of screen image MAP, kept in the clip's depth.bin
@@ -114,6 +119,9 @@ void appendGround(std::string& out, unsigned long long image, double timeMs, uns
 bool readGround(std::string_view line, unsigned long long& image, double& timeMs, unsigned long long& followed,
                 GroundCamera& camera);
 
+void appendHeights(std::string& out, unsigned long long image, double timeMs, unsigned long long terrain);
+bool readHeights(std::string_view line, unsigned long long& image, double& timeMs, unsigned long long& terrain);
+
 void appendDepth(std::string& out, unsigned long long image, double timeMs, unsigned long long map);
 bool readDepth(std::string_view line, unsigned long long& image, double& timeMs, unsigned long long& map);
 
@@ -169,5 +177,8 @@ bool readNote(std::string_view line, double& timeMs, std::string& text);
 
 void appendLog(std::string& out, double timeMs, const LogLine& line);
 bool readLog(std::string_view line, double& timeMs, LogLine& out);
+// A line of observex's trace (what it did, kept out of the Log tab: App::addTrace), so a clip's text still says it:
+// "trace TIME WHEN  TEXT". Written only; nothing reads it back.
+void appendTrace(std::string& out, double timeMs, const LogLine& line);
 
 } // namespace observex

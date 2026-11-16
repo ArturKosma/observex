@@ -186,6 +186,19 @@ bool readGround(std::string_view line, unsigned long long& image, double& timeMs
     return true;
 }
 
+void appendHeights(std::string& out, unsigned long long image, double timeMs, unsigned long long terrain) {
+    appendf(out, "heights %llu %s %llu\n", image, ExactNumber(timeMs).text, terrain);
+}
+
+bool readHeights(std::string_view line, unsigned long long& image, double& timeMs, unsigned long long& terrain) {
+    std::string_view rest;
+    if (!after(line, "heights", rest)) {
+        return false;
+    }
+    std::istringstream words{std::string(rest)};
+    return static_cast<bool>(words >> image >> timeMs >> terrain);
+}
+
 void appendDepth(std::string& out, unsigned long long image, double timeMs, unsigned long long map) {
     appendf(out, "depth %llu %s %llu\n", image, ExactNumber(timeMs).text, map);
 }
@@ -396,6 +409,11 @@ bool readNote(std::string_view line, double& timeMs, std::string& text) {
 
 void appendLog(std::string& out, double timeMs, const LogLine& line) {
     appendf(out, "log %.1f ", timeMs);
+    appendLogLine(out, line);
+}
+
+void appendTrace(std::string& out, double timeMs, const LogLine& line) {
+    appendf(out, "trace %.1f ", timeMs);
     appendLogLine(out, line);
 }
 

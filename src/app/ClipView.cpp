@@ -240,6 +240,7 @@ void ClipView::update() {
     if (ground_ && ground_->state() != ClipGround::State::Working) {
         if (ground_->state() == ClipGround::State::Done) {
             groundCameras_ = ground_->cameras();
+            groundHeights_ = ground_->heights();
             todayCameras_ = ground_->mouseCameras();
         } else {
             groundError_ = "Could not follow the ground over the video: " + ground_->error();
@@ -431,6 +432,18 @@ std::string ClipView::depthProblem() const {
         return depthing_ ? depthTodayError_ : std::string("No shading of depth to shade it with.");
     }
     return {};
+}
+
+const GroundHeights* ClipView::recordedHeightsAt(double timeMs) {
+    const unsigned long long terrain = recordedHeights(text_->heights, timeMs);
+    if (terrain == 0) {
+        return nullptr;
+    }
+    if (!recordedHeightsRead_) {
+        recordedHeightsRead_ = true; // Once (about 16 MB for a 10 s clip).
+        recordedHeights_ = readHeightsFile(folder_ / kClipHeights);
+    }
+    return terrain <= recordedHeights_.size() ? recordedHeights_[terrain - 1].get() : nullptr;
 }
 
 void ClipView::loadDepth() {
@@ -727,10 +740,11 @@ void ClipView::draw(const theme::Fonts& fonts, bool showCharacters, bool showKin
     if (showGround && frame_ > 0) {
         if (guesser_ == Guesser::Recorded) {
             drawGround(drawList, min, max, static_cast<float>(image_->width()),
-                       recordedGround(text_->grounds, frameMs(frame_)), dpiScale);
+                       recordedGround(text_->grounds, frameMs(frame_)), recordedHeightsAt(frameMs(frame_)), dpiScale);
         } else if (!groundCameras_.empty()) {
             drawGround(drawList, min, max, static_cast<float>(image_->width()),
-                       groundAmong(groundCameras_, frameMs(frame_)), dpiScale);
+                       groundAmong(groundCameras_, frameMs(frame_)), heightsAmong(groundHeights_, frameMs(frame_)),
+                       dpiScale);
         }
     }
 

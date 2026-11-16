@@ -317,7 +317,7 @@ std::optional<float> GroundMotion::findFarPitch(const GreyView& image, const Gro
 }
 
 int GroundMotion::find(const GreyView& image, const GroundCamera& camera, double timeMs, std::optional<float> turn,
-                       std::vector<GroundMatch>& out) {
+                       bool zoomHeld, std::vector<GroundMatch>& out) {
     out.clear();
     searched_ = {};
     searchMatch_ = 0.0f;
@@ -409,6 +409,9 @@ int GroundMotion::find(const GreyView& image, const GroundCamera& camera, double
               });
     };
     const auto tryZooms = [&](float reach, float step) {
+        if (zoomHeld) { // The wheel watched: the camera is as far as its notches took it.
+            return;
+        }
         const Motion around = best;
         steps(around.zoom - reach, around.zoom + reach, step, [&](float zoom) {
             Motion motion = around;
@@ -423,7 +426,7 @@ int GroundMotion::find(const GreyView& image, const GroundCamera& camera, double
     still.slideRight = 0.0f;
     still.slideAway = 0.0f;
     still.secondPitch = still.firstPitch;
-    still.zoom = 0.0f;
+    still.zoom = zoomHeld ? best.zoom : 0.0f; // Held: as far as the wheel's notches took it.
     consider(still);
     // The turn, the tilt, then the turn again: a tilt taken for a turn is not found again from there unless the turn
     // is searched again after it (clip 2026-11-12_15-50-36, tilted from level to straight down: held at 6 degrees,
@@ -642,8 +645,12 @@ void GroundFollower::byMouse() {
 void GroundFollower::begin(double timeMs, int width, int height, const GroundHints& hints) {
     timeMs_ = timeMs;
     mouse_ = mouseOf(hints);
+    fit_.wheel(hints.wheelWatched, hints.wheelNotches, timeMs);
     if (hints.hasOwn) {
-        fit_.own(hints.ownTop, hints.ownBottom, static_cast<float>(width), static_cast<float>(height), timeMs);
+        const bool feetSeen = !ownFeetHidden(hints.ownTop, hints.ownBottom, static_cast<float>(width) * 0.5f,
+                                             spanOf(hints.windows, hints.windowCount));
+        fit_.own(hints.ownTop, hints.ownBottom, static_cast<float>(width), static_cast<float>(height), timeMs,
+                 feetSeen);
     } else {
         fit_.unseen(timeMs);
     }
@@ -694,6 +701,8 @@ GroundNote GroundFollower::note() const {
     note.turnSpread = lastPair_.spread;
     note.turnHoldSpread = hold_.holds() ? hold_.spread() : 0.0f;
     note.turnMs = lastTurnsMs_;
+    note.zoomHeld = fit_.heldDistance().has_value();
+    note.zoomSamples = fit_.zoom().samples();
     return note;
 }
 
@@ -723,7 +732,7 @@ bool GroundFollower::end(const GreyView& image) {
         turn = static_cast<float>(std::remainder(mouse_.turned - learnedMouse_.turned, 2.0 * static_cast<double>(kPi)));
     }
     if (followed_) {
-        motion_.find(image, fit_.camera(), timeMs_, turn, matches_);
+        motion_.find(image, fit_.camera(), timeMs_, turn, fit_.heldDistance().has_value(), matches_);
         const bool pitchHeld = hold_.holds() || (depthTaken_ && timeMs_ - depthSaidMs_ < kDepthHeldMs &&
                                                  depthWeight_ >= kDepthHeldWeight);
         GroundFit::Start found{motion_.searchFirstPitch(),    motion_.searchPitch(),
@@ -828,6 +837,7 @@ void GroundFollower::followTurns(const GreyView& image) {
 int GroundFollower::headAreas(double timeMs, const GroundHints& hints, GreyArea* out, int max) {
     headMs_ = timeMs;
     mouse_ = mouseOf(hints);
+    fit_.wheel(hints.wheelWatched, hints.wheelNotches, timeMs); // Zoomed on the frame the game shows it.
     return cone_.areas(timeMs, spanOf(hints.windows, hints.windowCount), out, max);
 }
 
@@ -898,6 +908,9 @@ GroundDepthNote GroundFollower::depth(const DepthInput& map, double timeMs) {
     if (!camera.known) {
         return note;
     }
+    if (const GroundCamera then = cameraAt(timeMs); then.known) {
+        terrain_.take(map, timeMs, then, avoid_, note);
+    }
     const DepthLine line = measureDepthLine(map, avoid_);
     if (!line.known) {
         return note;
@@ -952,7 +965,7 @@ void GroundFollower::tiltAll(float by) {
         betweenCamera_.pitch += by;
     }
     for (Pitched& kept : pitched_) {
-        kept.pitch += by;
+        kept.camera.pitch += by;
     }
 }
 
@@ -963,9 +976,12 @@ void GroundFollower::notePitch(double timeMs) {
         pitchedNext_ = 0;
         depthTaken_ = false;
         depthLeft_ = 0.0f;
+        if (terrain_.heights().known) {
+            terrain_.clear(); // Found again, the ground's map begins anew.
+        }
         return;
     }
-    pitched_[static_cast<std::size_t>((pitchedNext_ + pitchedCount_) % kPitched)] = {timeMs, camera.pitch};
+    pitched_[static_cast<std::size_t>((pitchedNext_ + pitchedCount_) % kPitched)] = {timeMs, camera};
     if (pitchedCount_ < kPitched) {
         ++pitchedCount_;
     } else {
@@ -989,10 +1005,51 @@ std::optional<float> GroundFollower::pitchAt(double timeMs) const {
         if (timeMs <= after.timeMs) {
             const double gap = after.timeMs - before.timeMs;
             const double share = gap > 0.0 ? (timeMs - before.timeMs) / gap : 1.0;
-            return before.pitch + static_cast<float>(share) * (after.pitch - before.pitch);
+            return before.camera.pitch + static_cast<float>(share) * (after.camera.pitch - before.camera.pitch);
         }
     }
-    return at(pitchedCount_ - 1).pitch; // Newer than all kept: as on the newest.
+    return at(pitchedCount_ - 1).camera.pitch; // Newer than all kept: as on the newest.
+}
+
+GroundCamera GroundFollower::cameraAt(double timeMs) const {
+    if (pitchedCount_ == 0) {
+        return {};
+    }
+    const auto at = [&](int i) -> const Pitched& {
+        return pitched_[static_cast<std::size_t>((pitchedNext_ + i) % kPitched)];
+    };
+    if (timeMs < at(0).timeMs) {
+        return {};
+    }
+    for (int i = 1; i < pitchedCount_; ++i) {
+        const Pitched& before = at(i - 1);
+        const Pitched& after = at(i);
+        if (timeMs <= after.timeMs) {
+            const double gap = after.timeMs - before.timeMs;
+            const auto share = static_cast<float>(gap > 0.0 ? (timeMs - before.timeMs) / gap : 1.0);
+            const auto mix = [share](float a, float b) { return a + share * (b - a); };
+            GroundCamera camera = after.camera;
+            camera.timeMs = timeMs;
+            camera.pitch = mix(before.camera.pitch, after.camera.pitch);
+            camera.distance = mix(before.camera.distance, after.camera.distance);
+            camera.yaw = before.camera.yaw +
+                         share * std::remainder(after.camera.yaw - before.camera.yaw, 2.0f * 3.14159265f);
+            camera.feetX = mix(before.camera.feetX, after.camera.feetX);
+            camera.feetY = mix(before.camera.feetY, after.camera.feetY);
+            return camera;
+        }
+    }
+    GroundCamera newest = at(pitchedCount_ - 1).camera; // Newer than all kept: as on the newest.
+    newest.timeMs = timeMs;
+    return newest;
+}
+
+bool GroundFollower::heights(std::uint64_t version, GroundHeights& out) const {
+    if (terrain_.heights().version == version) {
+        return false;
+    }
+    out = terrain_.heights();
+    return true;
 }
 
 void GroundFollower::noteCone(bool seen, double timeMs) {
@@ -1027,7 +1084,7 @@ float GroundFollower::coneTurn(const GroundCamera& followed) const {
 
 void GroundFollower::clear() {
     motion_.clear();
-    fit_.reset();
+    fit_.forget();
     cone_.clear();
     coneAreaCount_ = 0;
     learnedHeaded_ = false;
@@ -1043,6 +1100,7 @@ void GroundFollower::clear() {
     depthTaken_ = false;
     depthLeft_ = 0.0f;
     depthMs_ = 0.0;
+    terrain_.clear();
     lostSinceMs_ = -1.0;
     followed_ = false;
     fitted_ = false;

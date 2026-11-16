@@ -34,30 +34,42 @@ endif()
 # zoom and kind learning, recording files, the live log's look lines and a clip's lines and guesses, what the
 # heuristics take and give, the mirror test). Unit tested.
 add_library(observex_core STATIC
+    src/core/Attacker.cpp
     src/core/BoxLearner.cpp
+    src/core/CameraFocus.cpp
+    src/core/CameraTurn.cpp
     src/core/ClipGuesses.cpp
     src/core/ClipLines.cpp
+    src/core/CloseUp.cpp
     src/core/Costs.cpp
     src/core/Depth.cpp
+    src/core/Distances.cpp
+    src/core/DropPick.cpp
     src/core/Features.cpp
+    src/core/Flee.cpp
     src/core/GameStats.cpp
     src/core/Geodata.cpp
     src/core/Ground.cpp
+    src/core/HpWatch.cpp
     src/core/ImageView.cpp
     src/core/KindLearner.cpp
     src/core/LiveLines.cpp
+    src/core/LookAround.cpp
     src/core/MouseCamera.cpp
     src/core/Log.cpp
     src/core/LootWatch.cpp
     src/core/Marks.cpp
     src/core/Mirror.cpp
     src/core/ModelInfo.cpp
+    src/core/MonsterMemory.cpp
     src/core/Recordings.cpp
     src/core/ReviewHistory.cpp
     src/core/ReviewLines.cpp
     src/core/SkillRefresh.cpp
     src/core/SkillUse.cpp
+    src/core/StateClipboard.cpp
     src/core/StateTree.cpp
+    src/core/TargetHitWatch.cpp
     src/core/TargetSelect.cpp
     src/core/TargetWatch.cpp
     src/core/Tiles.cpp
@@ -74,14 +86,17 @@ target_link_libraries(observex_core PRIVATE observex_warnings)
 # runs. Unit tested (the tracker).
 add_library(observex_rules STATIC
     src/heuristics/DepthRules.cpp
+    src/heuristics/DepthTerrain.cpp
     src/heuristics/DepthTilt.cpp
     src/heuristics/GroundMotion.cpp
     src/heuristics/KeyLabels.cpp
     src/heuristics/LocationReader.cpp
+    src/heuristics/MessageLines.cpp
     src/heuristics/Miniatures.cpp
     src/heuristics/MinimapCone.cpp
     src/heuristics/MinimapScroll.cpp
     src/heuristics/NamePlate.cpp
+    src/heuristics/PickupReader.cpp
     src/heuristics/Rules.cpp
     src/heuristics/SnapRules.cpp
     src/heuristics/Snapper.cpp
@@ -187,7 +202,8 @@ endif()
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT observex)
 
 # Bench: measures the pipeline from a console, without the app window (see bench/Bench.cpp).
-add_executable(observex_bench bench/Bench.cpp bench/DepthBench.cpp bench/GeodataBench.cpp bench/StatsBench.cpp bench/TurnsBench.cpp)
+add_executable(observex_bench bench/Bench.cpp bench/DepthBench.cpp bench/DistanceBench.cpp bench/GeodataBench.cpp
+                              bench/StatsBench.cpp bench/TurnsBench.cpp)
 target_link_libraries(observex_bench PRIVATE observex_engine dwmapi observex_warnings)
 add_dependencies(observex_bench observex_heuristics) # For --heuristics.
 
@@ -208,25 +224,36 @@ endif()
 if(OBSERVEX_BUILD_TESTS)
     enable_testing()
     add_executable(observex_tests
+        tests/AttackerTests.cpp
         tests/BoxLearnerTests.cpp
+        tests/CameraFocusTests.cpp
         tests/ClipGuessesTests.cpp
         tests/ClipLinesTests.cpp
+        tests/CloseUpTests.cpp
         tests/CostsTests.cpp
+        tests/DepthTerrainTests.cpp
         tests/DepthTests.cpp
+        tests/DistancesTests.cpp
+        tests/DropPickTests.cpp
         tests/FeaturesTests.cpp
+        tests/FleeTests.cpp
         tests/GameStatsTests.cpp
         tests/GeodataTests.cpp
         tests/GroundTests.cpp
+        tests/HpWatchTests.cpp
         tests/ImageViewTests.cpp
         tests/KeyLabelsTests.cpp
         tests/KindLearnerTests.cpp
         tests/LiveLinesTests.cpp
         tests/LogTests.cpp
+        tests/LookAroundTests.cpp
         tests/LootWatchTests.cpp
         tests/MarksTests.cpp
         tests/MirrorTests.cpp
+        tests/MonsterMemoryTests.cpp
         tests/MouseCameraTests.cpp
         tests/ModelInfoTests.cpp
+        tests/PickupTests.cpp
         tests/QuestionTests.cpp
         tests/RecordingsTests.cpp
         tests/ReviewHistoryTests.cpp
@@ -237,7 +264,9 @@ if(OBSERVEX_BUILD_TESTS)
         tests/StatWindowTests.cpp
         tests/SnapRulesTests.cpp
         tests/SnapperTests.cpp
+        tests/StateClipboardTests.cpp
         tests/StateTreeTests.cpp
+        tests/TargetHitWatchTests.cpp
         tests/TargetSelectTests.cpp
         tests/TargetWatchTests.cpp
         tests/TilesTests.cpp

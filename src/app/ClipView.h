@@ -237,6 +237,12 @@ private:
     std::unique_ptr<Grounding> grounding_; // What follows it next (today's heuristics').
     std::unique_ptr<ClipGround> ground_;   // Following it; null once taken.
     std::vector<GroundCamera> groundCameras_;
+    std::vector<ClipHeights> groundHeights_; // Today's terrain (ClipGround::heights).
+    // Recorded's: heights.bin, read the first time the grid is drawn on a terrain, in the heights lines' numbering.
+    std::vector<std::shared_ptr<const GroundHeights>> recordedHeights_;
+    bool recordedHeightsRead_ = false;
+    // The terrain Recorded's grid lay on at `timeMs` (null: flat).
+    const GroundHeights* recordedHeightsAt(double timeMs);
     std::vector<ClipCameraLine> todayCameras_; // The Camera card on each frame, by the same following.
     std::string groundError_;
     // The depth maps the app drew live (depth.bin), read the first time the flag Depth asks, in image order.

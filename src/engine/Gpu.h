@@ -4,6 +4,7 @@
 #include <dxgi1_5.h>
 #include <wrl/client.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -53,5 +54,23 @@ ComPtr<IDXGIAdapter1> findOwnAdapter(IDXGIAdapter1* gpu);
 // the device also works with the GPU's video decoder (Media Foundation; D3D11_CREATE_DEVICE_VIDEO_SUPPORT) and is
 // safe to use from Media Foundation's threads too (multithread protected).
 GpuDevice createGpuDevice(IDXGIAdapter* adapter, bool video = false);
+
+// How eagerly the GPU takes a part's work when it competes with other work (observex's other parts, the game, a
+// training run). The reaction path (capture, the recogniser, the snapper) goes first, the drop finder yields, the rest
+// is any program's (the depth finder too: it reads its shared image in place, so lowering it could hold up capture).
+// Only the order the GPU takes work in changes, never what it computes. (The user asked, 2026-11-16: the Debug tab
+// showed the character network at 11 ms, waiting behind the drop network that had the same top priority, while a
+// training run kept the GPU 99% busy.)
+enum class GpuPriority : std::uint8_t { Reaction, Normal, Background };
+
+// Gives `device`'s work `priority` on the GPU (IDXGIDevice::SetGPUThreadPriority): Reaction +7, Background -7, Normal
+// left as made (0). False if Windows refused it (the device keeps priority 0); never throws.
+bool setGpuPriority(ID3D11Device* device, GpuPriority priority);
+
+// Whether priorities are given at all (default on). Off, setGpuPriority leaves every device at 0 and every Detector
+// takes the top CUDA priority, as before 2026-11-16: observex_bench --no-gpu-priority, to compare. Set it before any
+// part starts.
+void useGpuPriorities(bool on);
+bool gpuPrioritiesUsed();
 
 } // namespace observex

@@ -194,6 +194,14 @@ bool groundDepth(void* ground, const observex::DepthInput* map, double timeMs, o
     }
 }
 
+int groundHeights(void* ground, std::uint64_t version, observex::GroundHeights* out) {
+    try {
+        return static_cast<observex::GroundFollower*>(ground)->heights(version, *out) ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
 } // namespace
 
 extern "C" __declspec(dllexport) const ObservexHeuristicsApi* observexHeuristics() {
@@ -234,6 +242,8 @@ extern "C" __declspec(dllexport) const ObservexHeuristicsApi* observexHeuristics
                                            groundHead,
                                            static_cast<std::uint32_t>(sizeof(observex::DepthInput)),
                                            static_cast<std::uint32_t>(sizeof(observex::GroundDepthNote)),
-                                           groundDepth};
+                                           groundDepth,
+                                           static_cast<std::uint32_t>(sizeof(observex::GroundHeights)),
+                                           groundHeights};
     return &api;
 }

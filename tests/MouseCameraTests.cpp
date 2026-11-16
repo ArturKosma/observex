@@ -229,3 +229,40 @@ TEST_CASE("mouse camera: the cursor put in the middle and moved on by the same r
     }
     CHECK(dragged.at(1000.0).turnUnits == 0);
 }
+
+TEST_CASE("mouse camera: the wheel's notches the game has taken by a frame") {
+    constexpr double kLag = MouseCamera::kWheelLagMs;
+    MouseCamera camera;
+    camera.middle(1280, 720);
+    CHECK_FALSE(camera.at(0.0).known); // Nothing came yet.
+    camera.add(report(10.0, 3, 0, 0));
+    CHECK(camera.at(20.0).known);
+    CHECK(camera.at(20.0).wheelNotches == 0.0); // Watched, never turned.
+    ClipMouse notch = report(30.0, 0, 0, 0);
+    notch.wheel = 120; // One notch away from the user: out.
+    camera.add(notch);
+    camera.add(report(40.0, 2, 0, 0));
+    CHECK(camera.at(1000.0).wheelNotches == doctest::Approx(1.0));
+    CHECK(camera.at(30.0 + kLag - 1.0).wheelNotches == 0.0); // The game shows it only kWheelLagMs on.
+    CHECK(camera.at(30.0 + kLag).wheelNotches == doctest::Approx(1.0));
+    notch.timeMs = 50.0;
+    notch.wheel = -240; // Two in.
+    camera.add(notch);
+    CHECK(camera.at(1000.0).wheelNotches == doctest::Approx(-1.0));
+    CHECK(camera.at(45.0 + kLag).wheelNotches == doctest::Approx(1.0));
+    GroundHints hints;
+    mouseHints(camera.at(1000.0), hints);
+    CHECK(hints.wheelWatched);
+    CHECK(hints.wheelNotches == doctest::Approx(-1.0));
+    // Reports no longer kept still count (summed into the oldest kept).
+    MouseCamera::Settings settings;
+    settings.keepMs = 100.0;
+    MouseCamera brief(settings);
+    ClipMouse spun = report(0.0, 0, 0, 0);
+    spun.wheel = 120;
+    for (int i = 0; i < 10; ++i) {
+        spun.timeMs = 50.0 * i;
+        brief.add(spun);
+    }
+    CHECK(brief.at(1000.0).wheelNotches == doctest::Approx(10.0));
+}

@@ -101,10 +101,14 @@ public:
     void note(std::string_view text);
     // A line of observex's log (core/Log) made at `qpc` (now or a moment before), for the clip's text. UI thread.
     void logged(std::int64_t qpc, const LogLine& line);
+    // A line of observex's trace (App::addTrace: what it did, not shown in the Log tab), the same way. UI thread.
+    void traced(std::int64_t qpc, const LogLine& line);
     // UI thread, whenever what the Show flag Ground draws changes: the grid `drawn` over screen image `image` (shown at
-    // `shownQpc`), from the ground finder's camera on image `followed`; `drawn` not known: nothing drawn from then on.
-    // So a clip's Recorded shows the grid exactly as it was seen (core/ClipLines' ground line).
-    void grounded(std::int64_t shownQpc, std::uint64_t image, std::uint64_t followed, const GroundCamera& drawn);
+    // `shownQpc`), from the ground finder's camera on image `followed`, on the terrain `heights` (null: flat);
+    // `drawn` not known: nothing drawn from then on. So a clip's Recorded shows the grid exactly as it was seen
+    // (core/ClipLines' ground line, and a heights line whenever the terrain changes: heights.bin).
+    void grounded(std::int64_t shownQpc, std::uint64_t image, std::uint64_t followed, const GroundCamera& drawn,
+                  std::shared_ptr<const GroundHeights> heights = nullptr);
     // For the depth finder's thread (engine/DepthFinder), after each map: the map, packed, and how it was shown.
     void depthed(std::shared_ptr<const DepthRecord> record);
     // UI thread, whenever the depth map the Show flag Depth draws changes: map `map` (DepthRecord::image) drawn over
